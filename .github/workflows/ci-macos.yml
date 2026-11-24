@@ -189,7 +189,7 @@ jobs:
           SAFARIUM_PROBES: "0"
           SAFARIUM_PROBE_SCRATCH: /tmp/safarium-ci-scratch/probes
         run: |
-          xcrun swift test --no-parallel --jobs 2 --scratch-path "$CI_BUILD_ROOT"
+          script -q /dev/null xcrun swift test --no-parallel --jobs 2 --scratch-path "$CI_BUILD_ROOT" < /dev/null
 
       - name: Install release into isolated prefix & test unified CLI + Queue + Rule-Sync + SDKs
         run: |
@@ -219,7 +219,7 @@ jobs:
           if command -v node >/dev/null 2>&1; then
             SAFARIUM_RENDER_BIN="$CI_PREFIX/bin/safarium-render" node sdk/node/safarium-forge.mjs --self-test
           fi
-          /bin/sh sdk/shell/safarium-forge.sh --help >/dev/null
+          SAFARIUM_RENDER_BIN="$CI_PREFIX/bin/safarium-render" /bin/sh sdk/shell/safarium-forge.sh --help >/dev/null
 
           REAL_SCRATCH="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' /tmp/safarium-ci-scratch)"
           /usr/bin/python3 -ISB Tests/queue/test_queue.py --scratch "$REAL_SCRATCH" -v

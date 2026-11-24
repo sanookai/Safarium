@@ -74,17 +74,41 @@ final class SubtitleWriterTests: XCTestCase {
         let page = try await Page(config: PageConfig(width: 320, height: 180))
         try await page.load(.html("<body style='margin:0;background:#123456'></body>"))
         let snap = try await page.snapshot()
+        func waitReady(_ input: AVAssetWriterInput, label: String) async throws {
+            let deadline = Date().addingTimeInterval(15)
+            while !input.isReadyForMoreMediaData {
+                if writer.status == .failed || writer.status == .cancelled {
+                    XCTFail("\(label) writer failed: \(writer.error?.localizedDescription ?? "status=\(writer.status.rawValue)")")
+                    throw writer.error ?? SafariumError.encode("\(label) writer stopped")
+                }
+                if Date() >= deadline {
+                    XCTFail("\(label) timed out waiting for isReadyForMoreMediaData")
+                    throw SafariumError.timeout(label)
+                }
+                try await Task.sleep(nanoseconds: 500_000)
+            }
+        }
+
+        // Interleave subtitle and video samples chronologically so multi-track AVAssetWriter cannot backpressure on macOS 15.
+        var sampleIdx = 0
         for f in 0..<60 {
-            while !vi.isReadyForMoreMediaData { try await Task.sleep(nanoseconds: 500_000) }
+            let framePTS = CMTime(value: Int64(f), timescale: 30)
+            while sampleIdx < samples.count && CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(samples[sampleIdx]), framePTS) <= 0 {
+                try await waitReady(si, label: "si[\(sampleIdx)]")
+                XCTAssertTrue(si.append(samples[sampleIdx]))
+                sampleIdx += 1
+            }
+            try await waitReady(vi, label: "vi[\(f)]")
             var pb: CVPixelBuffer?
             CVPixelBufferPoolCreatePixelBuffer(nil, adaptor.pixelBufferPool!, &pb)
             try snap.draw(into: pb!, width: 320, height: 180)
-            XCTAssertTrue(adaptor.append(pb!, withPresentationTime: CMTime(value: Int64(f), timescale: 30)))
+            XCTAssertTrue(adaptor.append(pb!, withPresentationTime: framePTS))
         }
         vi.markAsFinished()
-        for s in samples {
-            while !si.isReadyForMoreMediaData { try await Task.sleep(nanoseconds: 500_000) }
-            XCTAssertTrue(si.append(s))
+        while sampleIdx < samples.count {
+            try await waitReady(si, label: "si[\(sampleIdx)]")
+            XCTAssertTrue(si.append(samples[sampleIdx]))
+            sampleIdx += 1
         }
         si.markAsFinished()
         writer.endSession(atSourceTime: duration)

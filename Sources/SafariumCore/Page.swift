@@ -308,15 +308,19 @@ public final class Page {
     private func capture(_ rect: CGRect, pixelWidth: Int, outW: Int, outH: Int) async throws -> CGImage {
         for attempt in 0..<2 {
             let backing = backingScale ?? (NSScreen.main?.backingScaleFactor ?? 2)
-            let c = WKSnapshotConfiguration()
-            c.rect = rect
-            c.snapshotWidth = NSNumber(value: Double(pixelWidth) / backing)
-            c.afterScreenUpdates = true
-            let image: NSImage
-            do { image = try await webView.takeSnapshot(configuration: c) }
-            catch { throw SafariumError.snapshot(error.localizedDescription) }
-            guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-                throw SafariumError.snapshot("no CGImage")
+            let cfgWidth = Double(pixelWidth) / backing
+            let cg = try await withTimeout(30, what: "snapshot") { [self] in
+                let c = WKSnapshotConfiguration()
+                c.rect = rect
+                c.snapshotWidth = NSNumber(value: cfgWidth)
+                c.afterScreenUpdates = true
+                let image: NSImage
+                do { image = try await self.webView.takeSnapshot(configuration: c) }
+                catch { throw SafariumError.snapshot(error.localizedDescription) }
+                guard let raw = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+                    throw SafariumError.snapshot("no CGImage")
+                }
+                return raw
             }
             if cg.width != pixelWidth && attempt == 0 {
                 backingScale = Double(cg.width) / (Double(pixelWidth) / backing)   // recalibrate, retry once
