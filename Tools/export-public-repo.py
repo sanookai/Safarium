@@ -289,7 +289,7 @@ def _sanitize_mac_default_targets(text: str) -> str:
 
 
 SANITIZERS: dict[str, Callable[[str], str]] = {
-    "Sources/safarium-forge/main.swift": _sanitize_swift_forge_main,
+    "Sources/safarium-forge/ForgeCLI.swift": _sanitize_swift_forge_main,
     "Sources/SafariumForgeCore/APFSAutoStage.swift": _sanitize_apfs_autostage,
     "bin/safarium-render": _sanitize_bin_render,
     "Tests/SafariumContainersTests/LegacyContainerVorbisTests.swift": _sanitize_legacy_vorbis_tests,
