@@ -193,6 +193,17 @@ jobs:
 
       - name: Install release into isolated prefix & test unified CLI + Queue + Rule-Sync + SDKs
         run: |
+          BUNDLE_DIR="$RELEASE_BIN/Safarium_SafariumCore.bundle"
+          find "$BUNDLE_DIR" -maxdepth 4 -ls
+          if [ ! -f "$BUNDLE_DIR/Contents/Resources/clock.js" ]; then
+            CLOCK_SRC="$(find "$BUNDLE_DIR" -name 'clock.js' -type f | head -n 1)"
+            test -n "$CLOCK_SRC"
+            mkdir -p "$BUNDLE_DIR/Contents/Resources"
+            mv -f "$CLOCK_SRC" "$BUNDLE_DIR/Contents/Resources/clock.js"
+            if [ -f "$BUNDLE_DIR/Info.plist" ] && [ ! -f "$BUNDLE_DIR/Contents/Info.plist" ]; then
+              mv -f "$BUNDLE_DIR/Info.plist" "$BUNDLE_DIR/Contents/Info.plist"
+            fi
+          fi
           python3 Tools/install-render.py \
             --prefix "$CI_PREFIX" \
             --release "$RELEASE_BIN" \
@@ -359,6 +370,16 @@ jobs:
           xcrun swift build -c release --scratch-path "$CI_BUILD_ROOT" --jobs 2
           RELEASE_BIN="$(xcrun swift build -c release --scratch-path "$CI_BUILD_ROOT" --show-bin-path)"
           xcrun swiftc -parse-as-library -O Tools/safarium-verify.swift -o "$CI_BUILD_ROOT/safarium-verify"
+          BUNDLE_DIR="$RELEASE_BIN/Safarium_SafariumCore.bundle"
+          if [ ! -f "$BUNDLE_DIR/Contents/Resources/clock.js" ]; then
+            CLOCK_SRC="$(find "$BUNDLE_DIR" -name 'clock.js' -type f | head -n 1)"
+            test -n "$CLOCK_SRC"
+            mkdir -p "$BUNDLE_DIR/Contents/Resources"
+            mv -f "$CLOCK_SRC" "$BUNDLE_DIR/Contents/Resources/clock.js"
+            if [ -f "$BUNDLE_DIR/Info.plist" ] && [ ! -f "$BUNDLE_DIR/Contents/Info.plist" ]; then
+              mv -f "$BUNDLE_DIR/Info.plist" "$BUNDLE_DIR/Contents/Info.plist"
+            fi
+          fi
           python3 Tools/install-render.py \
             --prefix "$CI_PREFIX" \
             --release "$RELEASE_BIN" \
