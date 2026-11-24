@@ -251,16 +251,105 @@ final class ContainerTests: XCTestCase {
         return (vHashes, aHashes, decVideo, decAudioBytes, subTexts)
     }
 
+    private static func diagnoseAudioMismatch(_ url: URL) async throws -> String {
+        let data = try Data(contentsOf: url)
+        func u32(_ off: Int) -> UInt32 {
+            let b0 = UInt32(data[off]) << 24
+            let b1 = UInt32(data[off + 1]) << 16
+            let b2 = UInt32(data[off + 2]) << 8
+            let b3 = UInt32(data[off + 3])
+            return b0 | b1 | b2 | b3
+        }
+        var trakSummaries: [String] = []
+        func walk(_ start: Int, _ end: Int, _ curHandler: inout String, _ curElst: inout String, _ curStsz: inout String) {
+            var off = start
+            while off + 8 <= end {
+                var sz = Int(u32(off))
+                let typ = String(decoding: data[(off + 4)..<(off + 8)], as: UTF8.self)
+                var hdr = 8
+                if sz == 0 { sz = end - off }
+                if sz == 1, off + 16 <= end {
+                    let hi = UInt64(u32(off + 8))
+                    let lo = UInt64(u32(off + 12))
+                    sz = Int(min(UInt64(end - off), (hi << 32) | lo))
+                    hdr = 16
+                }
+                guard sz >= hdr, off + sz <= end else { break }
+                if typ == "moov" || typ == "mdia" || typ == "minf" || typ == "stbl" || typ == "edts" {
+                    walk(off + hdr, off + sz, &curHandler, &curElst, &curStsz)
+                } else if typ == "trak" {
+                    var h = "?", e = "none", s = "none"
+                    walk(off + hdr, off + sz, &h, &e, &s)
+                    trakSummaries.append("trak(\(h) elst=\(e) stsz=\(s))")
+                } else if typ == "hdlr", off + hdr + 12 <= off + sz {
+                    curHandler = String(decoding: data[(off + hdr + 8)..<(off + hdr + 12)], as: UTF8.self)
+                } else if typ == "elst", off + hdr + 8 <= off + sz {
+                    let cnt = Int(u32(off + hdr + 4))
+                    var items: [String] = []
+                    for i in 0..<min(cnt, 4) {
+                        let p = off + hdr + 8 + i * 12
+                        if p + 12 <= off + sz {
+                            let d = u32(p)
+                            let mt = Int32(bitPattern: u32(p + 4))
+                            items.append("(\(d),\(mt))")
+                        }
+                    }
+                    curElst = "[\(items.joined(separator: ","))]"
+                } else if typ == "stsz", off + hdr + 12 <= off + sz {
+                    let ssz = u32(off + hdr + 4)
+                    let cnt = Int(u32(off + hdr + 8))
+                    var first5: [UInt32] = []
+                    if ssz == 0 {
+                        for i in 0..<min(cnt, 5) {
+                            let p = off + hdr + 12 + i * 4
+                            if p + 4 <= off + sz { first5.append(u32(p)) }
+                        }
+                    }
+                    curStsz = "cnt=\(cnt):first=\(first5)"
+                }
+                off += sz
+            }
+        }
+        var h0 = "", e0 = "", s0 = ""
+        walk(0, data.count, &h0, &e0, &s0)
+
+        let asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
+        var bufDesc: [String] = []
+        if let aTrack = try await asset.loadTracks(withMediaType: .audio).first {
+            let r = try AVAssetReader(asset: asset)
+            let o = AVAssetReaderTrackOutput(track: aTrack, outputSettings: nil)
+            r.add(o)
+            if r.startReading() {
+                while let sb = o.copyNextSampleBuffer() {
+                    let pts = sb.presentationTimeStamp
+                    let dur = sb.duration
+                    bufDesc.append("n=\(sb.numSamples)@\(pts.value)/\(pts.timescale)+d=\(dur.value)/\(dur.timescale)")
+                }
+            }
+        }
+        return "\(trakSummaries.joined(separator: " ")) bufs=\(bufDesc)"
+    }
+
     private func makeUnpremultipliedPatternImage(width: Int, height: Int, frameIndex: Int) throws -> (cgImage: CGImage, rgba: [UInt8]) {
         var rgba = [UInt8](repeating: 0, count: width * height * 4)
         for y in 0..<height {
             for x in 0..<width {
                 let idx = (y * width + x) * 4
                 let checker = ((x / 16 + y / 16 + frameIndex) & 1) == 0
-                let r = UInt8((x * 255 / max(1, width - 1) + frameIndex * 31) & 0xFF)
-                let g = UInt8((y * 255 / max(1, height - 1) + frameIndex * 17) & 0xFF)
-                let b = UInt8(checker ? ((x ^ y) & 0xFF) : 200)
-                let a: UInt8 = (x < width / 4 && y < height / 4) ? 0 : (x < width / 2 && y < height / 4 ? 128 : 255)
+                let rTerm = (x * 255) / max(1, width - 1)
+                let gTerm = (y * 255) / max(1, height - 1)
+                let r = UInt8((rTerm + frameIndex * 31) & 0xFF)
+                let g = UInt8((gTerm + frameIndex * 17) & 0xFF)
+                let bVal: Int = checker ? ((x ^ y) & 0xFF) : 200
+                let b = UInt8(bVal)
+                let a: UInt8
+                if x < width / 4 && y < height / 4 {
+                    a = 0
+                } else if x < width / 2 && y < height / 4 {
+                    a = 128
+                } else {
+                    a = 255
+                }
                 rgba[idx + 0] = (a == 0) ? 0 : (a == 128 ? (r & 0xFE) : r)
                 rgba[idx + 1] = (a == 0) ? 0 : (a == 128 ? (g & 0xFE) : g)
                 rgba[idx + 2] = (a == 0) ? 0 : (a == 128 ? (b & 0xFE) : b)
@@ -505,7 +594,11 @@ final class ContainerTests: XCTestCase {
 
         let round = try await extractVideoAndAudioHashesAndCounts(roundMP4)
         XCTAssertEqual(round.videoHashes, orig.videoHashes, "H.264 video packet SHA-256 must match 30/30")
-        XCTAssertEqual(round.audioHashes, orig.audioHashes, "AAC audio packet SHA-256 must match 100%")
+        var audioDiag = ""
+        if round.audioHashes != orig.audioHashes {
+            audioDiag = " [diag: \(try await Self.diagnoseAudioMismatch(roundMP4))]"
+        }
+        XCTAssertEqual(round.audioHashes, orig.audioHashes, "AAC audio packet SHA-256 must match 100%\(audioDiag)")
         XCTAssertEqual(round.decodedVideoFrames, 30, "B-frame preroll minVPTS alignment must prevent 31->30 duplicate")
         XCTAssertGreaterThanOrEqual(round.decodedAudioBytes, orig.decodedAudioBytes)
         XCTAssertEqual(round.subtitleTexts, ["ทดสอบภาษาไทย MKV UTF-8"])

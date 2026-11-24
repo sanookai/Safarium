@@ -668,8 +668,13 @@ final class LegacyContainerVorbisTests: XCTestCase {
         si[0] = 0x10; si[1] = 0x00; si[2] = 0x10; si[3] = 0x00 // min/max block 4096
         si[10] = UInt8((rate >> 12) & 0xFF)
         si[11] = UInt8((rate >> 4) & 0xFF)
-        si[12] = UInt8(((rate & 0x0F) << 4) | ((ch - 1) << 1) | ((bps - 1) >> 4))
-        si[13] = UInt8((((bps - 1) & 0x0F) << 4) | Int((total >> 32) & 0x0F))
+        let rateLow: Int = (rate & 0x0F) << 4
+        let chBits: Int = (ch - 1) << 1
+        let bpsHigh: Int = (bps - 1) >> 4
+        si[12] = UInt8(rateLow | chBits | bpsHigh)
+        let bpsLow: Int = ((bps - 1) & 0x0F) << 4
+        let totalHigh = Int((total >> 32) & 0x0F)
+        si[13] = UInt8(bpsLow | totalHigh)
         si[14] = UInt8((total >> 24) & 0xFF); si[15] = UInt8((total >> 16) & 0xFF)
         si[16] = UInt8((total >> 8) & 0xFF); si[17] = UInt8(total & 0xFF)
         let streaminfoBlock: [UInt8] = [0x00, 0x00, 0x00, 0x22] + si
