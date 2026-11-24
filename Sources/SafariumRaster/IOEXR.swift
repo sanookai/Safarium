@@ -20,7 +20,17 @@ func ioEncodeEXR(_ img: SRImage, _ p: IOParams) -> [UInt8]? {
     func attr(_ name: String, _ type: String, _ body: [UInt8]) { str(name); str(type); i32(body.count); out += body }
     func le32(_ v: Int) -> [UInt8] { (0..<4).map { UInt8((v >> (8 * $0)) & 0xFF) } }
     var chl: [UInt8] = []
-    for n in names { chl += Array(n.utf8) + [0] + le32(half ? 1 : 2) + [0, 0, 0, 0] + le32(1) + le32(1) }
+    let pixelTypeBytes: [UInt8] = le32(half ? 1 : 2)
+    let zeroPad: [UInt8] = [0, 0, 0, 0]
+    let samplingBytes: [UInt8] = le32(1)
+    for n in names {
+        chl.append(contentsOf: n.utf8)
+        chl.append(0)
+        chl.append(contentsOf: pixelTypeBytes)
+        chl.append(contentsOf: zeroPad)
+        chl.append(contentsOf: samplingBytes)
+        chl.append(contentsOf: samplingBytes)
+    }
     chl.append(0)
     attr("channels", "chlist", chl)
     attr("compression", "compression", [UInt8(comp)])

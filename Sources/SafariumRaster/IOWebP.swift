@@ -82,7 +82,15 @@ func ioEncodeWebPAnimation(_ frames: [SRImage], delaysMs: [Int], loop: Int, qual
         if a { anyAlpha = true }
         let d = i < delaysMs.count ? delaysMs[i] : 100
         let fb = riffChunk("VP8L", bs)
-        chunks += riffChunk("ANMF", u24(0) + u24(0) + u24(f.width - 1) + u24(f.height - 1) + u24(d) + [0x02] + fb)   // blend off? 0x02 = do not blend, no dispose
+        var anmf: [UInt8] = []
+        anmf.append(contentsOf: u24(0))
+        anmf.append(contentsOf: u24(0))
+        anmf.append(contentsOf: u24(f.width - 1))
+        anmf.append(contentsOf: u24(f.height - 1))
+        anmf.append(contentsOf: u24(d))
+        anmf.append(0x02)
+        anmf.append(contentsOf: fb)
+        chunks += riffChunk("ANMF", anmf)   // blend off? 0x02 = do not blend, no dispose
     }
     body += riffChunk("VP8X", [UInt8(0x02 | (anyAlpha ? 0x10 : 0)), 0, 0, 0] + u24(cw - 1) + u24(chh - 1))
     body += riffChunk("ANIM", [0, 0, 0, 0] + [UInt8(loop & 0xFF), UInt8((loop >> 8) & 0xFF)])

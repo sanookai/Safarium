@@ -673,7 +673,11 @@ final class LegacyContainerVorbisTests: XCTestCase {
         si[14] = UInt8((total >> 24) & 0xFF); si[15] = UInt8((total >> 16) & 0xFF)
         si[16] = UInt8((total >> 8) & 0xFF); si[17] = UInt8(total & 0xFF)
         let streaminfoBlock: [UInt8] = [0x00, 0x00, 0x00, 0x22] + si
-        let first: [UInt8] = [0x7F] + Array("FLAC".utf8) + [1, 0, 0x00, 0x02] + Array("fLaC".utf8) + streaminfoBlock
+        var first: [UInt8] = [0x7F]
+        first.append(contentsOf: "FLAC".utf8)
+        first.append(contentsOf: [1, 0, 0x00, 0x02])
+        first.append(contentsOf: "fLaC".utf8)
+        first.append(contentsOf: streaminfoBlock)
         precondition(first.count == 51)
         let vendor = Array("safarium".utf8)
         let commentBody = le32(UInt32(vendor.count)) + vendor + le32(0)

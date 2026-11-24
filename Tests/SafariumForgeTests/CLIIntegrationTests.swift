@@ -726,7 +726,11 @@ final class CLIIntegrationTests: XCTestCase {
             metas.append(Data(b))
             cursor += 4 + len
         }
-        let firstPkt = [0x7F] + Array("FLAC".utf8) + [1, 0, UInt8(metas.count >> 8), UInt8(metas.count & 0xFF)] + Array("fLaC".utf8) + si
+        var firstPkt: [UInt8] = [0x7F]
+        firstPkt.append(contentsOf: "FLAC".utf8)
+        firstPkt.append(contentsOf: [1, 0, UInt8(metas.count >> 8), UInt8(metas.count & 0xFF)])
+        firstPkt.append(contentsOf: "fLaC".utf8)
+        firstPkt.append(contentsOf: si)
         var oggW = OggPageWriter(serialNumber: 0x1234)
         try oggW.append(packet: Data(firstPkt), granulePosition: 0, flush: true)
         for (idx, m) in metas.enumerated() {

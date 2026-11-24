@@ -94,8 +94,39 @@ final class RetainedViewportTests: XCTestCase {
     }
 
     func testLateGradientAndTrustedPolicyUseDifferentChecks() async throws {
-        let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let repoFixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().appendingPathComponent("bench/experiments/regions/late-gradient-control.html")
+        var tempFixtureURL: URL?
+        let url: URL
+        if FileManager.default.fileExists(atPath: repoFixture.path) {
+            url = repoFixture
+        } else {
+            let tmp = FileManager.default.temporaryDirectory
+                .appendingPathComponent("safarium-late-gradient-\(UUID().uuidString).html")
+            let html = """
+            <!doctype html><meta charset="utf-8"><title>Truthful rect, gradient first revealed on frame 2</title>
+            <style>
+            html,body { margin:0; height:100%; background:linear-gradient(#dba752,#14285d); }
+            #cover { position:absolute; left:50px; top:40px; width:46px; height:32px; background:red; }
+            </style><div id="cover"></div>
+            <script>
+            // Only this rectangle changes. Its opaque cover makes the first patched frame clip-independent.
+            window.__seek = t => {
+              const n = Math.round(t * 30);
+              cover.style.background = n ? "lime" : "red";
+              cover.style.visibility = n < 2 ? "visible" : "hidden";
+            };
+            </script>
+            """
+            try html.write(to: tmp, atomically: true, encoding: .utf8)
+            tempFixtureURL = tmp
+            url = tmp
+        }
+        defer {
+            if let tempFixtureURL {
+                try? FileManager.default.removeItem(at: tempFixtureURL)
+            }
+        }
         let page = try await Page(config: PageConfig(width: 96, height: 72, deterministicClock: true))
         try await page.load(.fileURL(url))
         let safe = RetainedViewport(page: page), fast = RetainedViewport(page: page)

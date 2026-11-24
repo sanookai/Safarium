@@ -992,7 +992,9 @@ public enum EBMLMatroskaCodec {
         let daPkts = aTrack.map { at in parsed.packets.filter { $0.trackNumber == at.trackNumber } } ?? []
         let dsPkts = sTrack.map { st in parsed.packets.filter { $0.trackNumber == st.trackNumber } } ?? []
 
-        // Prepare video timings (monotonic DTS + minVPTS preroll alignment eliminating 31->30 frame duplicate)
+        // Rebase video to non-negative DTS (minVDTS == 0, minVPTS == maxShift90k) so AVAssetWriter
+        // never sees DTS < sessionStart (which on macOS 26 can pad audio with a duplicate priming packet),
+        // then strip the resulting empty (-1) edit on the video track after finishWriting.
         let vPTS90k = dvPkts.map { ticksTo90k($0.ptsTicks) }
         let sortedVPTS90k = vPTS90k.sorted()
         let minVPTS90k = sortedVPTS90k.first ?? 0
@@ -1022,7 +1024,9 @@ public enum EBMLMatroskaCodec {
             return Int64((sec * 90_000.0).rounded())
         }()
         let movieEnd90k = max(1, max(totalVideoEnd90k, totalAudioEnd90k))
+        let sessionEnd90k = max(movieEnd90k, totalVideoEnd90k > 0 ? (totalVideoEnd90k + maxShift90k) : 0)
         let movieDuration = CMTime(value: movieEnd90k, timescale: 90_000)
+        let sessionEndTime = CMTime(value: sessionEnd90k, timescale: 90_000)
 
         var subSetup: (CMFormatDescription, [CMSampleBuffer])?
         var parsedSubCues: [SafariumSRTCue] = []
@@ -1072,15 +1076,16 @@ public enum EBMLMatroskaCodec {
                     }
                     try await Task.sleep(nanoseconds: 500_000)
                 }
-                let dts90k = (sortedVPTS90k[idx] - maxShift90k) - minVPTS90k
+                let dts90k = sortedVPTS90k[idx] - minVPTS90k
                 let nextDTS90k = (idx + 1 < dvPkts.count
-                    ? (sortedVPTS90k[idx + 1] - maxShift90k)
-                    : (sortedVPTS90k[idx] - maxShift90k + defaultVDuration90k)) - minVPTS90k
+                    ? sortedVPTS90k[idx + 1]
+                    : (sortedVPTS90k[idx] + defaultVDuration90k)) - minVPTS90k
                 let dur90k = max(1, nextDTS90k - dts90k)
+                let pts90k = (vPTS90k[idx] - minVPTS90k) + maxShift90k
                 let sb = try MediaCompatBridge.makeReadySampleBuffer(
                     data: p.data,
                     formatDescription: vFmt,
-                    pts: CMTime(value: vPTS90k[idx] - minVPTS90k, timescale: 90_000),
+                    pts: CMTime(value: pts90k, timescale: 90_000),
                     dts: CMTime(value: dts90k, timescale: 90_000),
                     duration: CMTime(value: dur90k, timescale: 90_000),
                     isSync: p.isKeyframe
@@ -1139,11 +1144,12 @@ public enum EBMLMatroskaCodec {
             si.markAsFinished()
         }
 
-        writer.endSession(atSourceTime: movieDuration)
+        writer.endSession(atSourceTime: sessionEndTime)
         await writer.finishWriting()
         guard writer.status == .completed else {
             throw SafariumError.encode("MKV demux finishWriting failed: \(writer.error?.localizedDescription ?? "status \(writer.status.rawValue)")")
         }
+        try MediaCompatBridge.stripLeadingEmptyVideoEdit(inMP4At: tempURL)
 
         try SafeFilePublisher.publish(tempURL: tempURL, to: outputURL, overwrite: overwrite)
         let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6

@@ -388,9 +388,19 @@ private func jpegEO(_ p: UnsafePointer<UInt8>) -> (SIMD8<UInt16>, SIMD8<UInt16>)
 /// byte and a low byte; verified bit-exact against the 32-bit formula for all 2^24 inputs).
 @inline(__always)
 private func jpegYCC(_ B: SIMD8<UInt16>, _ G: SIMD8<UInt16>, _ R: SIMD8<UInt16>) -> (SIMD8<UInt16>, SIMD8<UInt16>, SIMD8<UInt16>) {
-    let y = (76 &* R &+ 150 &* G &+ 29 &* B &+ ((139 &* R &+ 70 &* G &+ 47 &* B) &>> 8) &+ 128) &>> 8
-    let cb = (128 &* B &+ 32895 &- 43 &* R &- 84 &* G &- ((51 &* R &+ 205 &* G) &>> 8)) &>> 8
-    let cr = (128 &* R &+ 32895 &- 107 &* G &- 20 &* B &- ((47 &* G &+ 209 &* B) &>> 8)) &>> 8
+    let yMain: SIMD8<UInt16> = 76 &* R &+ 150 &* G &+ 29 &* B
+    let yFrac: SIMD8<UInt16> = (139 &* R &+ 70 &* G &+ 47 &* B) &>> 8
+    let y: SIMD8<UInt16> = (yMain &+ yFrac &+ 128) &>> 8
+
+    let cbBase: SIMD8<UInt16> = 128 &* B &+ 32895
+    let cbSub: SIMD8<UInt16> = 43 &* R &+ 84 &* G
+    let cbFrac: SIMD8<UInt16> = (51 &* R &+ 205 &* G) &>> 8
+    let cb: SIMD8<UInt16> = (cbBase &- cbSub &- cbFrac) &>> 8
+
+    let crBase: SIMD8<UInt16> = 128 &* R &+ 32895
+    let crSub: SIMD8<UInt16> = 107 &* G &+ 20 &* B
+    let crFrac: SIMD8<UInt16> = (47 &* G &+ 209 &* B) &>> 8
+    let cr: SIMD8<UInt16> = (crBase &- crSub &- crFrac) &>> 8
     return (y, cb, cr)
 }
 

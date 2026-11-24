@@ -828,7 +828,7 @@ public enum MPEGTSCodec {
         guard writer.startWriting() else {
             throw SafariumError.encode("MPEG-TS demux writer startWriting failed: \(writer.error?.localizedDescription ?? "?")")
         }
-        let minVPTS90k = reconVideoPkts.map(\.pts).min() ?? 0
+        let minVDTS90k = reconVideoPkts.map { min($0.dts, $0.pts) }.min() ?? 0
         writer.startSession(atSourceTime: .zero)
 
         let defaultVDur90k: Int64 = {
@@ -848,13 +848,14 @@ public enum MPEGTSCodec {
                     }
                     try await Task.sleep(nanoseconds: 500_000)
                 }
-                let nextDTS = i + 1 < reconVideoPkts.count ? reconVideoPkts[i + 1].dts : (vp.dts + defaultVDur90k)
-                let dur = max(1, nextDTS - vp.dts)
+                let dts90k = vp.dts - minVDTS90k
+                let nextDTS = (i + 1 < reconVideoPkts.count ? reconVideoPkts[i + 1].dts : (vp.dts + defaultVDur90k)) - minVDTS90k
+                let dur = max(1, nextDTS - dts90k)
                 let sb = try MediaCompatBridge.makeReadySampleBuffer(
                     data: vp.data,
                     formatDescription: vFmt,
-                    pts: CMTime(value: vp.pts - minVPTS90k, timescale: 90_000),
-                    dts: CMTime(value: vp.dts - minVPTS90k, timescale: 90_000),
+                    pts: CMTime(value: vp.pts - minVDTS90k, timescale: 90_000),
+                    dts: CMTime(value: dts90k, timescale: 90_000),
                     duration: CMTime(value: dur, timescale: 90_000),
                     isSync: vp.isSync
                 )
@@ -892,6 +893,7 @@ public enum MPEGTSCodec {
         guard writer.status == .completed else {
             throw SafariumError.encode("MPEG-TS demux finishWriting failed: \(writer.error?.localizedDescription ?? "?")")
         }
+        try MediaCompatBridge.stripLeadingEmptyVideoEdit(inMP4At: tempURL)
 
         try SafeFilePublisher.publish(tempURL: tempURL, to: outputURL, overwrite: overwrite)
         let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6

@@ -458,7 +458,13 @@ private func ioBMPHasGrayPalette(_ d: Data) -> Bool {
     if colours == 0 { colours = 1 << bpp }
     let start = 14 + dib
     guard start + colours * 4 <= b.count else { return false }
-    for i in 0..<colours where !(b[start + i * 4] == b[start + i * 4 + 1] && b[start + i * 4 + 1] == b[start + i * 4 + 2]) { return false }
+    for i in 0..<colours {
+        let idx: Int = start + i * 4
+        let b0: UInt8 = b[idx]
+        let b1: UInt8 = b[idx + 1]
+        let b2: UInt8 = b[idx + 2]
+        if !(b0 == b1 && b1 == b2) { return false }
+    }
     return true
 }
 

@@ -334,13 +334,12 @@ public enum MediaCompatBridge {
         let cleanASC = try unwrapWebCodecsESDS(asc).audioSpecificConfig
         let parsed = try? parseAACAudioSpecificConfig(cleanASC)
         let effectiveSR = parsed.map { Double($0.sampleRate) } ?? sampleRate
-        let effectiveCh = UInt32(parsed?.channels ?? channels)
-        let objRaw = UInt32(parsed?.objectType ?? Int(MPEG4ObjectID.AAC_LC.rawValue))
+        let effectiveCh = UInt32(max(1, parsed?.channels ?? channels))
 
         var asbd = AudioStreamBasicDescription(
             mSampleRate: effectiveSR,
             mFormatID: kAudioFormatMPEG4AAC,
-            mFormatFlags: objRaw,
+            mFormatFlags: 0,
             mBytesPerPacket: 0,
             mFramesPerPacket: 1024,
             mBytesPerFrame: 0,
@@ -348,10 +347,39 @@ public enum MediaCompatBridge {
             mBitsPerChannel: 0,
             mReserved: 0
         )
+        let layoutTag: AudioChannelLayoutTag? = switch effectiveCh {
+        case 1: kAudioChannelLayoutTag_Mono
+        case 2: kAudioChannelLayoutTag_Stereo
+        case 3: kAudioChannelLayoutTag_AAC_3_0
+        case 4: kAudioChannelLayoutTag_AAC_4_0
+        case 5: kAudioChannelLayoutTag_AAC_5_0
+        case 6: kAudioChannelLayoutTag_AAC_5_1
+        case 7: kAudioChannelLayoutTag_AAC_6_1
+        case 8: kAudioChannelLayoutTag_AAC_7_1
+        default: nil
+        }
         let cookie = try makeESDescriptorWrappingASC(cleanASC)
         var desc: CMAudioFormatDescription?
         let st = cookie.withUnsafeBytes { raw in
-            CMAudioFormatDescriptionCreate(
+            if let layoutTag {
+                var layout = AudioChannelLayout(
+                    mChannelLayoutTag: layoutTag,
+                    mChannelBitmap: [],
+                    mNumberChannelDescriptions: 0,
+                    mChannelDescriptions: AudioChannelDescription()
+                )
+                return CMAudioFormatDescriptionCreate(
+                    allocator: kCFAllocatorDefault,
+                    asbd: &asbd,
+                    layoutSize: MemoryLayout<AudioChannelLayout>.size,
+                    layout: &layout,
+                    magicCookieSize: cookie.count,
+                    magicCookie: raw.baseAddress,
+                    extensions: nil,
+                    formatDescriptionOut: &desc
+                )
+            }
+            return CMAudioFormatDescriptionCreate(
                 allocator: kCFAllocatorDefault,
                 asbd: &asbd,
                 layoutSize: 0,
@@ -1222,5 +1250,196 @@ public enum MediaCompatBridge {
             offset += sz
         }
         return out
+    }
+
+    // MARK: - ISO BMFF Edit-List Preroll Normalization
+
+    private struct BMFFBox {
+        let type: String
+        let start: Int
+        let headerSize: Int
+        let end: Int
+    }
+
+    private static func readU32BE(_ data: Data, at offset: Int) -> UInt32 {
+        (UInt32(data[offset]) << 24)
+            | (UInt32(data[offset + 1]) << 16)
+            | (UInt32(data[offset + 2]) << 8)
+            | UInt32(data[offset + 3])
+    }
+
+    private static func readU64BE(_ data: Data, at offset: Int) -> UInt64 {
+        let hi = UInt64(readU32BE(data, at: offset))
+        let lo = UInt64(readU32BE(data, at: offset + 4))
+        return (hi << 32) | lo
+    }
+
+    private static func writeU32BE(_ data: inout Data, at offset: Int, value: UInt32) {
+        data[offset] = UInt8((value >> 24) & 0xFF)
+        data[offset + 1] = UInt8((value >> 16) & 0xFF)
+        data[offset + 2] = UInt8((value >> 8) & 0xFF)
+        data[offset + 3] = UInt8(value & 0xFF)
+    }
+
+    private static func writeU64BE(_ data: inout Data, at offset: Int, value: UInt64) {
+        writeU32BE(&data, at: offset, value: UInt32((value >> 32) & 0xFFFFFFFF))
+        writeU32BE(&data, at: offset + 4, value: UInt32(value & 0xFFFFFFFF))
+    }
+
+    private static func readFourCC(_ data: Data, at offset: Int) -> String {
+        String(decoding: data[offset..<(offset + 4)], as: UTF8.self)
+    }
+
+    private static func parseBoxes(in data: Data, from start: Int, to limit: Int) -> [BMFFBox] {
+        var result: [BMFFBox] = []
+        var offset = start
+        while offset + 8 <= limit {
+            let size32 = readU32BE(data, at: offset)
+            let type = readFourCC(data, at: offset + 4)
+            let headerSize: Int
+            let end: Int
+            if size32 == 0 {
+                headerSize = 8
+                end = limit
+            } else if size32 == 1 {
+                guard offset + 16 <= limit else { break }
+                let size64 = readU64BE(data, at: offset + 8)
+                guard size64 >= 16, size64 <= UInt64(limit - offset) else { break }
+                headerSize = 16
+                end = offset + Int(size64)
+            } else {
+                guard size32 >= 8, Int(size32) <= (limit - offset) else { break }
+                headerSize = 8
+                end = offset + Int(size32)
+            }
+            result.append(BMFFBox(type: type, start: offset, headerSize: headerSize, end: end))
+            offset = end
+        }
+        return result
+    }
+
+    private static func readHeaderDuration(_ data: Data, box: BMFFBox, v0Offset: Int, v1Offset: Int) -> UInt64? {
+        let payload = box.start + box.headerSize
+        guard payload < box.end else { return nil }
+        let version = data[payload]
+        if version == 0 {
+            let off = payload + v0Offset
+            guard off + 4 <= box.end else { return nil }
+            return UInt64(readU32BE(data, at: off))
+        } else if version == 1 {
+            let off = payload + v1Offset
+            guard off + 8 <= box.end else { return nil }
+            return readU64BE(data, at: off)
+        }
+        return nil
+    }
+
+    private static func writeHeaderDuration(_ data: inout Data, box: BMFFBox, v0Offset: Int, v1Offset: Int, value: UInt64) {
+        let payload = box.start + box.headerSize
+        guard payload < box.end else { return }
+        let version = data[payload]
+        if version == 0 {
+            let off = payload + v0Offset
+            guard off + 4 <= box.end else { return }
+            writeU32BE(&data, at: off, value: UInt32(min(value, UInt64(UInt32.max))))
+        } else if version == 1 {
+            let off = payload + v1Offset
+            guard off + 8 <= box.end else { return }
+            writeU64BE(&data, at: off, value: value)
+        }
+    }
+
+    /// Removes a leading empty `elst` segment (`media_time == -1`) inserted by passthrough `AVAssetWriter`
+    /// when non-negative DTS reordering delays initial video PTS past `.zero`. Replaces the removed edit-list
+    /// entry in-place with a trailing `free` box inside `edts` so `moov` size and all `stco`/`co64` offsets remain invariant.
+    static func stripLeadingEmptyVideoEdit(inMP4At url: URL) throws {
+        var data = try Data(contentsOf: url)
+        let topBoxes = parseBoxes(in: data, from: 0, to: data.count)
+        guard let moov = topBoxes.first(where: { $0.type == "moov" }) else { return }
+
+        let moovChildren = parseBoxes(in: data, from: moov.start + moov.headerSize, to: moov.end)
+        guard let mvhd = moovChildren.first(where: { $0.type == "mvhd" }) else { return }
+
+        var didModify = false
+        var trackDurations: [UInt64] = []
+
+        for trak in moovChildren where trak.type == "trak" {
+            let trakChildren = parseBoxes(in: data, from: trak.start + trak.headerSize, to: trak.end)
+            guard let tkhd = trakChildren.first(where: { $0.type == "tkhd" }),
+                  let originalTrackDur = readHeaderDuration(data, box: tkhd, v0Offset: 20, v1Offset: 28) else {
+                continue
+            }
+            var finalTrackDur = originalTrackDur
+
+            let mdia = trakChildren.first(where: { $0.type == "mdia" })
+            let hdlr = mdia.flatMap { parseBoxes(in: data, from: $0.start + $0.headerSize, to: $0.end).first(where: { $0.type == "hdlr" }) }
+            let isVideo: Bool = {
+                guard let hdlr else { return false }
+                let typeOffset = hdlr.start + hdlr.headerSize + 8
+                guard typeOffset + 4 <= hdlr.end else { return false }
+                return readFourCC(data, at: typeOffset) == "vide"
+            }()
+
+            if isVideo, let edts = trakChildren.first(where: { $0.type == "edts" }) {
+                let edtsChildren = parseBoxes(in: data, from: edts.start + edts.headerSize, to: edts.end)
+                if let elst = edtsChildren.first(where: { $0.type == "elst" }),
+                   elst.headerSize == 8,
+                   elst.start + 16 <= elst.end {
+                    let version = data[elst.start + 8]
+                    let entryCount = readU32BE(data, at: elst.start + 12)
+                    let entryBytes = (version == 0) ? 12 : (version == 1 ? 20 : 0)
+                    let entriesStart = elst.start + 16
+                    if entryBytes >= 8,
+                       entryCount == 2,
+                       entriesStart + 2 * entryBytes <= elst.end {
+                        let emptyDur: UInt64
+                        let emptyMediaTime: Int64
+                        let activeDur: UInt64
+                        let activeMediaTime: Int64
+                        if version == 0 {
+                            emptyDur = UInt64(readU32BE(data, at: entriesStart))
+                            emptyMediaTime = Int64(Int32(bitPattern: readU32BE(data, at: entriesStart + 4)))
+                            activeDur = UInt64(readU32BE(data, at: entriesStart + 12))
+                            activeMediaTime = Int64(Int32(bitPattern: readU32BE(data, at: entriesStart + 16)))
+                        } else {
+                            emptyDur = readU64BE(data, at: entriesStart)
+                            emptyMediaTime = Int64(bitPattern: readU64BE(data, at: entriesStart + 8))
+                            activeDur = readU64BE(data, at: entriesStart + 20)
+                            activeMediaTime = Int64(bitPattern: readU64BE(data, at: entriesStart + 28))
+                        }
+
+                        if emptyMediaTime == -1 && emptyDur > 0 && activeMediaTime >= 0 && activeDur > 0 {
+                            let oldElstLen = elst.end - elst.start
+                            let newElstLen = oldElstLen - entryBytes
+                            let activeRange = (entriesStart + entryBytes)..<(entriesStart + 2 * entryBytes)
+                            let activeBytes = Data(data[activeRange])
+                            data.replaceSubrange(entriesStart..<(entriesStart + entryBytes), with: activeBytes)
+                            writeU32BE(&data, at: elst.start + 12, value: 1)
+                            writeU32BE(&data, at: elst.start, value: UInt32(newElstLen))
+
+                            let freeStart = elst.end - entryBytes
+                            writeU32BE(&data, at: freeStart, value: UInt32(entryBytes))
+                            data[freeStart + 4] = 0x66 // 'f'
+                            data[freeStart + 5] = 0x72 // 'r'
+                            data[freeStart + 6] = 0x65 // 'e'
+                            data[freeStart + 7] = 0x65 // 'e'
+                            for z in (freeStart + 8)..<elst.end {
+                                data[z] = 0
+                            }
+
+                            finalTrackDur = originalTrackDur > emptyDur ? (originalTrackDur - emptyDur) : activeDur
+                            writeHeaderDuration(&data, box: tkhd, v0Offset: 20, v1Offset: 28, value: finalTrackDur)
+                            didModify = true
+                        }
+                    }
+                }
+            }
+            trackDurations.append(finalTrackDur)
+        }
+
+        if didModify, let maxDur = trackDurations.max() {
+            writeHeaderDuration(&data, box: mvhd, v0Offset: 16, v1Offset: 24, value: maxDur)
+            try data.write(to: url, options: .atomic)
+        }
     }
 }
