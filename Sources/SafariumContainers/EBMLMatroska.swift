@@ -1149,7 +1149,10 @@ public enum EBMLMatroskaCodec {
         guard writer.status == .completed else {
             throw SafariumError.encode("MKV demux finishWriting failed: \(writer.error?.localizedDescription ?? "status \(writer.status.rawValue)")")
         }
-        try MediaCompatBridge.stripLeadingEmptyVideoEdit(inMP4At: tempURL)
+        try MediaCompatBridge.stripLeadingEmptyVideoEdit(
+            inMP4At: tempURL,
+            expectedAudioPacketCount: ai != nil ? daPkts.count : nil
+        )
 
         try SafeFilePublisher.publish(tempURL: tempURL, to: outputURL, overwrite: overwrite)
         let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6

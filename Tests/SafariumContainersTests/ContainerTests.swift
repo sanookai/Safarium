@@ -1169,4 +1169,169 @@ final class ContainerTests: XCTestCase {
         )
         XCTAssertEqual(try Data(contentsOf: firstChunkURL), before)
     }
+
+    func testMediaCompatBridge_NormalizeMP4_StripsExcessAACPrimingAndInjectsRollGroup() async throws {
+        let dir = try makeTempDir("strip-aac-priming")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let srcMP4 = dir.appendingPathComponent("src.mp4")
+        let mkvURL = dir.appendingPathComponent("out.mkv")
+        let cleanMP4 = dir.appendingPathComponent("clean.mp4")
+        try await generateTestMP4(url: srcMP4, codec: .h264, frames: 30, allowBFrames: true)
+        let orig = try await extractVideoAndAudioHashesAndCounts(srcMP4)
+        _ = try await EBMLMatroskaCodec.muxFromMP4OrMOV(inputURL: srcMP4, outputURL: mkvURL, docType: "matroska", overwrite: false)
+        _ = try await EBMLMatroskaCodec.demuxToMP4(inputURL: mkvURL, outputURL: cleanMP4, overwrite: false)
+
+        // Mutate cleanMP4 into a pre-macOS 27 AVAssetWriter clone-padded fixture:
+        // duplicate packet 0 three times at chunk 0, grow stsz/stts/stsc/mdhd, set elst media_time=960, strip sgpd/sbgp.
+        var raw = try Data(contentsOf: cleanMP4)
+        func u32(_ off: Int) -> UInt32 {
+            let b0 = UInt32(raw[off]) << 24
+            let b1 = UInt32(raw[off + 1]) << 16
+            let b2 = UInt32(raw[off + 2]) << 8
+            let b3 = UInt32(raw[off + 3])
+            return b0 | b1 | b2 | b3
+        }
+        func w32(_ off: Int, _ val: UInt32) {
+            raw[off] = UInt8((val >> 24) & 0xFF)
+            raw[off + 1] = UInt8((val >> 16) & 0xFF)
+            raw[off + 2] = UInt8((val >> 8) & 0xFF)
+            raw[off + 3] = UInt8(val & 0xFF)
+        }
+        func boxes(_ a: Int, _ b: Int) -> [(String, Int, Int)] {
+            var r: [(String, Int, Int)] = []
+            var p = a
+            while p + 8 <= b {
+                var sz = Int(u32(p))
+                let tp = String(decoding: raw[(p + 4)..<(p + 8)], as: UTF8.self)
+                if sz == 1, p + 16 <= b {
+                    let hi = UInt64(u32(p + 8))
+                    let lo = UInt64(u32(p + 12))
+                    sz = Int(min(UInt64(b - p), (hi << 32) | lo))
+                } else if sz == 0 {
+                    sz = b - p
+                }
+                guard sz >= 8, p + sz <= b else { break }
+                r.append((tp, p, p + sz))
+                p += sz
+            }
+            return r
+        }
+
+        let top = boxes(0, raw.count)
+        let moov = try XCTUnwrap(top.first(where: { $0.0 == "moov" }))
+        let mdat = try XCTUnwrap(top.first(where: { $0.0 == "mdat" }))
+        let traks = boxes(moov.1 + 8, moov.2).filter { $0.0 == "trak" }
+        var sounTrak: (String, Int, Int)?
+        for tr in traks {
+            if let md = boxes(tr.1 + 8, tr.2).first(where: { $0.0 == "mdia" }),
+               let hd = boxes(md.1 + 8, md.2).first(where: { $0.0 == "hdlr" }),
+               String(decoding: raw[(hd.1 + 16)..<(hd.1 + 20)], as: UTF8.self) == "soun" {
+                sounTrak = tr
+            }
+        }
+        let tr = try XCTUnwrap(sounTrak)
+        let mdia = try XCTUnwrap(boxes(tr.1 + 8, tr.2).first(where: { $0.0 == "mdia" }))
+        let mdhd = try XCTUnwrap(boxes(mdia.1 + 8, mdia.2).first(where: { $0.0 == "mdhd" }))
+        let minf = try XCTUnwrap(boxes(mdia.1 + 8, mdia.2).first(where: { $0.0 == "minf" }))
+        let stbl = try XCTUnwrap(boxes(minf.1 + 8, minf.2).first(where: { $0.0 == "stbl" }))
+        let stChildren = boxes(stbl.1 + 8, stbl.2)
+        let stsz = try XCTUnwrap(stChildren.first(where: { $0.0 == "stsz" }))
+        let stco = try XCTUnwrap(stChildren.first(where: { $0.0 == "stco" }))
+        let cnt = Int(u32(stsz.1 + 16))
+        XCTAssertEqual(cnt, orig.audioHashes.count)
+        let p0Sz = Int(u32(stsz.1 + 20))
+        let firstChunkOff = Int(u32(stco.1 + 16))
+        let p0Bytes = Data(raw[firstChunkOff..<(firstChunkOff + p0Sz)])
+
+        if let edts = boxes(tr.1 + 8, tr.2).first(where: { $0.0 == "edts" }),
+           let elst = boxes(edts.1 + 8, edts.2).first(where: { $0.0 == "elst" }) {
+            w32(elst.1 + 20, 960)
+        }
+        w32(mdhd.1 + 24, u32(mdhd.1 + 24) + UInt32(3 * 1024))
+
+        let prependedLen = p0Sz * 3
+        let oldMoovEnd = moov.2
+        var newStblPayload = Data()
+        for ch in stChildren {
+            if ch.0 == "sgpd" || ch.0 == "sbgp" { continue }
+            var boxData = Data(raw[ch.1..<ch.2])
+            if ch.0 == "stsz" {
+                w32(ch.1 + 16, UInt32(cnt + 3))
+                var expanded = Data(raw[ch.1..<(ch.1 + 20)])
+                for _ in 0..<3 { expanded.append(raw[(ch.1 + 20)..<(ch.1 + 24)]) }
+                expanded.append(raw[(ch.1 + 20)..<ch.2])
+                let sz = UInt32(expanded.count)
+                expanded[0] = UInt8((sz >> 24) & 0xFF)
+                expanded[1] = UInt8((sz >> 16) & 0xFF)
+                expanded[2] = UInt8((sz >> 8) & 0xFF)
+                expanded[3] = UInt8(sz & 0xFF)
+                boxData = expanded
+            } else if ch.0 == "stts" {
+                let firstC = u32(ch.1 + 16) + 3
+                boxData[16] = UInt8((firstC >> 24) & 0xFF)
+                boxData[17] = UInt8((firstC >> 16) & 0xFF)
+                boxData[18] = UInt8((firstC >> 8) & 0xFF)
+                boxData[19] = UInt8(firstC & 0xFF)
+            } else if ch.0 == "stsc" {
+                let sc0 = u32(ch.1 + 20) + 3
+                boxData[20] = UInt8((sc0 >> 24) & 0xFF)
+                boxData[21] = UInt8((sc0 >> 16) & 0xFF)
+                boxData[22] = UInt8((sc0 >> 8) & 0xFF)
+                boxData[23] = UInt8(sc0 & 0xFF)
+            }
+            newStblPayload.append(boxData)
+        }
+        var mutStbl = Data([0, 0, 0, 0, 0x73, 0x74, 0x62, 0x6C])
+        mutStbl.append(newStblPayload)
+        let newStblSz = UInt32(mutStbl.count)
+        mutStbl[0] = UInt8((newStblSz >> 24) & 0xFF)
+        mutStbl[1] = UInt8((newStblSz >> 16) & 0xFF)
+        mutStbl[2] = UInt8((newStblSz >> 8) & 0xFF)
+        mutStbl[3] = UInt8(newStblSz & 0xFF)
+
+        let stblDelta = Int(mutStbl.count) - (stbl.2 - stbl.1)
+        for box in [minf, mdia, tr, moov] {
+            w32(box.1, UInt32(Int(u32(box.1)) + stblDelta))
+        }
+        if u32(mdat.1) == 1 {
+            let cur = (UInt64(u32(mdat.1 + 8)) << 32) | UInt64(u32(mdat.1 + 12))
+            let nxt = cur + UInt64(prependedLen)
+            w32(mdat.1 + 8, UInt32((nxt >> 32) & 0xFFFFFFFF))
+            w32(mdat.1 + 12, UInt32(nxt & 0xFFFFFFFF))
+        } else {
+            w32(mdat.1, UInt32(Int(u32(mdat.1)) + prependedLen))
+        }
+        var threeP0 = Data()
+        for _ in 0..<3 { threeP0.append(p0Bytes) }
+        raw.insert(contentsOf: threeP0, at: firstChunkOff)
+        raw.replaceSubrange(stbl.1..<stbl.2, with: mutStbl)
+
+        let finalTop = boxes(0, raw.count)
+        let finalMoov = try XCTUnwrap(finalTop.first(where: { $0.0 == "moov" }))
+        for t in boxes(finalMoov.1 + 8, finalMoov.2) where t.0 == "trak" {
+            if let md = boxes(t.1 + 8, t.2).first(where: { $0.0 == "mdia" }),
+               let mn = boxes(md.1 + 8, md.2).first(where: { $0.0 == "minf" }),
+               let sb = boxes(mn.1 + 8, mn.2).first(where: { $0.0 == "stbl" }),
+               let sc = boxes(sb.1 + 8, sb.2).first(where: { $0.0 == "stco" }) {
+                let c = Int(u32(sc.1 + 12))
+                for idx in 0..<c {
+                    let pos = sc.1 + 16 + idx * 4
+                    let oldO = Int(u32(pos))
+                    let delta = (oldO >= oldMoovEnd ? stblDelta : 0) + (oldO > firstChunkOff ? prependedLen : 0)
+                    w32(pos, UInt32(oldO + delta))
+                }
+            }
+        }
+
+        let brokenMP4 = dir.appendingPathComponent("broken_priming.mp4")
+        try raw.write(to: brokenMP4)
+        try MediaCompatBridge.stripLeadingEmptyVideoEdit(inMP4At: brokenMP4, expectedAudioPacketCount: orig.audioHashes.count)
+
+        let fixed = try await extractVideoAndAudioHashesAndCounts(brokenMP4)
+        XCTAssertEqual(fixed.videoHashes, orig.videoHashes)
+        XCTAssertEqual(fixed.audioHashes, orig.audioHashes)
+        XCTAssertEqual(fixed.decodedVideoFrames, 30)
+        XCTAssertGreaterThanOrEqual(fixed.decodedAudioBytes, orig.decodedAudioBytes)
+    }
 }

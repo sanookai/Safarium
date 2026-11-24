@@ -1355,13 +1355,16 @@ public enum MediaCompatBridge {
         }
     }
 
-    /// Removes a leading empty `elst` segment (`media_time == -1`) inserted by passthrough `AVAssetWriter`
-    /// when non-negative DTS reordering delays initial video PTS past `.zero`. Replaces the removed edit-list
-    /// entry in-place with a trailing `free` box inside `edts` so `moov` size and all `stco`/`co64` offsets remain invariant.
-    static func stripLeadingEmptyVideoEdit(inMP4At url: URL) throws {
+    /// Normalizes a passthrough MP4 emitted by `AVAssetWriter`:
+    /// 1. Strips leading empty `elst` segment (`media_time == -1`) on video tracks in-place via a trailing `free` box.
+    /// 2. Removes pre-macOS 27 `AVAssetWriter` bogus prepended `mp4a` priming clones when verified byte-identical to `P0`.
+    /// 3. Injects ISO 14496-12 `sgpd`/`sbgp` (`roll_distance = -1`) on `mp4a` tracks lacking it and shifts post-`moov` chunk offsets cleanly.
+    static func stripLeadingEmptyVideoEdit(inMP4At url: URL, expectedAudioPacketCount: Int? = nil) throws {
         var data = try Data(contentsOf: url)
         let topBoxes = parseBoxes(in: data, from: 0, to: data.count)
-        guard let moov = topBoxes.first(where: { $0.type == "moov" }) else { return }
+        guard let moov = topBoxes.first(where: { $0.type == "moov" }),
+              moov.headerSize == 8 else { return }
+        let initialMoovEnd = moov.end
 
         let moovChildren = parseBoxes(in: data, from: moov.start + moov.headerSize, to: moov.end)
         guard let mvhd = moovChildren.first(where: { $0.type == "mvhd" }) else { return }
@@ -1447,26 +1450,311 @@ public enum MediaCompatBridge {
             writeHeaderDuration(&data, box: mvhd, v0Offset: 16, v1Offset: 24, value: maxDur)
         }
 
+        if let expectedAudioPacketCount, expectedAudioPacketCount > 0,
+           stripExcessPrependedAudioPriming(in: &data, expectedAudioPacketCount: expectedAudioPacketCount) {
+            didModify = true
+        }
+
         if injectMissingAACRollSampleGroups(in: &data) {
             didModify = true
         }
 
         if didModify {
+            let finalTopBoxes = parseBoxes(in: data, from: 0, to: data.count)
+            if let finalMoov = finalTopBoxes.first(where: { $0.type == "moov" }) {
+                let netDelta = Int64(finalMoov.end) - Int64(initialMoovEnd)
+                if netDelta != 0 {
+                    shiftPostMoovChunkOffsets(in: &data, oldMoovEnd: initialMoovEnd, delta: netDelta)
+                }
+            }
             try data.write(to: url, options: .atomic)
         }
     }
 
-    /// Injects ISO 14496-12 `sgpd` (`roll_distance = -1`) and `sbgp` (`roll`) sample-group boxes into
-    /// passthrough `mp4a` audio tracks that lack them, growing ancestor boxes and shifting post-`moov`
-    /// `stco`/`co64` chunk offsets so pre-macOS 27 `AVAssetReader` does not emit a duplicate preroll packet.
-    private static func injectMissingAACRollSampleGroups(in data: inout Data) -> Bool {
-        let initialTopBoxes = parseBoxes(in: data, from: 0, to: data.count)
-        guard let initialMoov = initialTopBoxes.first(where: { $0.type == "moov" }),
-              initialMoov.headerSize == 8 else {
+    private static func appendU32BE(_ out: inout [UInt8], _ value: UInt32) {
+        out.append(UInt8((value >> 24) & 0xFF))
+        out.append(UInt8((value >> 16) & 0xFF))
+        out.append(UInt8((value >> 8) & 0xFF))
+        out.append(UInt8(value & 0xFF))
+    }
+
+    private static func appendU64BE(_ out: inout [UInt8], _ value: UInt64) {
+        appendU32BE(&out, UInt32((value >> 32) & 0xFFFFFFFF))
+        appendU32BE(&out, UInt32(value & 0xFFFFFFFF))
+    }
+
+    private static func stripExcessPrependedAudioPriming(in data: inout Data, expectedAudioPacketCount: Int) -> Bool {
+        let topBoxes = parseBoxes(in: data, from: 0, to: data.count)
+        guard let moov = topBoxes.first(where: { $0.type == "moov" && $0.headerSize == 8 }) else {
             return false
         }
-        let oldMoovEnd = initialMoov.end
-        var totalDelta = 0
+        let moovChildren = parseBoxes(in: data, from: moov.start + moov.headerSize, to: moov.end)
+        for trak in moovChildren where trak.type == "trak" && trak.headerSize == 8 {
+            let trakChildren = parseBoxes(in: data, from: trak.start + trak.headerSize, to: trak.end)
+            guard let mdia = trakChildren.first(where: { $0.type == "mdia" && $0.headerSize == 8 }) else { continue }
+            let mdiaChildren = parseBoxes(in: data, from: mdia.start + mdia.headerSize, to: mdia.end)
+            guard let hdlr = mdiaChildren.first(where: { $0.type == "hdlr" }),
+                  hdlr.start + hdlr.headerSize + 12 <= hdlr.end,
+                  readFourCC(data, at: hdlr.start + hdlr.headerSize + 8) == "soun",
+                  let mdhd = mdiaChildren.first(where: { $0.type == "mdhd" && $0.headerSize == 8 }),
+                  let minf = mdiaChildren.first(where: { $0.type == "minf" && $0.headerSize == 8 }) else {
+                continue
+            }
+            let minfChildren = parseBoxes(in: data, from: minf.start + minf.headerSize, to: minf.end)
+            guard let stbl = minfChildren.first(where: { $0.type == "stbl" && $0.headerSize == 8 }) else { continue }
+            let stblChildren = parseBoxes(in: data, from: stbl.start + stbl.headerSize, to: stbl.end)
+            guard let stsd = stblChildren.first(where: { $0.type == "stsd" && $0.headerSize == 8 }),
+                  stsd.start + 24 <= stsd.end,
+                  readFourCC(data, at: stsd.start + 20) == "mp4a",
+                  let stsz = stblChildren.first(where: { $0.type == "stsz" && $0.headerSize == 8 }),
+                  stsz.start + 20 <= stsz.end,
+                  let stts = stblChildren.first(where: { $0.type == "stts" && $0.headerSize == 8 }),
+                  stts.start + 16 <= stts.end,
+                  let stsc = stblChildren.first(where: { $0.type == "stsc" && $0.headerSize == 8 }),
+                  stsc.start + 16 <= stsc.end else {
+                continue
+            }
+            let offsetBox = stblChildren.first(where: { ($0.type == "stco" || $0.type == "co64") && $0.headerSize == 8 })
+            guard let offsetBox, offsetBox.start + 16 <= offsetBox.end else { continue }
+
+            let uniformSampleSize = readU32BE(data, at: stsz.start + 12)
+            let actualCount = Int(readU32BE(data, at: stsz.start + 16))
+            guard uniformSampleSize == 0,
+                  actualCount > expectedAudioPacketCount,
+                  stsz.start + 20 + actualCount * 4 <= stsz.end else {
+                continue
+            }
+            let excess = actualCount - expectedAudioPacketCount
+            var sizes = [UInt32]()
+            sizes.reserveCapacity(actualCount)
+            for i in 0..<actualCount {
+                sizes.append(readU32BE(data, at: stsz.start + 20 + i * 4))
+            }
+            let p0Len = Int(sizes[excess])
+            guard p0Len > 0, (0..<excess).allSatisfy({ Int(sizes[$0]) == p0Len }) else {
+                continue
+            }
+
+            let isCo64 = (offsetBox.type == "co64")
+            let chunkCount = Int(readU32BE(data, at: offsetBox.start + 12))
+            let chunkStride = isCo64 ? 8 : 4
+            guard chunkCount > 0, offsetBox.start + 16 + chunkCount * chunkStride <= offsetBox.end else { continue }
+            var chunkOffsets = [UInt64]()
+            chunkOffsets.reserveCapacity(chunkCount)
+            for c in 0..<chunkCount {
+                let p = offsetBox.start + 16 + c * chunkStride
+                chunkOffsets.append(isCo64 ? readU64BE(data, at: p) : UInt64(readU32BE(data, at: p)))
+            }
+
+            let stscCount = Int(readU32BE(data, at: stsc.start + 12))
+            guard stscCount > 0, stsc.start + 16 + stscCount * 12 <= stsc.end else { continue }
+            var stscRuns: [(firstChunk1: Int, count: Int, sdi: UInt32)] = []
+            stscRuns.reserveCapacity(stscCount)
+            for e in 0..<stscCount {
+                let p = stsc.start + 16 + e * 12
+                stscRuns.append((Int(readU32BE(data, at: p)), Int(readU32BE(data, at: p + 4)), readU32BE(data, at: p + 8)))
+            }
+
+            var samplesPerChunk = [Int](repeating: 0, count: chunkCount)
+            var sdiPerChunk = [UInt32](repeating: 1, count: chunkCount)
+            for e in 0..<stscRuns.count {
+                let startC = max(0, stscRuns[e].firstChunk1 - 1)
+                let endC = (e + 1 < stscRuns.count) ? min(chunkCount, max(0, stscRuns[e + 1].firstChunk1 - 1)) : chunkCount
+                guard startC < endC else { continue }
+                for c in startC..<endC {
+                    samplesPerChunk[c] = stscRuns[e].count
+                    sdiPerChunk[c] = stscRuns[e].sdi
+                }
+            }
+            guard samplesPerChunk.reduce(0, +) == actualCount else { continue }
+
+            // Verify every prepended sample 0..<excess is byte-identical in `mdat` to sample `excess` (P0).
+            var firstOffsets = [UInt64]()
+            firstOffsets.reserveCapacity(excess + 1)
+            var sIdx = 0
+            for c in 0..<chunkCount where firstOffsets.count <= excess {
+                var off = chunkOffsets[c]
+                for _ in 0..<samplesPerChunk[c] {
+                    firstOffsets.append(off)
+                    off += UInt64(sizes[sIdx])
+                    sIdx += 1
+                    if firstOffsets.count > excess { break }
+                }
+            }
+            guard firstOffsets.count > excess,
+                  firstOffsets.allSatisfy({ $0 <= UInt64(data.count - p0Len) }) else {
+                continue
+            }
+            let refStart = Int(firstOffsets[excess])
+            let refPacket = data[refStart..<(refStart + p0Len)]
+            guard (0..<excess).allSatisfy({ idx in
+                let st = Int(firstOffsets[idx])
+                return data[st..<(st + p0Len)] == refPacket
+            }) else {
+                continue
+            }
+
+            // Compute new `stts` and total dropped media duration.
+            let sttsCount = Int(readU32BE(data, at: stts.start + 12))
+            guard stts.start + 16 + sttsCount * 8 <= stts.end else { continue }
+            var newSttsEntries: [(count: UInt32, dur: UInt32)] = []
+            var remDropStts = excess
+            var droppedMediaDur: UInt64 = 0
+            for i in 0..<sttsCount {
+                let p = stts.start + 16 + i * 8
+                let c = Int(readU32BE(data, at: p))
+                let d = readU32BE(data, at: p + 4)
+                if remDropStts >= c {
+                    remDropStts -= c
+                    droppedMediaDur += UInt64(c) * UInt64(d)
+                } else if remDropStts > 0 {
+                    let kept = c - remDropStts
+                    droppedMediaDur += UInt64(remDropStts) * UInt64(d)
+                    remDropStts = 0
+                    newSttsEntries.append((UInt32(kept), d))
+                } else {
+                    newSttsEntries.append((UInt32(c), d))
+                }
+            }
+            guard remDropStts == 0 else { continue }
+
+            // Compute updated chunks (`stco`/`co64` and `stsc`).
+            var keptOffsets: [UInt64] = []
+            var keptCounts: [Int] = []
+            var keptSDIs: [UInt32] = []
+            var remDropChunk = excess
+            var cursor = 0
+            for c in 0..<chunkCount {
+                let n = samplesPerChunk[c]
+                if remDropChunk >= n {
+                    remDropChunk -= n
+                    cursor += n
+                } else if remDropChunk > 0 {
+                    var advance: UInt64 = 0
+                    for k in 0..<remDropChunk {
+                        advance += UInt64(sizes[cursor + k])
+                    }
+                    keptOffsets.append(chunkOffsets[c] + advance)
+                    keptCounts.append(n - remDropChunk)
+                    keptSDIs.append(sdiPerChunk[c])
+                    cursor += n
+                    remDropChunk = 0
+                } else {
+                    keptOffsets.append(chunkOffsets[c])
+                    keptCounts.append(n)
+                    keptSDIs.append(sdiPerChunk[c])
+                    cursor += n
+                }
+            }
+            guard !keptOffsets.isEmpty else { continue }
+
+            var newStscRuns: [(firstChunk1: UInt32, count: UInt32, sdi: UInt32)] = []
+            for idx in 0..<keptCounts.count {
+                let cntU = UInt32(keptCounts[idx])
+                let sdiU = keptSDIs[idx]
+                if let last = newStscRuns.last, last.count == cntU && last.sdi == sdiU {
+                    continue
+                }
+                newStscRuns.append((UInt32(idx + 1), cntU, sdiU))
+            }
+
+            func makeFullBox(_ fourCC: String, versionFlags: UInt32, body: [UInt8]) -> [UInt8] {
+                var box = [UInt8]()
+                box.reserveCapacity(12 + body.count)
+                appendU32BE(&box, UInt32(12 + body.count))
+                box.append(contentsOf: fourCC.utf8)
+                appendU32BE(&box, versionFlags)
+                box.append(contentsOf: body)
+                return box
+            }
+
+            var stszBody = [UInt8]()
+            appendU32BE(&stszBody, 0)
+            appendU32BE(&stszBody, UInt32(expectedAudioPacketCount))
+            for i in excess..<actualCount { appendU32BE(&stszBody, sizes[i]) }
+            let newStszBox = makeFullBox("stsz", versionFlags: 0, body: stszBody)
+
+            var sttsBody = [UInt8]()
+            appendU32BE(&sttsBody, UInt32(newSttsEntries.count))
+            for entry in newSttsEntries {
+                appendU32BE(&sttsBody, entry.count)
+                appendU32BE(&sttsBody, entry.dur)
+            }
+            let newSttsBox = makeFullBox("stts", versionFlags: 0, body: sttsBody)
+
+            var stscBody = [UInt8]()
+            appendU32BE(&stscBody, UInt32(newStscRuns.count))
+            for run in newStscRuns {
+                appendU32BE(&stscBody, run.firstChunk1)
+                appendU32BE(&stscBody, run.count)
+                appendU32BE(&stscBody, run.sdi)
+            }
+            let newStscBox = makeFullBox("stsc", versionFlags: 0, body: stscBody)
+
+            var offBody = [UInt8]()
+            appendU32BE(&offBody, UInt32(keptOffsets.count))
+            for off in keptOffsets {
+                if isCo64 { appendU64BE(&offBody, off) } else { appendU32BE(&offBody, UInt32(off)) }
+            }
+            let newOffBox = makeFullBox(offsetBox.type, versionFlags: 0, body: offBody)
+
+            // Update `mdhd.duration` and `elst.media_time` in-place before splicing `stbl`.
+            if let origMdhdDur = readHeaderDuration(data, box: mdhd, v0Offset: 16, v1Offset: 24),
+               origMdhdDur > droppedMediaDur {
+                writeHeaderDuration(&data, box: mdhd, v0Offset: 16, v1Offset: 24, value: origMdhdDur - droppedMediaDur)
+            }
+            if let edts = trakChildren.first(where: { $0.type == "edts" }) {
+                let edtsChildren = parseBoxes(in: data, from: edts.start + edts.headerSize, to: edts.end)
+                if let elst = edtsChildren.first(where: { $0.type == "elst" && $0.headerSize == 8 }),
+                   elst.start + 16 <= elst.end {
+                    let ver = data[elst.start + 8]
+                    let cnt = readU32BE(data, at: elst.start + 12)
+                    if cnt == 1 && ver == 0 && elst.start + 28 <= elst.end {
+                        let mt = Int32(bitPattern: readU32BE(data, at: elst.start + 20))
+                        if mt > 0 && UInt64(mt) <= droppedMediaDur {
+                            writeU32BE(&data, at: elst.start + 20, value: 0)
+                        }
+                    } else if cnt == 1 && ver == 1 && elst.start + 36 <= elst.end {
+                        let mt = Int64(bitPattern: readU64BE(data, at: elst.start + 24))
+                        if mt > 0 && UInt64(mt) <= droppedMediaDur {
+                            writeU64BE(&data, at: elst.start + 24, value: 0)
+                        }
+                    }
+                }
+            }
+
+            var newStblPayload = Data()
+            for child in stblChildren {
+                switch child.type {
+                case "stsz": newStblPayload.append(contentsOf: newStszBox)
+                case "stts": newStblPayload.append(contentsOf: newSttsBox)
+                case "stsc": newStblPayload.append(contentsOf: newStscBox)
+                case "stco", "co64": newStblPayload.append(contentsOf: newOffBox)
+                default: newStblPayload.append(data[child.start..<child.end])
+                }
+            }
+            var newStblHeader = [UInt8]()
+            appendU32BE(&newStblHeader, UInt32(8 + newStblPayload.count))
+            newStblHeader.append(contentsOf: "stbl".utf8)
+            var newStblBox = Data(newStblHeader)
+            newStblBox.append(newStblPayload)
+
+            let stblDelta = Int64(newStblBox.count) - Int64(stbl.end - stbl.start)
+            for box in [minf, mdia, trak, moov] {
+                let updatedSize = Int64(readU32BE(data, at: box.start)) + stblDelta
+                guard updatedSize >= 8 else { return false }
+                writeU32BE(&data, at: box.start, value: UInt32(updatedSize))
+            }
+            data.replaceSubrange(stbl.start..<stbl.end, with: newStblBox)
+            return true
+        }
+        return false
+    }
+
+    /// Injects ISO 14496-12 `sgpd` (`roll_distance = -1`) and `sbgp` (`roll`) sample-group boxes into
+    /// passthrough `mp4a` audio tracks that lack them (container size headers updated; caller shifts `stco`/`co64`).
+    private static func injectMissingAACRollSampleGroups(in data: inout Data) -> Bool {
+        var didInsert = false
 
         for _ in 0..<16 {
             let topBoxes = parseBoxes(in: data, from: 0, to: data.count)
@@ -1532,7 +1820,7 @@ public enum MediaCompatBridge {
                     writeU32BE(&data, at: box.start, value: oldSize + deltaU32)
                 }
                 data.insert(contentsOf: groupBoxes, at: stsd.end)
-                totalDelta += groupBoxes.count
+                didInsert = true
                 insertedThisPass = true
                 break
             }
@@ -1541,11 +1829,13 @@ public enum MediaCompatBridge {
             }
         }
 
-        guard totalDelta > 0 else { return false }
+        return didInsert
+    }
 
+    private static func shiftPostMoovChunkOffsets(in data: inout Data, oldMoovEnd: Int, delta: Int64) {
         let updatedTopBoxes = parseBoxes(in: data, from: 0, to: data.count)
         guard let updatedMoov = updatedTopBoxes.first(where: { $0.type == "moov" }) else {
-            return true
+            return
         }
         let moovChildren = parseBoxes(in: data, from: updatedMoov.start + updatedMoov.headerSize, to: updatedMoov.end)
         for trak in moovChildren where trak.type == "trak" {
@@ -1564,7 +1854,10 @@ public enum MediaCompatBridge {
                     let offPos = entriesStart + idx * 4
                     let oldOff = readU32BE(data, at: offPos)
                     if Int(oldOff) >= oldMoovEnd {
-                        writeU32BE(&data, at: offPos, value: oldOff + UInt32(totalDelta))
+                        let shifted = Int64(oldOff) + delta
+                        if shifted >= 0 {
+                            writeU32BE(&data, at: offPos, value: UInt32(shifted))
+                        }
                     }
                 }
             }
@@ -1576,11 +1869,13 @@ public enum MediaCompatBridge {
                     let offPos = entriesStart + idx * 8
                     let oldOff = readU64BE(data, at: offPos)
                     if oldOff >= UInt64(oldMoovEnd) {
-                        writeU64BE(&data, at: offPos, value: oldOff + UInt64(totalDelta))
+                        let shifted = Int64(bitPattern: oldOff) + delta
+                        if shifted >= 0 {
+                            writeU64BE(&data, at: offPos, value: UInt64(shifted))
+                        }
                     }
                 }
             }
         }
-        return true
     }
 }
