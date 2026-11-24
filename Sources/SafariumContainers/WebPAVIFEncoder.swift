@@ -658,7 +658,8 @@ public enum WebPAVIFEncoder {
                 framesRGBA.append(rgba)
             }
 
-            var vp8xPayload = Data([0x02 | (anyAlpha ? 0x10 : 0x00), 0x00, 0x00, 0x00])
+            let vp8xFlags: UInt8 = 0x02 | (anyAlpha ? UInt8(0x10) : UInt8(0x00))
+            var vp8xPayload = Data([vp8xFlags, 0x00, 0x00, 0x00])
             appendU24LE(&vp8xPayload, w - 1)
             appendU24LE(&vp8xPayload, h - 1)
 

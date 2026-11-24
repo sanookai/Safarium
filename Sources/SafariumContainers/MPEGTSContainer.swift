@@ -233,10 +233,17 @@ public enum MPEGTSCodec {
         var hdr = [UInt8](repeating: 0, count: 7)
         hdr[0] = 0xFF
         hdr[1] = 0xF1
-        hdr[2] = UInt8(((profile & 0x03) << 6) | ((srIdx & 0x0F) << 2) | ((ch >> 2) & 0x01))
-        hdr[3] = UInt8(((ch & 0x03) << 6) | ((frameLen >> 11) & 0x03))
-        hdr[4] = UInt8((frameLen >> 3) & 0xFF)
-        hdr[5] = UInt8(((frameLen & 0x07) << 5) | 0x1F)
+        let b2Profile: Int = (profile & 0x03) << 6
+        let b2SampleRate: Int = (srIdx & 0x0F) << 2
+        let b2ChannelHigh: Int = (ch >> 2) & 0x01
+        let b3ChannelLow: Int = (ch & 0x03) << 6
+        let b3LenHigh: Int = (frameLen >> 11) & 0x03
+        let b4LenMid: Int = (frameLen >> 3) & 0xFF
+        let b5LenLow: Int = ((frameLen & 0x07) << 5) | 0x1F
+        hdr[2] = UInt8(b2Profile | b2SampleRate | b2ChannelHigh)
+        hdr[3] = UInt8(b3ChannelLow | b3LenHigh)
+        hdr[4] = UInt8(b4LenMid)
+        hdr[5] = UInt8(b5LenLow)
         hdr[6] = 0xFC
         return Data(hdr)
     }

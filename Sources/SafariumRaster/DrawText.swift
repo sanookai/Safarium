@@ -212,30 +212,58 @@ func renderGlyphBitmap(font f: CTFont, glyph: CGGlyph, hbScale: Int, upem: Int) 
     var cur: [P] = []
     var last = P(x: 0, y: 0)
     func pt(_ p: CGPoint) -> P { P(x: Double(p.x) * s, y: Double(p.y) * s) }
-    path.applyWithBlock { e in
-        let el = e.pointee
+    func appendQuad(from start: P, control c: P, to end: P) {
+        let len1: Double = abs(c.x - start.x) + abs(c.y - start.y)
+        let len2: Double = abs(end.x - c.x) + abs(end.y - c.y)
+        let n: Int = max(4, min(32, Int(((len1 + len2) / 0.8).rounded(.up))))
+        for i in 1...n {
+            let t: Double = Double(i) / Double(n)
+            let u: Double = 1 - t
+            let w0: Double = u * u
+            let w1: Double = 2 * u * t
+            let w2: Double = t * t
+            let px: Double = w0 * start.x + w1 * c.x + w2 * end.x
+            let py: Double = w0 * start.y + w1 * c.y + w2 * end.y
+            cur.append(P(x: px, y: py))
+        }
+    }
+    func appendCubic(from start: P, c1: P, c2: P, to end: P) {
+        let len1: Double = abs(c1.x - start.x) + abs(c1.y - start.y)
+        let len2: Double = abs(c2.x - c1.x) + abs(c2.y - c1.y)
+        let len3: Double = abs(end.x - c2.x) + abs(end.y - c2.y)
+        let n: Int = max(4, min(40, Int(((len1 + len2 + len3) / 0.8).rounded(.up))))
+        for i in 1...n {
+            let t: Double = Double(i) / Double(n)
+            let u: Double = 1 - t
+            let a: Double = u * u * u
+            let b: Double = 3 * u * u * t
+            let c: Double = 3 * u * t * t
+            let d: Double = t * t * t
+            let px: Double = a * start.x + b * c1.x + c * c2.x + d * end.x
+            let py: Double = a * start.y + b * c1.y + c * c2.y + d * end.y
+            cur.append(P(x: px, y: py))
+        }
+    }
+    path.applyWithBlock { (e: UnsafePointer<CGPathElement>) -> Void in
+        let el: CGPathElement = e.pointee
         switch el.type {
         case .moveToPoint:
             if cur.count > 2 { contours.append(cur) }
-            last = pt(el.points[0]); cur = [last]
+            last = pt(el.points[0])
+            cur = [last]
         case .addLineToPoint:
-            last = pt(el.points[0]); cur.append(last)
+            last = pt(el.points[0])
+            cur.append(last)
         case .addQuadCurveToPoint:
-            let c = pt(el.points[0]), e1 = pt(el.points[1])
-            let n = max(4, min(32, Int(((abs(c.x - last.x) + abs(c.y - last.y) + abs(e1.x - c.x) + abs(e1.y - c.y)) / 0.8).rounded(.up))))
-            for i in 1...n {
-                let t = Double(i) / Double(n), u = 1 - t
-                cur.append(P(x: u * u * last.x + 2 * u * t * c.x + t * t * e1.x, y: u * u * last.y + 2 * u * t * c.y + t * t * e1.y))
-            }
+            let c: P = pt(el.points[0])
+            let e1: P = pt(el.points[1])
+            appendQuad(from: last, control: c, to: e1)
             last = e1
         case .addCurveToPoint:
-            let c1 = pt(el.points[0]), c2 = pt(el.points[1]), e1 = pt(el.points[2])
-            let n = max(4, min(40, Int(((abs(c1.x - last.x) + abs(c1.y - last.y) + abs(c2.x - c1.x) + abs(c2.y - c1.y) + abs(e1.x - c2.x) + abs(e1.y - c2.y)) / 0.8).rounded(.up))))
-            for i in 1...n {
-                let t = Double(i) / Double(n), u = 1 - t
-                let a = u * u * u, b = 3 * u * u * t, c = 3 * u * t * t, d = t * t * t
-                cur.append(P(x: a * last.x + b * c1.x + c * c2.x + d * e1.x, y: a * last.y + b * c1.y + c * c2.y + d * e1.y))
-            }
+            let c1: P = pt(el.points[0])
+            let c2: P = pt(el.points[1])
+            let e1: P = pt(el.points[2])
+            appendCubic(from: last, c1: c1, c2: c2, to: e1)
             last = e1
         case .closeSubpath:
             if cur.count > 2 { contours.append(cur) }

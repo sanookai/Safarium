@@ -269,19 +269,28 @@ private func ioToGray(_ m: IOMat, kind: IOGrayKind) -> IOMat {
     }
     switch m.depth {
     case .u8:
-        m.bytes.withUnsafeBufferPointer { s in
-            out.bytes.withUnsafeMutableBufferPointer { d in
+        m.bytes.withUnsafeBufferPointer { (s: UnsafeBufferPointer<UInt8>) -> Void in
+            out.bytes.withUnsafeMutableBufferPointer { (d: inout UnsafeMutableBufferPointer<UInt8>) -> Void in
                 for i in 0..<n {
-                    d[i] = UInt8((Int(s[i * ch]) * wb + Int(s[i * ch + 1]) * wg + Int(s[i * ch + 2]) * wr + rnd) >> shift)
+                    let base: Int = i * ch
+                    let bSum: Int = Int(s[base]) * wb
+                    let gSum: Int = Int(s[base + 1]) * wg
+                    let rSum: Int = Int(s[base + 2]) * wr
+                    d[i] = UInt8((bSum + gSum + rSum + rnd) >> shift)
                 }
             }
         }
     case .u16:
-        m.bytes.withUnsafeBytes { sr in
-            out.bytes.withUnsafeMutableBytes { dr in
-                let s = sr.bindMemory(to: UInt16.self), d = dr.bindMemory(to: UInt16.self)
+        m.bytes.withUnsafeBytes { (sr: UnsafeRawBufferPointer) -> Void in
+            out.bytes.withUnsafeMutableBytes { (dr: UnsafeMutableRawBufferPointer) -> Void in
+                let s: UnsafeBufferPointer<UInt16> = sr.bindMemory(to: UInt16.self)
+                let d: UnsafeMutableBufferPointer<UInt16> = dr.bindMemory(to: UInt16.self)
                 for i in 0..<n {
-                    d[i] = UInt16((Int(s[i * ch]) * wb + Int(s[i * ch + 1]) * wg + Int(s[i * ch + 2]) * wr + rnd) >> shift)
+                    let base: Int = i * ch
+                    let bSum: Int = Int(s[base]) * wb
+                    let gSum: Int = Int(s[base + 1]) * wg
+                    let rSum: Int = Int(s[base + 2]) * wr
+                    d[i] = UInt16((bSum + gSum + rSum + rnd) >> shift)
                 }
             }
         }

@@ -9,36 +9,71 @@ final class SnapshotQualityProbeTests: XCTestCase {
 
     /// 2x2 box average of a BGRA buffer (premultiplied), the "true" supersampled reference.
     static func boxDown2(_ s: Snapshot) -> [UInt8] {
-        let d = s.bgra(), w = s.width, h = s.height, ow = w / 2, oh = h / 2
+        let d: Data = s.bgra()
+        let w: Int = s.width
+        let h: Int = s.height
+        let ow: Int = w / 2
+        let oh: Int = h / 2
+        let rowStride: Int = w * 4
         var out = [UInt8](repeating: 0, count: ow * oh * 4)
-        d.withUnsafeBytes { (p: UnsafeRawBufferPointer) in
-            let b = p.bindMemory(to: UInt8.self)
-            for y in 0..<oh { for x in 0..<ow { for c in 0..<4 {
-                let i0 = ((2 * y) * w + 2 * x) * 4 + c, i1 = i0 + 4, i2 = i0 + w * 4, i3 = i2 + 4
-                out[(y * ow + x) * 4 + c] = UInt8((Int(b[i0]) + Int(b[i1]) + Int(b[i2]) + Int(b[i3]) + 2) / 4)
-            } } }
+        d.withUnsafeBytes { (p: UnsafeRawBufferPointer) -> Void in
+            let b: UnsafeBufferPointer<UInt8> = p.bindMemory(to: UInt8.self)
+            for y in 0..<oh {
+                let srcRow: Int = 2 * y
+                for x in 0..<ow {
+                    let srcCol: Int = 2 * x
+                    let base: Int = (srcRow * w + srcCol) * 4
+                    let dstBase: Int = (y * ow + x) * 4
+                    for c in 0..<4 {
+                        let i0: Int = base + c
+                        let i1: Int = i0 + 4
+                        let i2: Int = i0 + rowStride
+                        let i3: Int = i2 + 4
+                        let sum: Int = Int(b[i0]) + Int(b[i1]) + Int(b[i2]) + Int(b[i3]) + 2
+                        out[dstBase + c] = UInt8(sum / 4)
+                    }
+                }
+            }
         }
         return out
     }
 
     static func psnr(_ a: [UInt8], _ b: Data) -> Double {
         precondition(a.count == b.count)
-        var se = 0.0
-        b.withUnsafeBytes { (p: UnsafeRawBufferPointer) in
-            for i in stride(from: 0, to: a.count, by: 4) { for c in 0..<3 { let d = Double(a[i + c]) - Double(p[i + c]); se += d * d } }
+        var se: Double = 0.0
+        b.withUnsafeBytes { (p: UnsafeRawBufferPointer) -> Void in
+            let bytes: UnsafeBufferPointer<UInt8> = p.bindMemory(to: UInt8.self)
+            for i in stride(from: 0, to: a.count, by: 4) {
+                for c in 0..<3 {
+                    let idx: Int = i + c
+                    let va: Double = Double(a[idx])
+                    let vb: Double = Double(bytes[idx])
+                    let d: Double = va - vb
+                    se += d * d
+                }
+            }
         }
-        let mse = se / Double(a.count / 4 * 3)
+        let mse: Double = se / Double(a.count / 4 * 3)
         return mse == 0 ? 99 : 10 * log10(255 * 255 / mse)
     }
 
     /// Mean absolute horizontal+vertical gradient (higher = crisper edges).
     static func sharpness(_ d: Data, w: Int, h: Int) -> Double {
-        var g = 0.0
-        d.withUnsafeBytes { (p: UnsafeRawBufferPointer) in
-            for y in 0..<(h - 1) { for x in 0..<(w - 1) {
-                let i = (y * w + x) * 4 + 1
-                g += abs(Double(p[i]) - Double(p[i + 4])) + abs(Double(p[i]) - Double(p[i + w * 4]))
-            } }
+        var g: Double = 0.0
+        let rowStride: Int = w * 4
+        d.withUnsafeBytes { (p: UnsafeRawBufferPointer) -> Void in
+            let bytes: UnsafeBufferPointer<UInt8> = p.bindMemory(to: UInt8.self)
+            for y in 0..<(h - 1) {
+                for x in 0..<(w - 1) {
+                    let i: Int = (y * w + x) * 4 + 1
+                    let center: Double = Double(bytes[i])
+                    let right: Double = Double(bytes[i + 4])
+                    let down: Double = Double(bytes[i + rowStride])
+                    let dx: Double = abs(center - right)
+                    let dy: Double = abs(center - down)
+                    g += dx + dy
+                }
+            }
         }
         return g / Double(w * h)
     }
