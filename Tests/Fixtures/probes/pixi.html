@@ -1,0 +1,14 @@
+<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;background:#fff;overflow:hidden}#box{position:absolute;left:0;top:200px;width:100px;height:100px;background:#e00}</style></head><body><script src="../probe-libs/pixi.min.js"></script><script>
+(async () => {
+  const app = new PIXI.Application();
+  await app.init({width:800,height:600,background:'#ffffff',preference:'webgl',antialias:false,autoStart:false,resolution:1,autoDensity:false});
+  document.body.appendChild(app.canvas);
+  app.canvas.style.cssText = 'position:absolute;left:0;top:0';
+  const g = new PIXI.Graphics().rect(0,0,100,100).fill(0xee0000);
+  g.y = 200; g.x = 100; app.stage.addChild(g);
+  window.__renderer = app.renderer.name;
+  window.__seek = t => { g.x = 100 + 200*t; app.render(); };
+  app.render();
+  window.__ready = true;
+})();
+</script></body></html>

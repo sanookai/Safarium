@@ -1,0 +1,25 @@
+<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;background:#fff;overflow:hidden}#box{position:absolute;left:0;top:200px;width:100px;height:100px;background:#e00}</style></head><body><script src="../probe-libs/three.iife.js"></script><script>
+const renderer = new THREE.WebGLRenderer({antialias:false});
+renderer.setPixelRatio(1); renderer.setSize(800,600); renderer.setClearColor(0xffffff,1);
+document.body.appendChild(renderer.domElement);
+renderer.domElement.style.cssText = 'position:absolute;left:0;top:0';
+const scene = new THREE.Scene();
+const cam = new THREE.OrthographicCamera(0,800,600,0,-1000,1000); cam.position.z = 500;
+// textured, lit box: red-dominant checker texture + ambient + directional light
+const c = document.createElement('canvas'); c.width = c.height = 64;
+const x = c.getContext('2d');
+for (let i=0;i<8;i++) for (let j=0;j<8;j++) { x.fillStyle = (i+j)%2 ? '#ee0000' : '#aa0000'; x.fillRect(i*8,j*8,8,8); }
+const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
+const mesh = new THREE.Mesh(new THREE.BoxGeometry(100,100,100), new THREE.MeshStandardMaterial({map:tex,roughness:0.6}));
+scene.add(mesh);
+scene.add(new THREE.AmbientLight(0xffffff,0.6));
+const dl = new THREE.DirectionalLight(0xffffff,2); dl.position.set(1,1,2); scene.add(dl);
+window.__seek = t => {
+  mesh.position.set(100 + 200*t + 50, 600 - 250 - 50, 0);   // top-left origin: left edge = 100+200t, top = 200
+  renderer.render(scene, cam);
+  // toDataURL in the same task as the draw call (preserveDrawingBuffer=false) — measured by the probe
+  window.__dataURLLen = renderer.domElement.toDataURL('image/png').length;
+};
+window.__seek(0);
+window.__ready = true;
+</script></body></html>

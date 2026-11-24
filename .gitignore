@@ -1,0 +1,32 @@
+# macOS / AppleDouble / Finder metadata
+._*
+.DS_Store
+
+# SwiftPM & native build outputs
+.build/
+.build
+.swiftpm/
+*.o
+*.dylib
+*.so
+*.metallib-archive
+
+# Python caches & virtualenvs
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+
+# Heavy media / benchmark artifacts
+bench/results/artifacts/
+*.mp4
+*.mov
+*.wav
+*.m4a
+*.gif
+*.tmp
+
+# Secrets & local env
+.env
+.env.*

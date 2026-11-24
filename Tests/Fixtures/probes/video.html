@@ -1,0 +1,35 @@
+<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;background:#fff;overflow:hidden}video{position:absolute;left:0;top:0;width:640px;height:360px}</style></head><body>
+<video id="v" muted playsinline preload="auto"></video>
+<canvas id="cv" width="640" height="360" style="position:absolute;left:0;top:0;display:none"></canvas>
+<script>
+const v = document.getElementById('v');
+const once = (el, ev) => new Promise(r => el.addEventListener(ev, r, { once: true }));
+// real-timer deadline (setTimeout is virtual under the clock; AbortSignal.timeout is not)
+const deadline = ms => new Promise(r => AbortSignal.timeout(ms).addEventListener('abort', () => r('timeout')));
+const cv = document.getElementById('cv');
+window.__ready = true;
+// load a clip and wait until the first frame is decodable (throws after 8 s instead of hanging)
+window.__loadClip = async src => {
+  v.src = src; v.load();
+  if (v.readyState < 2) { const r = await Promise.race([once(v, 'loadeddata'), deadline(8000)]); if (r === 'timeout') throw new Error('video load timeout (readyState ' + v.readyState + ', networkState ' + v.networkState + ')'); }
+  return v.duration;
+};
+// frame-accurate seek: currentTime=t, wait for 'seeked' (real-timer deadline), optionally for rVFC, then copy the frame into the visible canvas
+// (takeSnapshot does not capture the <video> layer itself, only canvas/DOM)
+window.__seekVideo = async (t, wantRVFC, canvas, settleMs) => {
+  const seeked = once(v, 'seeked');
+  v.currentTime = t;
+  const s = await Promise.race([seeked.then(() => 'seeked'), deadline(3000)]);
+  if (settleMs > 0) await deadline(settleMs);   // real-time settle: 'seeked' can fire before the new frame is drawable
+  let rvfc = 'skipped';
+  if (wantRVFC && 'requestVideoFrameCallback' in v) {
+    rvfc = await Promise.race([
+      new Promise(r => v.requestVideoFrameCallback((now, meta) => r('fired mediaTime=' + meta.mediaTime))),
+      deadline(500)
+    ]);
+  }
+  cv.style.display = canvas ? 'block' : 'none';
+  if (canvas) cv.getContext('2d').drawImage(v, 0, 0, 640, 360);
+  return { seeked: s === 'seeked', currentTime: v.currentTime, rvfc };
+};
+</script></body></html>

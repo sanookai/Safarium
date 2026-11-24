@@ -1,0 +1,406 @@
+name: macOS Cloud CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: macos-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tier1-build-and-tests:
+    name: Tier 1 · Headless Build & Verification (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+
+    env:
+      CI_BUILD_ROOT: /tmp/safarium-ci-build
+      CI_PREFIX: /tmp/safarium-ci-prefix
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Runner environment & disk preflight
+        run: |
+          sw_vers
+          swift --version
+          xcodebuild -version || true
+          python3 --version
+          sysctl -n hw.memsize hw.ncpu
+          df -h /tmp
+          rm -rf "$CI_BUILD_ROOT" "$CI_PREFIX" /tmp/safarium-ci-venv /tmp/safarium-ci-parity-venv /tmp/safarium-ci-scratch
+          mkdir -p "$CI_BUILD_ROOT" "$CI_PREFIX" /tmp/safarium-ci-scratch
+
+      - name: Static hygiene & Apache-2.0 license gate
+        run: |
+          python3 Tools/export-public-repo.py --audit-dir . --json
+
+      - name: Restore SwiftPM cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/safarium-ci-build
+          key: swiftpm-${{ matrix.os }}-${{ hashFiles('Package.swift', 'Sources/**', 'Tests/**') }}
+          restore-keys: |
+            swiftpm-${{ matrix.os }}-
+
+      - name: Build Debug & Release targets + safarium-verify
+        run: |
+          xcrun swift build --scratch-path "$CI_BUILD_ROOT" --jobs 2
+          xcrun swift build -c release --scratch-path "$CI_BUILD_ROOT" --jobs 2
+          RELEASE_BIN="$(xcrun swift build -c release --scratch-path "$CI_BUILD_ROOT" --show-bin-path)"
+          echo "RELEASE_BIN=$RELEASE_BIN" >> "$GITHUB_ENV"
+          xcrun swiftc -parse-as-library -O Tools/safarium-verify.swift -o "$CI_BUILD_ROOT/safarium-verify"
+
+      - name: Verify Apple-only linkage (otool -L across all executables + libSafariumRaster.dylib)
+        run: |
+          python3 - <<'PY'
+          import os, subprocess, sys
+          from pathlib import Path
+
+          build_root = Path(os.environ["CI_BUILD_ROOT"])
+          release_dir = Path(os.environ["RELEASE_BIN"])
+          targets = [
+              release_dir / "safarium-html",
+              release_dir / "safarium-media",
+              release_dir / "safarium-forge",
+              release_dir / "safarium-cdp",
+              release_dir / "safarium-bench",
+              release_dir / "safarium-regions",
+              build_root / "safarium-verify",
+              release_dir / "libSafariumRaster.dylib",
+          ]
+          allowed = (
+              "/System/Library/",
+              "/usr/lib/",
+              "/Library/Apple/System/",
+              "/System/Volumes/Preboot/Cryptexes/OS/",
+          )
+          forbidden_tokens = ("ffmpeg", "avcodec", "avformat", "avutil", "swscale", "swresample", "chrome", "chromium", "opencv")
+
+          for path in targets:
+              assert path.is_file(), f"Missing built artifact: {path}"
+              id_out = subprocess.check_output(["/usr/bin/otool", "-D", str(path)], text=True)
+              self_ids = {ln.strip() for ln in id_out.splitlines()[1:] if ln.strip()}
+              ot_out = subprocess.check_output(["/usr/bin/otool", "-L", str(path)], text=True)
+              deps = [
+                  ln.strip().split(" (compatibility version ", 1)[0]
+                  for ln in ot_out.splitlines()
+                  if ln.startswith(("\t", " "))
+              ]
+              checked = [d for d in deps if d not in self_ids]
+              bad = [d for d in checked if not d.startswith(allowed)]
+              foul = [d for d in checked if any(tok in d.lower() for tok in forbidden_tokens)]
+              assert checked, f"{path.name}: empty dependency list"
+              assert not bad, f"{path.name}: non-Apple linkage detected: {bad}"
+              assert not foul, f"{path.name}: forbidden library detected: {foul}"
+              print(f"OK {path.name}: {len(checked)} Apple-only dependencies")
+          PY
+
+      - name: C99 kernel ASan + UBSan harness (Sources/SafariumRasterC)
+        run: |
+          cat > /tmp/safarium-ci-scratch/raster_c_asan.c <<'EOF'
+          #include <assert.h>
+          #include <math.h>
+          #include <stdint.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include "SafariumRasterC.h"
+          #include "sr_linalg.h"
+          #include "sr_ops.h"
+
+          int64_t sr_deflate_bound(int64_t n);
+          int64_t sr_deflate_fast(const uint8_t *in, int64_t n, uint8_t *out, int64_t cap);
+          int64_t sr_vp8l_encode(const uint32_t *argb, int32_t w, int32_t h, int32_t hasAlpha, int32_t quality, uint8_t **outp);
+          void sr_vp8_free(uint8_t *p);
+          void sr_jpeg_ycc420(const uint8_t *src, intptr_t stride, int ch, int w, int rows, int pw, uint8_t *yStrip, uint8_t *cc);
+
+          int main(void) {
+              assert(src_kernels_version() >= 1);
+
+              // 1. Deflate bound + roundtrip smoke under ASan/UBSan
+              uint8_t src[4096];
+              for (size_t i = 0; i < sizeof(src); i++) src[i] = (uint8_t)((i * 17) & 0xFF);
+              int64_t bound = sr_deflate_bound((int64_t)sizeof(src));
+              assert(bound > (int64_t)sizeof(src));
+              uint8_t *dst = (uint8_t *)malloc((size_t)bound);
+              assert(dst != NULL);
+              int64_t dlen = sr_deflate_fast(src, (int64_t)sizeof(src), dst, bound);
+              assert(dlen > 0 && dlen <= bound);
+              free(dst);
+
+              // 2. VP8L 32x32 lossless encode + strict 14-bit dimension guard (16384 rejected)
+              uint32_t px[32 * 32];
+              for (int i = 0; i < 32 * 32; i++) px[i] = 0xFF204080u ^ (uint32_t)(i * 131u);
+              uint8_t *webp = NULL;
+              int64_t wlen = sr_vp8l_encode(px, 32, 32, 0, 50, &webp);
+              assert(wlen > 0 && webp != NULL);
+              sr_vp8_free(webp);
+
+              uint8_t *bad_webp = NULL;
+              assert(sr_vp8l_encode(px, 16384, 1, 0, 50, &bad_webp) < 0 && bad_webp == NULL);
+              assert(sr_vp8l_encode(px, 1, 16384, 0, 50, &bad_webp) < 0 && bad_webp == NULL);
+
+              // 3. JPEG YCbCr 4:2:0 strip conversion under ASan/UBSan
+              uint8_t bgr[16 * 16 * 3];
+              memset(bgr, 128, sizeof(bgr));
+              uint8_t ystrip[16 * 16];
+              uint8_t cc[2 * 8 * 8];
+              sr_jpeg_ycc420(bgr, 16 * 3, 3, 16, 16, 16, ystrip, cc);
+
+              // 4. Core NEON/C arithmetic kernel smoke (type=0 uint8, op=0 saturating add)
+              uint8_t a[64], b[64], out[64];
+              for (int i = 0; i < 64; i++) { a[i] = 200; b[i] = 100; }
+              src_addsub(0, 0, a, b, out, 64);
+              assert(out[0] == 255 && out[63] == 255);
+
+              // 5. Phase 2 Accelerate BLAS GEMM under ASan/UBSan
+              float ma[4] = {1, 2, 3, 4}, mb[4] = {5, 6, 7, 8}, mc[4] = {0, 0, 0, 0};
+              assert(sr_c_gemm_f32(0, 0, 2, 2, 2, 1.0f, ma, 2, mb, 2, 0.0f, mc, 2) == 0);
+              assert(fabsf(mc[0] - 19.0f) < 1e-4f && fabsf(mc[3] - 50.0f) < 1e-4f);
+
+              // 6. Phase 3 CLAHE + Canny under ASan/UBSan
+              uint8_t gray[32 * 32], cl[32 * 32], ed[32 * 32];
+              for (int y = 0; y < 32; y++) for (int x = 0; x < 32; x++) gray[y * 32 + x] = (uint8_t)(x < 16 ? 20 : 220);
+              assert(sr_c_clahe_u8(gray, 32, 32, 32, cl, 32, 2.0, 4, 4) == 0);
+              assert(sr_c_canny_u8(gray, 32, 32, 1, 32, ed, 32, 50.0, 150.0, 3, 0) == 0);
+              assert(ed[16 * 32 + 15] == 255 || ed[16 * 32 + 16] == 255);
+              return 0;
+          }
+          EOF
+          clang -std=c11 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+            -ISources/SafariumRasterC/include \
+            Sources/SafariumRasterC/*.c /tmp/safarium-ci-scratch/raster_c_asan.c \
+            -framework Accelerate \
+            -o /tmp/safarium-ci-scratch/raster_c_asan
+          /tmp/safarium-ci-scratch/raster_c_asan
+
+      - name: Run Swift XCTest suite (serial --no-parallel for 7 GB VM safety)
+        env:
+          SAFARIUM_PROBES: "0"
+          SAFARIUM_PROBE_SCRATCH: /tmp/safarium-ci-scratch/probes
+        run: |
+          xcrun swift test --no-parallel --jobs 2 --scratch-path "$CI_BUILD_ROOT"
+
+      - name: Install release into isolated prefix & test unified CLI + Queue + Rule-Sync + SDKs
+        run: |
+          python3 Tools/install-render.py \
+            --prefix "$CI_PREFIX" \
+            --release "$RELEASE_BIN" \
+            --verifier "$CI_BUILD_ROOT/safarium-verify"
+          python3 Tools/install-render.py --prefix "$CI_PREFIX" --check
+
+          "$CI_PREFIX/bin/safarium" --help | grep -q "safarium"
+          "$CI_PREFIX/bin/safarium" version
+          "$CI_PREFIX/bin/safarium" status
+          "$CI_PREFIX/bin/safarium" raster info
+
+          SAFARIUM_RENDER_BIN="$CI_PREFIX/bin/safarium-render" python3 sdk/python/safarium_forge.py --self-test
+          if command -v node >/dev/null 2>&1; then
+            SAFARIUM_RENDER_BIN="$CI_PREFIX/bin/safarium-render" node sdk/node/safarium-forge.mjs --self-test
+          fi
+          /bin/sh sdk/shell/safarium-forge.sh --help >/dev/null
+
+          REAL_SCRATCH="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' /tmp/safarium-ci-scratch)"
+          /usr/bin/python3 -ISB Tests/queue/test_queue.py --scratch "$REAL_SCRATCH" -v
+          python3 Tests/queue-integration/rule-sync.py --scratch "$REAL_SCRATCH"
+
+      - name: SafariumRaster zero-OpenCV ctypes smoke, accuracy & WebP 14-bit policy tests
+        run: |
+          python3 -m venv /tmp/safarium-ci-venv
+          /tmp/safarium-ci-venv/bin/pip install --quiet --upgrade pip
+          /tmp/safarium-ci-venv/bin/pip install --quiet numpy Pillow pytest
+
+          SAFARIUM_RASTER_LIB="$RELEASE_BIN/libSafariumRaster.dylib" \
+          PYTHONPATH="$PWD/sdk/python/safarium_cv2:$PWD/sdk/python/safarium_sci" \
+          /tmp/safarium-ci-venv/bin/python - <<'PY'
+          import ctypes, os
+          from pathlib import Path
+          import numpy as np
+          from PIL import Image
+          import cv2
+          import scipy.signal as spsig
+          import scipy.ndimage as spnd
+
+          assert cv2.__version__.startswith("safarium"), cv2.__version__
+          assert Path(cv2.__file__).resolve().is_relative_to(Path.cwd() / "sdk/python/safarium_cv2"), cv2.__file__
+          assert cv2.getNumThreads() == 1, "SF-VIDEO-1 requires default 1 thread"
+
+          lib = ctypes.CDLL(os.environ["SAFARIUM_RASTER_LIB"])
+          lib.sr_abi_version.restype = ctypes.c_int32
+          assert lib.sr_abi_version() == 1
+
+          # 1. Draw + Color + Resize + GaussianBlur sanity
+          img = np.zeros((128, 128, 3), dtype=np.uint8)
+          cv2.circle(img, (64, 64), 24, (20, 180, 240), -1, lineType=cv2.LINE_AA)
+          cv2.rectangle(img, (10, 10), (40, 40), (255, 255, 255), 2)
+          assert int(img[64, 64, 2]) > 200 and int(img[0, 0].sum()) == 0
+          small = cv2.resize(img, (64, 64), interpolation=cv2.INTER_AREA)
+          assert small.shape == (64, 64, 3)
+          blurred = cv2.GaussianBlur(img, (5, 5), 1.2)
+          assert blurred.shape == img.shape and blurred.dtype == np.uint8
+
+          # 2. Lossless PNG / WebP / TIFF roundtrip verified via Pillow
+          for ext in (".png", ".webp", ".tif"):
+              ok, buf = cv2.imencode(ext, img)
+              assert ok and len(buf) > 32, f"imencode {ext} failed"
+              dec = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+              assert np.array_equal(dec, img), f"{ext} lossless roundtrip mismatch"
+
+          # 3. Color JPEG encode + Pillow decode accuracy
+          ok, jbuf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 92])
+          assert ok and len(jbuf) > 100
+          jdec = cv2.imdecode(jbuf, cv2.IMREAD_COLOR)
+          assert jdec.shape == img.shape and float(np.mean(np.abs(jdec.astype(float) - img.astype(float)))) < 5.0
+
+          # 4. WebP 14-bit policy rejection BEFORE allocation (lossless + lossy: 16384x1, 1x16384, 16000x9000)
+          for w, h in ((16384, 1), (1, 16384), (16000, 9000)):
+              huge = np.zeros((h, w, 3), dtype=np.uint8)
+              for params in ([], [cv2.IMWRITE_WEBP_QUALITY, 80]):
+                  raised = False
+                  try:
+                      cv2.imencode(".webp", huge, params)
+                  except cv2.error as exc:
+                      raised = True
+                      assert "14-bit" in str(exc) or "16383" in str(exc) or "2^27" in str(exc), str(exc)
+                  assert raised, f"WebP {w}x{h} params={params} must fail with cv2.error"
+
+          # 5. Phase 2 (Accelerate linalg + DFT) & Phase 3 (imgproc filters) zero-OpenCV smoke
+          a2 = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+          b2 = np.array([[5.0, 6.0], [7.0, 8.0]], dtype=np.float32)
+          prod = cv2.gemm(a2, b2, 1.0, None, 0.0)
+          assert np.allclose(prod, np.array([[19.0, 22.0], [43.0, 50.0]], dtype=np.float32))
+          spec = cv2.dft(np.ones((16, 16), dtype=np.float32))
+          assert spec.shape == (16, 16)
+          edges = cv2.Canny(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), 50, 150)
+          assert edges.shape == (128, 128) and int(edges.max()) == 255
+          clahe_out = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4)).apply(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
+          assert clahe_out.shape == (128, 128)
+
+          # 6. scipy shim smoke check (zero real scipy installed)
+          sos = spsig.butter(2, 400.0, "low", fs=48000, output="sos")
+          y = spsig.sosfilt(sos, np.ones(128))
+          assert y.shape == (128,) and np.isfinite(y).all()
+          m = spnd.minimum_filter1d(np.array([5.0, 1.0, 3.0, 2.0]), size=3)
+          assert m.tolist() == [1.0, 1.0, 1.0, 2.0]
+          print("Zero-OpenCV/Zero-SciPy SafariumRaster Phase 1-3 & WebP 14-bit smoke PASSED")
+          PY
+
+      - name: SafariumRaster reference parity suites (isolated per-suite pytest processes)
+        run: |
+          python3 -m venv /tmp/safarium-ci-parity-venv
+          /tmp/safarium-ci-parity-venv/bin/pip install --quiet --upgrade pip
+          /tmp/safarium-ci-parity-venv/bin/pip install --quiet numpy Pillow pytest opencv-python-headless
+          PYTHON=/tmp/safarium-ci-parity-venv/bin/python bash sdk/python/safarium_cv2/build_core.sh
+          PYTHON=/tmp/safarium-ci-parity-venv/bin/python bash sdk/python/safarium_cv2/build_fast.sh
+          SUITES=(
+            sdk/python/tests/test_parity_core.py
+            sdk/python/tests/test_parity_numpy.py
+            sdk/python/tests/test_parity_draw.py
+            sdk/python/tests/test_parity_ops.py
+            sdk/python/tests/test_parity_io.py
+            sdk/python/tests/test_parity_linalg.py
+            sdk/python/tests/test_parity_imgproc.py
+            sdk/python/tests/test_gpu.py
+            sdk/python/tests/test_bench_raster.py
+          )
+          # Run each suite in a fresh Python process so raster_parity.load_pair() sys.modules["cv2"] never leaks across files.
+          for suite in "${SUITES[@]}"; do
+            echo "=== Running $suite ==="
+            SAFARIUM_RASTER_LIB="$RELEASE_BIN/libSafariumRaster.dylib" \
+              /tmp/safarium-ci-parity-venv/bin/python -m pytest -q "$suite"
+          done
+          echo "=== Running test_gpu.py with SAFARIUM_GPU_DISABLE=1 (headless VM fallback) ==="
+          SAFARIUM_GPU_DISABLE=1 \
+          SAFARIUM_RASTER_LIB="$RELEASE_BIN/libSafariumRaster.dylib" \
+            /tmp/safarium-ci-parity-venv/bin/python -m pytest -q sdk/python/tests/test_gpu.py
+
+  tier2-capability-probe:
+    name: Tier 2 · Capability Probe & Telemetry (${{ matrix.os }})
+    needs: tier1-build-and-tests
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+
+    env:
+      CI_BUILD_ROOT: /tmp/safarium-ci-build
+      CI_PREFIX: /tmp/safarium-ci-prefix
+      CI_TELEMETRY: /tmp/safarium-tier2
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Restore SwiftPM cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/safarium-ci-build
+          key: swiftpm-${{ matrix.os }}-${{ hashFiles('Package.swift', 'Sources/**', 'Tests/**') }}
+          restore-keys: |
+            swiftpm-${{ matrix.os }}-
+
+      - name: Ensure Release workers & prefix installed
+        run: |
+          mkdir -p "$CI_TELEMETRY" "$CI_BUILD_ROOT" "$CI_PREFIX"
+          xcrun swift build -c release --scratch-path "$CI_BUILD_ROOT" --jobs 2
+          RELEASE_BIN="$(xcrun swift build -c release --scratch-path "$CI_BUILD_ROOT" --show-bin-path)"
+          xcrun swiftc -parse-as-library -O Tools/safarium-verify.swift -o "$CI_BUILD_ROOT/safarium-verify"
+          python3 Tools/install-render.py \
+            --prefix "$CI_PREFIX" \
+            --release "$RELEASE_BIN" \
+            --verifier "$CI_BUILD_ROOT/safarium-verify"
+
+      - name: Collect Cloud VM capability & health telemetry
+        run: |
+          "$CI_PREFIX/bin/safarium" doctor --json > "$CI_TELEMETRY/doctor.json" || true
+          "$CI_PREFIX/bin/safarium" capabilities > "$CI_TELEMETRY/capabilities.json" || true
+          "$CI_PREFIX/bin/safarium" raster info > "$CI_TELEMETRY/raster-info.json" || true
+          cat "$CI_TELEMETRY/doctor.json"
+          cat "$CI_TELEMETRY/raster-info.json"
+
+      - name: Optional synthetic 256x256 10-frame WebKit smoke render
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+
+          prefix = Path(os.environ["CI_PREFIX"])
+          out_dir = Path(os.environ["CI_TELEMETRY"])
+          html = out_dir / "smoke.html"
+          mp4 = out_dir / "smoke.mp4"
+          html.write_text("<!doctype html><html><body style='margin:0;background:#103060'></body></html>\n")
+
+          r = subprocess.run([
+              str(prefix / "bin/safarium"), "html", str(html),
+              "--output", str(mp4), "--width", "256", "--height", "256",
+              "--fps", "30", "--frames", "10", "--video-only", "--hash", "--json",
+          ], capture_output=True, text=True, timeout=90)
+          summary = {"html_exit": r.returncode, "html_stdout": r.stdout, "html_stderr": r.stderr[-500:]}
+          if r.returncode == 0 and mp4.is_file():
+              v = subprocess.run([str(prefix / "bin/safarium"), "verify", str(mp4)], capture_output=True, text=True, timeout=60)
+              summary["verify_exit"] = v.returncode
+              summary["verify_stdout"] = v.stdout[:1000]
+          (out_dir / "smoke-telemetry.json").write_text(json.dumps(summary, indent=2) + "\n")
+          print(json.dumps(summary, indent=2))
+          PY
+
+      - name: Upload Tier 2 telemetry artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: safarium-tier2-${{ matrix.os }}
+          path: /tmp/safarium-tier2/*.json
+          if-no-files-found: warn

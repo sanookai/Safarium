@@ -1,0 +1,47 @@
+{
+  "schema": "safarium.reviewed-rule-targets/1",
+  "targets": [
+    {
+      "path": "~/AGENTS.md",
+      "before": "## §25 — ถอดเสียง & ประหยัดเครื่อง Mac",
+      "purpose": "Canonical personal rules; also the default Codex AGENTS symlink."
+    },
+    {
+      "path": "~/.claude/CLAUDE.md",
+      "after": "@~/AGENTS.md",
+      "purpose": "Keep native Claude import and the existing OpenCode fallback. Do not mask either overlay."
+    },
+    {
+      "path": "~/.gemini/GEMINI.md",
+      "purpose": "Shared documented default Gemini and Antigravity entry."
+    },
+    {
+      "path": "~/.hermes/SOUL.md",
+      "purpose": "Preserve the existing default Hermes profile identity."
+    },
+    {
+      "path": "~/.agents/AGENTS.md",
+      "purpose": "Existing cross-tool global used by Cline, and documented for Kimi and dsh."
+    },
+    {
+      "path": "~/.agents.md",
+      "new_header": "# Personal agent instructions\n",
+      "purpose": "Freebuff's actual hidden home basename."
+    },
+    {
+      "path": "~/.minimax/AGENTS.md",
+      "new_header": "# Personal MiniMax Code instructions\n",
+      "purpose": "Default mcode v2 user data directory."
+    },
+    {
+      "path": "~/.copilot/copilot-instructions.md",
+      "new_header": "# Personal GitHub Copilot CLI instructions\n",
+      "purpose": "Documented default user instructions for Copilot CLI."
+    },
+    {
+      "path": "~/.omp/agent/AGENTS.md",
+      "new_header": "# Personal Oh My Pi instructions\n",
+      "purpose": "Default native OMP path, independent of optional Codex compatibility."
+    }
+  ]
+}

@@ -1,0 +1,1009 @@
+#!/usr/bin/python3 -ISB
+"""A per-login-user foreground render queue for macOS. No service to install."""
+
+import ctypes
+import errno
+import fcntl
+import json
+import os
+import pwd
+import re
+import select
+import shlex
+import shutil
+import signal
+import stat
+import struct
+import subprocess
+import sys
+import time
+from contextlib import closing, contextmanager
+from functools import lru_cache
+
+
+HELP = """Usage:
+  safarium-render run -- program [arg ...]
+  safarium-render html [worker arguments ...]        (html --help for worker help)
+  safarium-render forge [subcommand & arguments ...] (forge --help for forge CLI help)
+  safarium-render extract-audio INPUT --output OUT.(wav|m4a) [options]
+  safarium-render mix-audio --track SPEC ... --output OUT.(wav|m4a) [options]
+  safarium-render extract-frames INPUT (--times T1,T2 | --every SEC | --fps N --gray-raw OUT.raw) [options]
+  safarium-render gif INPUT --output OUT.gif [options]
+  safarium-render cutout INPUT --output OUT.(png|mov) [options]
+  safarium-render hybrid [--html FILE] [--video FILE] --output OUT.(mp4|mov) ...
+  safarium-render mux VIDEO --output OUT.(mp4|mov) [options]
+  safarium-render probe INPUT [--include-audio-packets]
+  safarium-render qa INPUT [--contact-sheet OUT.jpg] [--scene-threshold F] [--silence-threshold-db DB] [--overwrite]
+  safarium-render splice --segment SEG1.mp4 ... --output OUT.(mp4|mov) [options]
+  safarium-render warm-worker --socket PATH         (persistent 0700 UDS + SCM_RIGHTS mmap)
+  safarium-render verify FILE.(mp4|mov) [CANDIDATE] (one file: inspect; two: compare)
+  safarium-render status [--json-detail | --verbose] (prints one JSON document)
+  safarium-render doctor [--json]                    (non-blocking environment & queue health audit)
+  safarium-render capabilities                       (non-blocking hardware/codec capabilities JSON)
+  safarium-render schema [TARGET]                    (non-blocking recipe/command JSON schema)
+  safarium-render version                            (non-blocking version & installed release SHA)
+
+One foreground job per login user. FIFO means order of ticket registration under
+the queue lock, skipping dead waiters. Example: {"active":1,"waiting":[2,3]}.
+Idle: {"active":null,"waiting":[]}. Released ticket numbers can be reused.
+State: .safarium-render-queue in the account's system home (independent of HOME,
+TMPDIR and cwd). No daemon. Ctrl-C cancels waiting. Active HUP/INT/QUIT/TERM
+and USR1/USR2 go to the direct worker group; loss of the outer queue CLI sends
+TERM. Cancellation escalates that group within 3 seconds. Other groups in the
+job's private session are waited out, never signalled by recovered PID.
+
+run passes argv, cwd, environment and standard streams directly. Use an audited
+single-worker foreground command with no fallback. All render helpers must stay
+in this login user's job session: no setsid/daemon, remote work, or hand-off to
+unrelated apps. This is not tied to the lifetime of the CLI's parent AI or shell.
+Direct launches of ffmpeg, ffprobe,
+ffplay, avconv, avprobe, Chrome/Chromium, Safari, Safari Technology Preview
+and safaridriver are refused. This checks the executable path, not descendants.
+html, verify, media and forge subcommands use only ../libexec/safarium/safarium-{html,verify,media,forge}
+beside this installation, pinned at submission, in the same queue.
+If kernel membership cannot be verified the slot stays closed: retry status;
+a Mac restart retires previous-boot jobs. Never remove a live ticket.
+"""
+
+MEDIA_MODES = ("extract-audio", "mix-audio", "extract-frames", "gif", "cutout", "hybrid", "mux", "probe", "qa", "splice", "warm-worker")
+
+
+def worker_name(mode):
+    return "media" if mode in MEDIA_MODES else mode
+
+STATE = ".safarium-render-queue"
+ENTRY = re.compile(r"t-([1-9][0-9]*)(?:-active-([1-9][0-9]*))?\Z", re.ASCII)
+DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+FILE = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+CANCEL = (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGTERM)
+RELAY = CANCEL + (signal.SIGUSR1, signal.SIGUSR2)
+GRACE = 3.0
+POLL = 0.12  # Only waiting clients poll; active supervision sleeps in the kernel.
+DIRECT_REFUSAL = "direct FFmpeg/libav, Chrome/Chromium or Safari/safaridriver command refused"
+UNCERTAIN = ("cannot certify job-session lifetime; slot retained. Retry status, or restart "
+             "the Mac to retire previous-boot jobs")
+UUID_RE = rb"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
+
+
+class Refusal(Exception):
+    def __init__(self, message, code=os.EX_CONFIG):
+        super().__init__(message)
+        self.code = code
+
+
+def complain(message):
+    try:
+        os.write(2, ("safarium-render: " + message + "\n").encode())
+    except OSError:  # Closed stderr must not change the command's exit status.
+        pass
+
+
+def account_home():
+    return pwd.getpwuid(os.getuid()).pw_dir
+
+
+@contextmanager
+def descriptor(fd):
+    try:
+        yield fd
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def state(home):
+    # Anchor all operations beneath an opened directory, never a caller's tmpdir.
+    with descriptor(os.open(home, DIR)) as parent:
+        s = os.fstat(parent)
+        if s.st_uid != os.getuid() or s.st_mode & 0o022:
+            raise Refusal("unsafe account home for queue state")
+        try:
+            os.mkdir(STATE, 0o700, dir_fd=parent)
+        except FileExistsError:
+            pass
+        with descriptor(os.open(STATE, DIR, dir_fd=parent)) as directory:
+            s = os.fstat(directory)
+            if s.st_uid != os.getuid() or stat.S_IMODE(s.st_mode) != 0o700:
+                raise Refusal("queue directory must be private (0700) and owned by this user")
+            with descriptor(private_file(directory, "queue.lock", os.O_CREAT)) as gate:
+                yield directory, gate
+
+
+def private_file(directory, name, flags=0):
+    fd = os.open(name, FILE | flags, 0o600, dir_fd=directory)
+    s = os.fstat(fd)
+    if (not stat.S_ISREG(s.st_mode) or s.st_uid != os.getuid() or
+            s.st_nlink != 1 or stat.S_IMODE(s.st_mode) != 0o600):
+        os.close(fd)
+        raise Refusal("unsafe queue file: expected private, singly linked regular file")
+    return fd
+
+
+@contextmanager
+def mutex(gate):
+    fcntl.flock(gate, fcntl.LOCK_EX)
+    try:
+        yield
+    finally:
+        fcntl.flock(gate, fcntl.LOCK_UN)
+
+
+def uncertain():
+    return Refusal(UNCERTAIN, os.EX_TEMPFAIL)
+
+
+@lru_cache(maxsize=1)
+def libproc():
+    return ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+
+
+@lru_cache(maxsize=1)
+def boot_uuid():
+    buf = ctypes.create_string_buffer(64)
+    size = ctypes.c_size_t(len(buf))
+    if ctypes.CDLL(None).sysctlbyname(b"kern.bootsessionuuid", buf, ctypes.byref(size), None, 0):
+        raise uncertain()
+    value = buf.value.lower()
+    if not re.fullmatch(UUID_RE, value):
+        raise uncertain()
+    return value
+
+
+def birth_id(lib, pid):
+    # Darwin PROC_PIDUNIQIDENTIFIERINFO: uuid[16], uint64_t p_uniqueid, ...
+    # p_uniqueid is allocated from one monotonically increasing counter per boot.
+    buf = ctypes.create_string_buffer(56)
+    ctypes.set_errno(0)
+    if lib.proc_pidinfo(pid, 17, ctypes.c_uint64(1), buf, len(buf)) != len(buf):
+        if ctypes.get_errno() == errno.ESRCH:
+            return None
+        raise uncertain()
+    result = struct.unpack_from("=Q", buf, 16)[0]
+    if not result:
+        raise uncertain()
+    return result
+
+
+def birth_fence(lib):
+    """Read the kernel birth number of a fresh, short-lived identity witness."""
+    previous = signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+    try:
+        pid = os.fork()
+        if not pid:
+            os._exit(0)
+        try:
+            result = birth_id(lib, pid)  # arg=1 includes our unreaped zombie.
+        finally:
+            os.waitpid(pid, 0)
+    finally:
+        signal.signal(signal.SIGCHLD, previous)
+    if result is None:
+        raise uncertain()
+    return result
+
+
+def session_member(lib, sid):
+    # Read only PIDs/identity (no commands, no attach, no signals). The API
+    # reports bytes and can truncate a full buffer; never accept a partial list.
+    estimate = lib.proc_listpids(1, 0, None, 0)  # PROC_ALL_PIDS; do not filter by credentials.
+    if estimate <= 0:
+        raise uncertain()
+    capacity = estimate // 4 + 64
+    for _ in range(4):
+        pids = (ctypes.c_int * capacity)()
+        size = lib.proc_listpids(1, 0, pids, ctypes.sizeof(pids))
+        if size <= 0 or size % 4:
+            raise uncertain()
+        if size < ctypes.sizeof(pids):
+            break
+        capacity *= 2
+    else:
+        raise uncertain()
+    pids = pids[:size // 4]
+    if 1 not in pids or os.getpid() not in pids:
+        raise uncertain()
+    raced = False
+    for pid in pids:
+        if not pid:  # PID 0 is the kernel task; getsid(0) would mean *ourselves*.
+            continue
+        missing_sid = False
+        try:
+            if os.getsid(pid) != sid:
+                continue
+        except ProcessLookupError:
+            missing_sid = True  # Darwin also returns ESRCH for stable zombies.
+        except OSError:
+            raise uncertain()
+        info = (ctypes.c_uint32 * 16)()
+        ctypes.set_errno(0)
+        if lib.proc_pidinfo(pid, 13, ctypes.c_uint64(1), info, ctypes.sizeof(info)) != ctypes.sizeof(info):
+            if ctypes.get_errno() == errno.ESRCH:
+                raced = True
+                continue
+            raise uncertain()
+        if info[0] != pid:
+            raise uncertain()
+        if info[3] == 5:  # SZOMB cannot execute or fork.
+            continue
+        if missing_sid:
+            raced = True
+        else:
+            return True
+    return None if raced else False
+
+
+def session_busy(sid, record):
+    """Never signal on recovery. Only a certified negative permits admission."""
+    lib = libproc()
+    if not 1 < sid <= 2**31 - 1:
+        raise uncertain()
+    if record:
+        m = re.fullmatch(rb"v2 (" + UUID_RE + rb") ([1-9][0-9]{0,19})\n", record)
+        if not m:
+            raise uncertain()
+        if m[1] != boot_uuid():
+            return False
+        current = birth_id(lib, sid)
+        if current is not None and current != int(m[2]):
+            try:
+                # Two extant POSIX sessions cannot share a SID. A *new session
+                # leader* with this number proves the recorded session is gone.
+                if os.getsid(sid) == sid and birth_id(lib, sid) == current:
+                    return False
+            except ProcessLookupError:
+                pass
+    # Empty legacy records have no birth identity. Never infer that a session
+    # vanished from its leader's absence: grandchildren may be its only members.
+    if session_member(lib, sid):
+        return True  # A live helper needs no additional identity witnesses.
+    for attempt in range(20):
+        before = birth_fence(lib)
+        member = session_member(lib, sid)
+        if member:
+            return True
+        # A simple scan can miss a helper that forks its successor and exits
+        # between listing and getsid(). Consecutive kernel birth numbers prove
+        # NO process was created during this complete negative membership scan.
+        if member is False and birth_fence(lib) == before + 1:
+            return False
+        if attempt < 19:
+            time.sleep(0.025)
+    raise uncertain()
+
+
+def live_tickets(directory):
+    """Under mutex only. A separately opened fd can lock a ticket iff its owner died."""
+    live = []
+    for name in os.listdir(directory):
+        m = ENTRY.fullmatch(name)
+        if not m:
+            continue
+        ticket, sid = int(m[1]), int(m[2]) if m[2] else None
+        with descriptor(private_file(directory, name)) as fd:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                live.append((ticket, sid))
+            else:
+                if sid and session_busy(sid, os.pread(fd, 256, 0)):
+                    live.append((ticket, sid))
+                else:
+                    os.unlink(name, dir_fd=directory)
+    return sorted(live)
+
+
+def inside_job(supervisor):
+    if os.getsid(0) == supervisor:
+        return True
+    # Synchronous subprocesses sometimes open a new session. Follow their actual
+    # ancestry too. PROC_PIDT_SHORTBSDINFO's first two uint32s are pid and ppid.
+    proc_info = libproc().proc_pidinfo
+    info = (ctypes.c_uint32 * 16)()
+    pid = os.getppid()
+    seen = set()
+    while pid > 1 and pid not in seen:
+        if pid == supervisor:
+            return True
+        seen.add(pid)
+        if proc_info(pid, 13, ctypes.c_uint64(0), info, ctypes.sizeof(info)) != ctypes.sizeof(info):
+            break
+        if info[0] != pid:
+            break
+        pid = info[1]
+    return False
+
+
+def forbidden(path):
+    # Check a command's spelling AND the executable selected through PATH/symlinks.
+    # Also catch helper binaries inside a known browser bundle.
+    def blocked(name):
+        name = name.casefold().removesuffix(".app").replace(" ", "-").replace("_", "-")
+        if name in ("safari", "safari-technology-preview", "safaritechnologypreview", "safaridriver"):
+            return True
+        return bool(re.fullmatch(
+            r"(?:ff(?:mpeg|probe|play)|av(?:conv|probe))(?:[-.0-9][\w.-]*)?|(?:google-)?chrome(?:-.*)?|"
+            r"chromium(?:-.*)?|headless-shell", name))
+
+    parts = path.split(os.sep)
+    return blocked(parts[-1]) or any(p.lower().endswith(".app") and blocked(p) for p in parts)
+
+
+def check_run_program(program, exec_path=None):
+    if forbidden(program):
+        raise Refusal(DIRECT_REFUSAL, 126)
+    path = program if os.sep in program else shutil.which(program, path=exec_path)
+    if path is None:
+        search_dirs = os.get_exec_path() if exec_path is None else [d for d in exec_path.split(os.pathsep) if d]
+        if program and any(os.path.exists(os.path.join(d, program)) for d in search_dirs):
+            raise Refusal("command is not executable", 126)
+        raise Refusal("command not found", 127)
+    if forbidden(path) or forbidden(os.path.realpath(path)):
+        raise Refusal(DIRECT_REFUSAL, 126)
+    return path
+
+
+def unwrap_env_command(env_args, current_path=None):
+    override_path = current_path
+    i = 0
+    value_flags = ("-u", "--unset", "-C", "--chdir", "-P", "--alt-path")
+    while i < len(env_args):
+        a = env_args[i]
+        if a == "--":
+            i += 1
+            break
+        if a in ("-i", "--ignore-environment", "-0", "--null", "-v", "--debug", "-"):
+            if a in ("-i", "--ignore-environment"):
+                override_path = os.defpath
+            i += 1
+            continue
+        if a in ("-S", "--split-string"):
+            if i + 1 >= len(env_args):
+                return [], override_path
+            try:
+                parts = shlex.split(env_args[i + 1])
+            except ValueError:
+                raise Refusal(DIRECT_REFUSAL, 126)
+            return unwrap_env_command(parts + env_args[i + 2:], current_path=override_path)
+        if a.startswith("--split-string="):
+            try:
+                parts = shlex.split(a.split("=", 1)[1])
+            except ValueError:
+                raise Refusal(DIRECT_REFUSAL, 126)
+            return unwrap_env_command(parts + env_args[i + 1:], current_path=override_path)
+        if a in value_flags:
+            if a in ("-P", "--alt-path") and i + 1 < len(env_args):
+                override_path = env_args[i + 1]
+            i += 2
+            continue
+        if any(a.startswith(f + "=") for f in ("--unset", "--chdir", "--alt-path")):
+            if a.startswith("--alt-path="):
+                override_path = a.split("=", 1)[1]
+            i += 1
+            continue
+        if a.startswith("-") and len(a) > 1:
+            raise Refusal(DIRECT_REFUSAL, 126)
+        if "=" in a and not a.startswith("="):
+            k, v = a.split("=", 1)
+            if k == "PATH":
+                override_path = v
+            i += 1
+            continue
+        return env_args[i:], override_path
+    while i < len(env_args) and "=" in env_args[i] and not env_args[i].startswith("="):
+        k, v = env_args[i].split("=", 1)
+        if k == "PATH":
+            override_path = v
+        i += 1
+    return env_args[i:], override_path
+
+
+def worker(mode, args, pin):
+    if mode == "run":
+        path = check_run_program(args[0])
+        rem = args[1:]
+        exec_path = None
+        cur = path
+        for _ in range(8):
+            if os.path.basename(os.path.realpath(cur)).casefold() != "env":
+                break
+            rem, exec_path = unwrap_env_command(rem, current_path=exec_path)
+            if not rem:
+                break
+            cur = check_run_program(rem[0], exec_path=exec_path)
+            rem = rem[1:]
+        return path, args
+
+    wname = worker_name(mode)
+    path, identity = native_worker(wname, pin[0])
+    if identity != pin[1]:
+        raise Refusal("pinned native worker changed; resubmit the job", os.EX_UNAVAILABLE)
+    return path, ([path, mode, *args] if mode in MEDIA_MODES else [path, *args])
+
+
+def native_worker(mode, prefix):
+    name = "safarium-" + mode
+    path = prefix
+    for component in ("", "libexec", "safarium", name):
+        if component:
+            path = os.path.join(path, component)
+        try:
+            s = os.lstat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            break
+        if s.st_uid not in (0, os.getuid()) or s.st_mode & 0o022:
+            break
+        if component == name:
+            if stat.S_ISREG(s.st_mode) and os.access(path, os.X_OK):
+                return path, (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns)
+        elif not stat.S_ISDIR(s.st_mode):  # No symlink on the worker route.
+            break
+    raise Refusal("native worker unavailable: install trusted ../libexec/safarium/" + name,
+                  os.EX_UNAVAILABLE)
+
+
+def signal_group(pid, sig):
+    # Only called for our own *unreaped* group leader in our private session.
+    # Even a zombie reserves its PID; no signalling of recorded or recycled PIDs.
+    try:
+        os.killpg(pid, sig)
+    except (ProcessLookupError, PermissionError):
+        # Darwin returns EPERM for a group containing only zombies. In either
+        # case keep the lease and still wait for our child's actual wait status.
+        pass
+
+
+def watch(pid, control):
+    """Wait for process exit without reaping, and for signals/EOF from the caller."""
+    with closing(select.kqueue()) as events:
+        events.control([select.kevent(control, filter=select.KQ_FILTER_READ,
+                                      flags=select.KQ_EV_ADD)], 0)
+        try:
+            events.control([select.kevent(pid, filter=select.KQ_FILTER_PROC,
+                                          flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                                          fflags=select.KQ_NOTE_EXIT)], 0)
+        except ProcessLookupError:  # Already exited; still ours to reap.
+            return
+        deadline = None
+        cancelling = False
+        while True:
+            timeout = None if deadline is None else max(0, deadline - time.monotonic())
+            ready = events.control(None, 2, timeout)
+            for event in ready:
+                if event.filter != select.KQ_FILTER_READ:
+                    continue
+                data = os.read(control, 4096)
+                if not data:  # Outer process died (including SIGKILL).
+                    events.control([select.kevent(control, filter=select.KQ_FILTER_READ,
+                                                  flags=select.KQ_EV_DELETE)], 0)
+                    data = bytes([signal.SIGTERM])
+                for sig in data:
+                    signal_group(pid, sig)
+                    if sig in CANCEL and not cancelling:
+                        cancelling = True
+                        deadline = time.monotonic() + GRACE
+            if any(ev.filter == select.KQ_FILTER_PROC for ev in ready):
+                if cancelling:
+                    signal_group(pid, signal.SIGKILL)  # Leftovers of a cancelled group.
+                return
+            if deadline is not None and time.monotonic() >= deadline:
+                signal_group(pid, signal.SIGKILL)
+                deadline = None
+
+
+def supervise(directory, gate, ticket, lease, control, mask, mode, args, pin):
+    # This short-lived guardian, not the executable, owns the ticket lease. A new
+    # session isolates it even from signals to the caller's whole process group.
+    os.setsid()
+    for sig in RELAY:
+        signal.signal(sig, signal.SIG_IGN)
+    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+    signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+    sid = os.getsid(0)
+    birth = birth_id(libproc(), sid)
+    if sid != os.getpid() or birth is None:
+        raise uncertain()
+    record = b"v2 %s %d\n" % (boot_uuid(), birth)
+    with mutex(gate):
+        # The waiting name cannot have spawned anything. Publish the complete
+        # recoverable job identity atomically BEFORE any child can be created.
+        if os.pwrite(lease, record, 0) != len(record):
+            raise uncertain()
+        os.fsync(lease)
+        os.rename("t-%d" % ticket, "t-%d-active-%d" % (ticket, sid),
+                  src_dir_fd=directory, dst_dir_fd=directory)
+    path, argv = worker(mode, args, pin)
+    if select.select([control], [], [], 0)[0]:
+        data = os.read(control, 1)
+        return -(data[0] if data else signal.SIGTERM)
+    defaults = set(RELAY) | {signal.SIGCHLD, signal.SIGPIPE}
+    for name in ("SIGXFZ", "SIGXFSZ"):
+        if hasattr(signal, name):
+            defaults.add(getattr(signal, name))
+    try:
+        pid = os.posix_spawn(path, argv, os.environ, setpgroup=0,
+                             setsigdef=defaults, setsigmask=mask)
+    except (FileNotFoundError, NotADirectoryError):
+        raise Refusal("command or interpreter not found" if mode == "run"
+                      else "native worker unavailable: safarium-" + worker_name(mode),
+                      127 if mode == "run" else os.EX_UNAVAILABLE)
+    except OSError:
+        raise Refusal("cannot execute command" if mode == "run"
+                      else "cannot execute native worker: safarium-" + worker_name(mode), 126)
+    try:
+        watch(pid, control)
+    except BaseException:
+        signal_group(pid, signal.SIGKILL)
+        raise
+    finally:
+        _, status = os.waitpid(pid, 0)
+    return os.waitstatus_to_exitcode(status)
+
+
+def exit_as(code):
+    if code < 0:  # Preserve WIFSIGNALED for programmatic callers, not just shell $?.
+        sig = -code
+        if sig not in (signal.SIGKILL, signal.SIGSTOP):
+            signal.signal(sig, signal.SIG_DFL)
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {sig})
+        os.kill(os.getpid(), sig)
+        code = 128 + sig
+    os._exit(code)
+
+
+def drain(directory, gate, ticket, lease, sid):
+    name = "t-%d-active-%d" % (ticket, sid)
+    with mutex(gate):
+        try:
+            entry = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            return  # Guardian never published its job session: no spawn was possible.
+        if not os.path.samestat(entry, os.fstat(lease)):
+            raise uncertain()
+        record = os.pread(lease, 256, 0)
+    while session_busy(sid, record):
+        time.sleep(POLL)  # Don't signal a recovered PID or a helper's separate group.
+    with mutex(gate):
+        os.unlink(name, dir_fd=directory)  # Still holding our lease, now certified empty.
+
+
+def submit(directory, gate, mode, args, pin, control, sender, cancelled):
+    with mutex(gate):
+        live = live_tickets(directory)
+        if any(sid and inside_job(sid) for _, sid in live):
+            raise Refusal("nested render refused: this job already holds the foreground slot", os.EX_USAGE)
+        ticket = live[-1][0] + 1 if live else 1
+        lease = private_file(directory, "t-%d" % ticket, os.O_CREAT | os.O_EXCL)
+        fcntl.flock(lease, fcntl.LOCK_EX)
+    # Lease stays locked from registration through the supervisor's waitpid.
+    with descriptor(lease):
+        while live and not cancelled:
+            if select.select([control], [], [], POLL)[0]:
+                break
+            with mutex(gate):
+                if live_tickets(directory)[0][0] == ticket:
+                    break
+        mask = signal.pthread_sigmask(signal.SIG_BLOCK, RELAY)
+        try:
+            if cancelled:
+                return -cancelled[0]
+            guardian = os.fork()
+            if guardian == 0:
+                # Never unwind the caller's with-blocks after fork. All queue fds
+                # are close-on-exec; the worker gets the original standard streams.
+                os.close(sender)
+                try:
+                    code = supervise(directory, gate, ticket, lease, control, mask, mode, args, pin)
+                except Refusal as exc:
+                    complain(str(exc))
+                    code = exc.code
+                except BaseException as exc:
+                    complain("queue supervisor failed (%s)" % type(exc).__name__)
+                    code = os.EX_SOFTWARE
+                exit_as(code)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+        result = os.waitstatus_to_exitcode(os.waitpid(guardian, 0)[1])
+        drain(directory, gate, ticket, lease, guardian)
+        return result
+
+
+def enqueue(directory, gate, mode, args, pin):
+    read_fd, write_fd = os.pipe()  # Non-inheritable across exec; EOF detects caller death.
+    with descriptor(read_fd), descriptor(write_fd):
+        os.set_blocking(write_fd, False)
+        cancelled = []
+
+        def forward(sig, _frame):
+            if not cancelled:
+                cancelled.append(sig)
+            try:
+                os.write(write_fd, bytes([sig]))
+            except OSError as exc:
+                if exc.errno not in (errno.EPIPE, errno.EAGAIN, errno.EBADF):
+                    raise
+
+        previous = {sig: signal.signal(sig, forward) for sig in RELAY}
+        # An embedding shell can inherit SIGCHLD=IGN, which would auto-reap
+        # the guardian and destroy the worker's exit status.
+        previous[signal.SIGCHLD] = signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+        try:
+            return submit(directory, gate, mode, args, pin, read_fd, write_fd, cancelled)
+        finally:
+            for sig, action in previous.items():
+                signal.signal(sig, action)
+
+
+READONLY_TOPLEVEL = ("status", "doctor", "capabilities", "schema", "version")
+ORPHAN_BINARY_NAMES = {"safarium-html", "safarium-media", "safarium-forge", "safarium-cdp", "prism-blender-worker", "prism-blender-worker.py"}
+APPLE_SYSTEM_LIB_PREFIXES = ("/usr/lib/", "/System/Library/", "/Library/Apple/System/", "/System/Volumes/Preboot/Cryptexes/OS/")
+
+
+def is_readonly_forge(args):
+    """True strictly for read-only, zero-WebKit, zero-encoder forge queries."""
+    if not args:
+        return False
+    clean = [a for a in args if a != "--json-errors"]
+    if not clean:
+        return False
+    if clean in (["--help"], ["-h"], ["help"], ["--version"], ["-v"], ["version"]):
+        return True
+    sub = clean[0]
+    if sub in ("schema", "validate", "inspect", "probe"):
+        return True
+    if sub == "cache" and len(clean) >= 2 and clean[1] == "stats":
+        return True
+    if sub == "capabilities" and "--fast" in clean[1:]:
+        return True
+    if sub == "run":
+        i = 1
+        while i < len(clean):
+            tok = clean[i]
+            if tok == "--":
+                break
+            if tok in ("--recipe", "-r", "--progress"):
+                i += 2
+                continue
+            if tok.startswith(("--recipe=", "--progress=")):
+                i += 1
+                continue
+            if tok in ("--dry-run", "--validate-only"):
+                return True
+            i += 1
+        return False
+    return False
+
+
+class _ProcBsdShortInfo(ctypes.Structure):
+    _fields_ = [
+        ("pbsi_pid", ctypes.c_uint32),
+        ("pbsi_ppid", ctypes.c_uint32),
+        ("pbsi_pgid", ctypes.c_uint32),
+        ("pbsi_status", ctypes.c_uint32),
+        ("pbsi_comm", ctypes.c_char * 16),
+        ("pbsi_flags", ctypes.c_uint32),
+        ("pbsi_uid", ctypes.c_uint32),
+        ("pbsi_gid", ctypes.c_uint32),
+        ("pbsi_ruid", ctypes.c_uint32),
+        ("pbsi_rgid", ctypes.c_uint32),
+        ("pbsi_svuid", ctypes.c_uint32),
+        ("pbsi_svgid", ctypes.c_uint32),
+        ("pbsi_rfu", ctypes.c_uint32),
+    ]
+
+
+class _RUsageInfoV4(ctypes.Structure):
+    _fields_ = [
+        ("ri_uuid", ctypes.c_uint8 * 16),
+        ("ri_user_time", ctypes.c_uint64),
+        ("ri_system_time", ctypes.c_uint64),
+        ("ri_pkg_idle_wkups", ctypes.c_uint64),
+        ("ri_interrupt_wkups", ctypes.c_uint64),
+        ("ri_pageins", ctypes.c_uint64),
+        ("ri_wired_size", ctypes.c_uint64),
+        ("ri_resident_size", ctypes.c_uint64),
+        ("ri_phys_footprint", ctypes.c_uint64),
+        ("ri_rest", ctypes.c_uint64 * 37),
+    ]
+
+
+def _pid_footprint_mb(lib, pid):
+    info = _RUsageInfoV4()
+    if lib.proc_pid_rusage(int(pid), 4, ctypes.byref(info)) != 0:  # RUSAGE_INFO_V4
+        return None
+    return round(info.ri_phys_footprint / (1024.0 * 1024.0), 2)
+
+
+def _pid_exec_name(lib, pid):
+    buf = ctypes.create_string_buffer(4096)
+    n = lib.proc_pidpath(int(pid), buf, len(buf))
+    if n <= 0:
+        return None
+    return os.path.basename(buf.value.decode("utf-8", errors="replace"))
+
+
+def _session_processes(lib):
+    est = lib.proc_listpids(1, 0, None, 0)
+    if est <= 0:
+        return []
+    cap = est // 4 + 64
+    for _ in range(4):
+        pids = (ctypes.c_int * cap)()
+        sz = lib.proc_listpids(1, 0, pids, ctypes.sizeof(pids))
+        if sz <= 0 or sz % 4:
+            return []
+        if sz < ctypes.sizeof(pids):
+            break
+        cap *= 2
+    else:
+        return []
+    out = []
+    uid = os.getuid()
+    for pid in pids[:sz // 4]:
+        if pid <= 0:
+            continue
+        info = _ProcBsdShortInfo()
+        if lib.proc_pidinfo(pid, 13, ctypes.c_uint64(1), ctypes.byref(info), ctypes.sizeof(info)) != ctypes.sizeof(info):
+            continue
+        if info.pbsi_status == 5:  # SZOMB
+            continue
+        if info.pbsi_uid != uid:
+            continue
+        try:
+            sid = os.getsid(pid)
+        except OSError:
+            sid = None
+        out.append({"pid": int(pid), "ppid": int(info.pbsi_ppid), "sid": sid,
+                    "exec": _pid_exec_name(lib, pid), "footprintMB": _pid_footprint_mb(lib, pid)})
+    return out
+
+
+def _installed_release_info(prefix):
+    base = os.path.join(prefix, "share", "safarium")
+    cur = os.path.join(base, "current")
+    sha = None
+    valid = False
+    if os.path.islink(cur):
+        target = os.readlink(cur)
+        sha = os.path.basename(target) if target.startswith("releases/") else target
+        manifest = os.path.join(base, target, "manifest.json")
+        valid = os.path.isfile(manifest)
+    return {"prefix": prefix, "release": sha, "manifestPresent": valid}
+
+
+def _host_thermal_label():
+    try:
+        r = subprocess.run(["/usr/bin/pmset", "-g", "therm"], capture_output=True, text=True, timeout=3)
+        if r.returncode == 0 and "CPU_Speed_Limit" in r.stdout:
+            m = re.search(r"CPU_Speed_Limit\s*=\s*(\d+)", r.stdout)
+            if m:
+                pct = int(m.group(1))
+                return "nominal" if pct >= 100 else ("fair" if pct >= 75 else "throttled(%d%%)" % pct)
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _dir_size_bytes(root):
+    if not os.path.isdir(root):
+        return 0
+    total = 0
+    for dp, dns, fns in os.walk(root, followlinks=False):
+        dns[:] = [d for d in dns if not os.path.islink(os.path.join(dp, d))]
+        for fn in fns:
+            if fn.startswith("._"):
+                continue
+            fp = os.path.join(dp, fn)
+            try:
+                st = os.lstat(fp)
+                if stat.S_ISREG(st.st_mode):
+                    total += st.st_size
+            except OSError:
+                pass
+    return total
+
+
+def run_doctor(prefix, directory, gate):
+    issues = []
+    hints = []
+    lib = libproc()
+    with mutex(gate):
+        live = live_tickets(directory)
+    active_sids = {sid for _, sid in live if sid}
+    procs = _session_processes(lib)
+
+    orphans = []
+    active_details = []
+    for ticket, sid in live:
+        members = [p for p in procs if sid and p["sid"] == sid] if sid else []
+        active_details.append({"ticket": ticket, "sid": sid, "active": bool(sid), "members": members})
+
+    for p in procs:
+        name = p["exec"]
+        if not name or name not in ORPHAN_BINARY_NAMES:
+            continue
+        if p["pid"] == os.getpid() or p["sid"] in active_sids:
+            continue
+        orphans.append(p)
+    if orphans:
+        issues.append("Found %d orphan Safarium process(es) outside active queue slot" % len(orphans))
+        hints.append("Wait for children to exit or terminate stale worker PIDs cleanly before benchmarking.")
+
+    rel_info = _installed_release_info(prefix)
+    apple_checks = {}
+    non_apple_found = []
+    for bin_name in ("safarium-html", "safarium-media", "safarium-forge", "safarium-verify"):
+        try:
+            bpath, _ = native_worker(bin_name.removeprefix("safarium-"), prefix)
+            r = subprocess.run(["/usr/bin/otool", "-L", bpath], capture_output=True, text=True, timeout=10)
+            deps = [ln.strip().split(" (compatibility version ", 1)[0]
+                    for ln in r.stdout.splitlines() if ln.startswith(("\t", " "))]
+            bad = [d for d in deps if not any(d.startswith(p) for p in APPLE_SYSTEM_LIB_PREFIXES)]
+            if r.returncode != 0 or bad:
+                non_apple_found.extend([f"{bin_name}:{d}" for d in bad])
+                if r.returncode != 0:
+                    issues.append(f"otool -L failed for {bin_name} (exit {r.returncode})")
+                apple_checks[bin_name] = {"present": True, "appleOnly": False, "nonApple": bad}
+            else:
+                apple_checks[bin_name] = {"present": True, "appleOnly": True, "depCount": len(deps)}
+        except Refusal as exc:
+            apple_checks[bin_name] = {"present": False, "error": str(exc)}
+            issues.append(f"Missing or untrusted worker: {bin_name}")
+
+    if non_apple_found:
+        issues.append("Non-Apple libraries linked: " + ", ".join(non_apple_found))
+
+    tmp_st = os.statvfs("/tmp")
+    tmp_free_gb = round((tmp_st.f_bavail * tmp_st.f_frsize) / (1024 ** 3), 2)
+    if tmp_free_gb < 1.0:
+        issues.append(f"Low internal APFS free space under /tmp ({tmp_free_gb} GB)")
+
+    extra_vol = os.environ.get("SAFARIUM_EXTRA_VOLUME", "")
+    main_vol_mounted = bool(extra_vol and os.path.exists(extra_vol))
+    cache_dir = os.path.join(account_home(), "Library", "Caches", "com.safarium.forge-shot-cache")
+    cache_bytes = _dir_size_bytes(cache_dir)
+    blender_ok = os.path.exists("/Applications/Blender.app/Contents/MacOS/Blender")
+
+    forge_caps = None
+    if apple_checks.get("safarium-forge", {}).get("present"):
+        try:
+            fpath, _ = native_worker("forge", prefix)
+            r = subprocess.run([fpath, "capabilities"], capture_output=True, text=True, timeout=10)
+            if r.returncode == 0:
+                forge_caps = json.loads(r.stdout)
+        except Exception:
+            pass
+
+    healthy = not issues
+    report = {
+        "healthy": healthy,
+        "queue": {
+            "active": next((t for t, sid in live if sid), None),
+            "waiting": [t for t, sid in live if not sid],
+            "details": active_details,
+        },
+        "orphans": orphans,
+        "release": rel_info,
+        "workers": apple_checks,
+        "host": {
+            "thermal": _host_thermal_label(),
+            "tmpFreeGB": tmp_free_gb,
+            "volumesMainMounted": main_vol_mounted,
+            "blender522Installed": blender_ok,
+            "shotCacheBytes": cache_bytes,
+            "shotCacheDir": cache_dir,
+        },
+        "capabilities": forge_caps,
+        "issues": issues,
+        "hints": hints,
+    }
+    print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
+    return 0 if healthy else 1
+
+
+def main(argv, *, home=None):
+    # Private Python injection point for acceptance tests. No CLI or environment
+    # override: independent installs, projects and agent profiles share one slot.
+    if argv in (["-h"], ["--help"]):
+        print(HELP, end="", flush=True)
+        return 0
+    mode = argv[0] if argv else ""
+    native_modes = ("html", "verify", "forge") + MEDIA_MODES
+    args = None
+    if mode == "run" and len(argv) >= 3 and argv[1] == "--":
+        args = argv[2:]
+    elif mode in native_modes:
+        args = argv[1:]
+    elif mode == "status" and argv[1:] in ([], ["--json-detail"], ["--verbose"]):
+        args = argv[1:]
+    elif mode == "doctor" and argv[1:] in ([], ["--json"]):
+        args = argv[1:]
+    elif mode == "capabilities" and argv[1:] in ([], ["--help"], ["-h"]):
+        args = argv[1:]
+    elif mode == "schema" and len(argv) <= 3 and all(
+        a in {"all", "recipe", "subcommands", "errors", "--help", "-h", "--json-errors"} for a in argv[1:]
+    ):
+        args = argv[1:]
+    elif mode == "version" and argv[1:] == []:
+        args = []
+    else:
+        complain("invalid invocation; see safarium-render --help")
+        return os.EX_USAGE
+    try:
+        prefix = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+        if mode == "version":
+            rel = _installed_release_info(prefix)
+            fver = None
+            try:
+                fpath, _ = native_worker("forge", prefix)
+                r = subprocess.run([fpath, "version"], capture_output=True, text=True, timeout=5)
+                if r.returncode == 0:
+                    fver = r.stdout.strip()
+            except Refusal:
+                pass
+            print(json.dumps({"safarium_render": "wave6", "release": rel["release"], "forge": fver}), flush=True)
+            return 0
+        if mode in ("capabilities", "schema"):
+            fpath, _ = native_worker("forge", prefix)
+            sub_args = ["capabilities"] if mode == "capabilities" and args == [] else (["capabilities", *args] if mode == "capabilities" else ["schema", *args])
+            proc = subprocess.run([fpath, *sub_args])
+            return proc.returncode
+        if mode == "forge" and is_readonly_forge(args):
+            fpath, _ = native_worker("forge", prefix)
+            proc = subprocess.run([fpath, *args])
+            return proc.returncode
+
+        pin = None
+        if mode in native_modes:
+            _, identity = native_worker(worker_name(mode), prefix)
+            pin = (prefix, identity)  # Per request, in memory only; queue state is per account.
+        with state(account_home() if home is None else home) as (directory, gate):
+            if mode == "status":
+                with mutex(gate):
+                    live = live_tickets(directory)
+                payload = {"active": next((t for t, sid in live if sid), None),
+                           "waiting": [t for t, sid in live if not sid]}
+                if args in (["--json-detail"], ["--verbose"]):
+                    lib = libproc()
+                    procs = _session_processes(lib)
+                    payload["thermal"] = _host_thermal_label()
+                    payload["release"] = _installed_release_info(prefix)["release"]
+                    payload["details"] = [
+                        {"ticket": t, "sid": sid, "active": bool(sid),
+                         "members": [p for p in procs if sid and p["sid"] == sid] if sid else []}
+                        for t, sid in live
+                    ]
+                print(json.dumps(payload), flush=True)
+                return 0
+            if mode == "doctor":
+                return run_doctor(prefix, directory, gate)
+            return enqueue(directory, gate, mode, args, pin)
+    except Refusal as exc:
+        complain(str(exc))
+        return exc.code
+    except OSError as exc:
+        complain("queue unavailable (%s)" % errno.errorcode.get(exc.errno, "system error"))
+        return os.EX_OSERR
+
+
+if __name__ == "__main__":
+    exit_as(main(sys.argv[1:]))

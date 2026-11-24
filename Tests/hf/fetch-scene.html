@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=320, height=180">
+  <title>Safarium video transport test</title>
+  <script src="assets/gsap.min.js"></script>
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #10151a; }
+    #scene { position: relative; width: 100%; height: 100%; overflow: hidden; }
+    #signal { position: absolute; left: 0; top: 0; width: 160px; height: 120px; object-fit: fill; }
+    #indicator { position: absolute; left: 200px; top: 30px; }
+    #dot { display: block; width: 30px; height: 30px; background: #eee; }
+  </style>
+</head>
+<body>
+  <div id="scene" data-composition-id="scene" data-width="320" data-height="180" data-duration="1" data-fps="30">
+    <video id="signal" class="clip" data-start="0" data-duration="1" data-track-index="0"
+           src="assets/signal.mp4" muted playsinline preload="auto"></video>
+    <audio id="tone" class="clip" data-start="0" data-duration="1" data-track-index="1" src="assets/tone.wav"></audio>
+    <div id="indicator" class="clip" data-start="0" data-duration="1" data-track-index="2"><span id="dot"></span></div>
+  </div>
+  <script>
+    const timeline = gsap.timeline({ paused: true });
+    timeline.to("#dot", { y: 70, duration: 1, ease: "none" }, 0);
+    window.__timelines = window.__timelines || {};
+    window.__timelines["scene"] = timeline;
+  </script>
+</body>
+</html>

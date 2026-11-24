@@ -1,0 +1,54 @@
+{
+  "schema": "safarium-hf-compat/v1",
+  "updated": "2026-11-23",
+  "testedTargets": {
+    "hyperframes": "0.9.72",
+    "puppeteerCore": "25.18.1",
+    "shimBinary": "safarium-cdp",
+    "launcher": "bin/safarium-hf",
+    "transportMode": "PRODUCER_FORCE_SCREENSHOT=true (--remote-debugging-pipe)"
+  },
+  "supportedCDPDomains": [
+    "Browser",
+    "Target",
+    "Page",
+    "Runtime",
+    "Emulation",
+    "DOM",
+    "Network",
+    "Fetch"
+  ],
+  "parityMatrix": {
+    "checkBundledGSAPOffline": {
+      "status": "supported",
+      "contract": "Fetch.requestPaused serves bundled CDN script offline with browserSkipped=false"
+    },
+    "renderMP4DefaultScreenshotMode": {
+      "status": "supported",
+      "contract": "HF render 30fps h264 yuv420p completes via PRODUCER_FORCE_SCREENSHOT=true"
+    },
+    "renderAudioTrackSync": {
+      "status": "supported",
+      "contract": "WAV audio clip muxes into output MP4 matching target sample rate & duration"
+    },
+    "renderVideoElementFetchTransport": {
+      "status": "supported",
+      "contract": "Embedded <video> served via Fetch routes exact decoded frames through safarium-cdp"
+    },
+    "renderPNGTransparentFrames": {
+      "status": "supported",
+      "contract": "--chroma-subsampling 444 triggers lossless alpha PNG screenshot capture in shim"
+    },
+    "distributedRangeWorkersStartEnd": {
+      "status": "unsupported_upstream_expectation",
+      "contract": "HF 0.9.72 --start/--end distributed path requests Chromium SwiftShader; use whole-composition or local excerpt"
+    }
+  },
+  "lastVerification": {
+    "date": "2026-11-23",
+    "releaseSha": "d3cd78f1825176281d0472c41b84dc0ec8a9b5f0d5893f8c12d7acd54c3a263e",
+    "safariumCDPReleaseTests": "2/2 PASS + raw pipe handshake (Browser.getVersion + Target.createTarget + Browser.close) exit 0",
+    "hfContractScript": "blocked_offline_enotcached",
+    "note": "Tests/hf/hf-contract-test.py exited 1 (ENOTCACHED): bin/safarium-hf sets npm_config_offline=true while npx hyperframes@0.9.72 cache is absent from ~/.npm/_npx; requires one-time online npx warmup with Pick's click."
+  }
+}

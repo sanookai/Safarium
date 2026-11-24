@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""Finish a Safarium MP4 with a soundtrack, without re-encoding its video (zero FFmpeg/ffprobe)."""
+
+import argparse
+import ctypes
+from decimal import Decimal, InvalidOperation
+import errno
+from fractions import Fraction
+import json
+import math
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+
+
+def _has_trusted_media_worker(render_path: Path) -> bool:
+    media = render_path.resolve().parent.parent / "libexec" / "safarium" / "safarium-media"
+    return render_path.is_file() and os.access(render_path, os.X_OK) and media.is_file() and os.access(media, os.X_OK)
+
+
+def _find_safarium_render():
+    candidates = [
+        Path(__file__).resolve().parent / "safarium-render",
+        Path.home() / ".local" / "bin" / "safarium-render",
+    ]
+    which_bin = shutil.which("safarium-render")
+    if which_bin:
+        candidates.append(Path(which_bin))
+    for cand in candidates:
+        if _has_trusted_media_worker(cand):
+            return str(cand)
+    raise FileNotFoundError("installed safarium-render with trusted libexec/safarium/safarium-media not found")
+
+
+def _find_safarium_media(render_bin: str | None = None):
+    candidates = []
+    if render_bin:
+        candidates.append(Path(render_bin).resolve().parent.parent / "libexec" / "safarium" / "safarium-media")
+    root = Path(__file__).resolve().parent.parent
+    candidates.extend([
+        root / "libexec" / "safarium" / "safarium-media",
+        Path.home() / ".local" / "libexec" / "safarium" / "safarium-media",
+    ])
+    for cand in candidates:
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    raise FileNotFoundError("safarium-media worker not found")
+
+
+class MediaRunner:
+    """Runs safarium-media operations via safarium-render queue, falling back to direct
+    safarium-media ONLY if this process already owns the foreground safarium-render slot."""
+
+    def __init__(self):
+        self.render_bin = _find_safarium_render()
+        self._already_in_slot = False
+
+    def run(self, mode, mode_args):
+        if not self._already_in_slot:
+            proc = subprocess.run([self.render_bin, mode, *mode_args], capture_output=True, text=True)
+            if proc.returncode == 0:
+                return proc.stdout
+            if proc.returncode == os.EX_USAGE and "nested render refused" in (proc.stderr or ""):
+                self._already_in_slot = True
+            else:
+                raise ValueError((proc.stderr or proc.stdout or f"{mode} exited {proc.returncode}").strip())
+        media_bin = _find_safarium_media(self.render_bin)
+        proc = subprocess.run([media_bin, mode, *mode_args], capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise ValueError((proc.stderr or proc.stdout or f"{mode} exited {proc.returncode}").strip())
+        return proc.stdout
+
+    def probe(self, path):
+        return json.loads(self.run("probe", [str(path)]))
+
+
+def _parse_rational(raw):
+    try:
+        return float(Fraction(raw))
+    except (ZeroDivisionError, ValueError):
+        return 0.0
+
+
+def publish_new(source, destination):
+    """Commit on the same volume without replacing even a concurrently created symlink."""
+    rename = getattr(ctypes.CDLL(None, use_errno=True), "renamex_np", None)
+    if rename:
+        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        # Darwin <sys/stdio.h>: RENAME_EXCL.
+        if rename(os.fsencode(source), os.fsencode(destination), 0x00000004) == 0:
+            return
+        error = ctypes.get_errno()
+        if error not in (errno.ENOSYS, errno.ENOTSUP):
+            raise OSError(error, os.strerror(error), str(destination))
+    try:
+        os.link(source, destination)  # also exclusive; source is then removed with the staging directory
+        return
+    except OSError as exc:
+        if exc.errno not in (errno.ENOTSUP, errno.ENOSYS, errno.EPERM):
+            raise
+    # ExFAT supports neither RENAME_EXCL nor hard links: reserve destination via O_CREAT|O_EXCL before replace.
+    fd = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(fd)
+    try:
+        os.replace(source, destination)
+    except BaseException:
+        try:
+            os.unlink(destination)
+        except OSError:
+            pass
+        raise
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("video", type=Path, help="finished H.264/HEVC video, starting at time zero")
+    ap.add_argument("audio", type=Path, help="source audio; a short tail is padded with silence")
+    ap.add_argument("output", type=Path, help="new .mp4 path")
+    ap.add_argument("--audio-start", default="0", type=Decimal, help="start in the source audio, seconds")
+    args = ap.parse_args()
+    try:
+        v, a = args.video.resolve(strict=True), args.audio.resolve(strict=True)
+        out = args.output.parent.resolve(strict=True) / args.output.name
+        if out.suffix.lower() != ".mp4" or os.path.lexists(out):
+            raise ValueError("choose an unused .mp4 output path")
+        if not args.audio_start.is_finite() or args.audio_start < 0:
+            raise ValueError("--audio-start must be a finite nonnegative number")
+
+        runner = MediaRunner()
+        v_probe = runner.probe(v)
+        v_tracks = [t for t in v_probe.get("tracks", []) if t.get("mediaType") == "vide"]
+        if not v_tracks:
+            raise ValueError(f"no video stream in {v}")
+        vi = v_tracks[0]
+        v_formats = vi.get("formats") or [{}]
+        v_codec = v_formats[0].get("codec", "")
+        duration = float(vi.get("durationSeconds", 0.0))
+        if v_codec not in ("avc1", "hvc1", "hev1") or not math.isfinite(duration) or duration <= 0:
+            raise ValueError(f"expected a timed H.264/HEVC video (got codec={v_codec!r})")
+        start_time = _parse_rational(vi.get("start", "0/1"))
+        if abs(start_time) > 0.000001:
+            raise ValueError("expected a video whose timeline starts at zero")
+
+        a_probe = runner.probe(a)
+        a_tracks = [t for t in a_probe.get("tracks", []) if t.get("mediaType") == "soun"]
+        if not a_tracks:
+            raise ValueError(f"no audio stream in {a}")
+        au = a_tracks[0]
+        a_dur_val = float(au.get("durationSeconds", 0.0))
+        if not math.isfinite(a_dur_val) or a_dur_val <= 0:
+            raise ValueError(f"source audio has invalid duration: {a}")
+        if args.audio_start >= Decimal(str(a_dur_val)):
+            raise ValueError("--audio-start is past the end of the source audio")
+
+        a_fmt = (au.get("formats") or [{}])[0]
+        sr = int(round(float(a_fmt.get("sampleRate") or 48000)))
+        ch = max(1, min(2, int(a_fmt.get("channels") or 2)))
+        avail_sec = max(0.0, a_dur_val - float(args.audio_start))
+
+        with tempfile.TemporaryDirectory(prefix=".safarium-soundtrack-", dir=out.parent) as tmp:
+            tmp_dir = Path(tmp)
+            staged = tmp_dir / "audio-video.mp4"
+            mux_wav = a
+            mux_audio_start = str(args.audio_start)
+
+            # Non-WAV inputs or shorter audio tails go through native Apple extract/mix padding first.
+            if a.suffix.lower() != ".wav" or avail_sec + 1e-6 < duration or int(a_fmt.get("channels") or 0) not in (1, 2):
+                slice_wav = tmp_dir / "slice.wav"
+                extract_dur = min(avail_sec, duration)
+                if extract_dur <= 0:
+                    raise ValueError("--audio-start leaves zero audio frames")
+                runner.run("extract-audio", [
+                    str(a),
+                    "--output", str(slice_wav),
+                    "--start", str(args.audio_start),
+                    "--duration", f"{extract_dur:.9f}",
+                    "--sample-rate", str(sr),
+                    "--channels", str(ch),
+                ])
+                if avail_sec + 1e-6 < duration:
+                    padded_wav = tmp_dir / "padded.wav"
+                    runner.run("mix-audio", [
+                        "--track", f"{slice_wav}:0:0",
+                        "--duration", f"{duration + 0.005:.6f}",
+                        "--sample-rate", str(sr),
+                        "--channels", str(ch),
+                        "--output", str(padded_wav),
+                    ])
+                    mux_wav = padded_wav
+                else:
+                    mux_wav = slice_wav
+                mux_audio_start = "0"
+
+            bitrate = 160000 if ch == 2 else 96000
+            runner.run("mux", [
+                str(v),
+                "--audio", str(mux_wav),
+                "--audio-start", mux_audio_start,
+                "--bitrate", str(bitrate),
+                "--output", str(staged),
+            ])
+            publish_new(staged, out)
+        return 0
+    except (OSError, ValueError, InvalidOperation, KeyError, json.JSONDecodeError, FileNotFoundError) as exc:
+        print(f"safarium-soundtrack: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

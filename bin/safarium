@@ -1,0 +1,271 @@
+#!/usr/bin/python3 -ISB
+"""Unified Safarium CLI entrypoint routing render/media/forge/prism/verify/hf/raster commands."""
+
+import ctypes
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+
+
+MEDIA_MODES = (
+    "extract-audio",
+    "mix-audio",
+    "extract-frames",
+    "gif",
+    "cutout",
+    "hybrid",
+    "mux",
+    "probe",
+    "qa",
+    "splice",
+    "warm-worker",
+)
+
+RENDER_DIRECT_MODES = (
+    "html",
+    "forge",
+    "verify",
+    "doctor",
+    "status",
+    "capabilities",
+    "version",
+    "schema",
+    "run",
+) + MEDIA_MODES
+
+APPLE_SYSTEM_LIB_PREFIXES = (
+    "/usr/lib/",
+    "/System/Library/",
+    "/Library/Apple/System/",
+    "/System/Volumes/Preboot/Cryptexes/OS/",
+)
+
+HELP = """Usage:
+  safarium <command> [args ...]
+
+Core Render & Queue Commands (routed via safarium-render SF-VIDEO-1 FIFO):
+  safarium html [args ...]                  Render HTML/CSS/SVG/WebGL to video
+  safarium media <mode> [args ...]          Run media worker mode (extract-frames, mux, ...)
+  safarium forge [subcommand & args ...]    Run SafariumForge DAG/media/QA pipeline
+  safarium prism [subcommand & args ...]    Run SafariumPrism 3D/WebKit/Blender pipeline
+  safarium verify FILE [CANDIDATE]          Inspect or compare rendered media tracks/frames
+  safarium run -- program [arg ...]         Run an audited foreground command in FIFO slot
+
+Media Mode Shortcuts (routed via safarium-render):
+  extract-audio, mix-audio, extract-frames, gif, cutout,
+  hybrid, mux, probe, qa, splice, warm-worker
+
+Non-Blocking Inspection & Ecosystem Commands:
+  safarium status [--json-detail|--verbose] Queue status JSON
+  safarium doctor [--json]                  Environment, worker & queue health audit
+  safarium capabilities                     Hardware/codec/volume capabilities JSON
+  safarium schema [TARGET]                  Recipe/command JSON schema
+  safarium version                          Safarium version & installed release SHA
+  safarium hf {check|render} PROJECT ...    Run HyperFrames via Safarium WebKit CDP shim
+  safarium raster info                      Report libSafariumRaster.dylib path, presence & ABI
+"""
+
+MEDIA_HELP = """Usage:
+  safarium media <mode> [args ...]
+
+Supported modes (routed through safarium-render SF-VIDEO-1):
+  extract-audio, mix-audio, extract-frames, gif, cutout,
+  hybrid, mux, probe, qa, splice, warm-worker
+"""
+
+RASTER_HELP = """Usage:
+  safarium raster info [--json]
+
+Reports libSafariumRaster.dylib path, presence, Apple-only linkage, and C ABI symbols.
+"""
+
+
+def _complain(message):
+    try:
+        os.write(2, ("safarium: " + message + "\n").encode())
+    except OSError:
+        pass
+
+
+def _bin_dirs():
+    dirs = []
+    for raw in (os.path.realpath(__file__), os.path.abspath(__file__)):
+        d = os.path.dirname(raw)
+        if d and d not in dirs:
+            dirs.append(d)
+    return dirs
+
+
+def _trusted_sibling(name):
+    uid = os.getuid()
+    for d in _bin_dirs():
+        candidate = os.path.join(d, name)
+        try:
+            st = os.lstat(candidate)
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode) and st.st_uid in (0, uid) and not (st.st_mode & 0o022):
+            if os.access(candidate, os.X_OK):
+                return candidate
+    return None
+
+
+def _exec_sibling(name, argv):
+    exe = _trusted_sibling(name)
+    if exe is None:
+        _complain(f"missing or untrusted sibling binary '{name}' beside {os.path.dirname(os.path.abspath(__file__))}")
+        return os.EX_UNAVAILABLE
+    os.execv(exe, [exe, *argv])
+    return os.EX_OSERR
+
+
+def _inspect_raster():
+    candidates = []
+    env_lib = os.environ.get("SAFARIUM_RASTER_LIB")
+    if env_lib:
+        candidates.append(os.path.abspath(os.path.expanduser(env_lib)))
+    for d in _bin_dirs():
+        prefix = os.path.dirname(d)
+        candidates.append(os.path.join(prefix, "libexec", "safarium", "libSafariumRaster.dylib"))
+    candidates.append(os.path.expanduser("~/.local/libexec/safarium/libSafariumRaster.dylib"))
+
+    deduped = []
+    for c in candidates:
+        if c not in deduped:
+            deduped.append(c)
+
+    found = None
+    for path in deduped:
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode):
+            found = path
+            break
+
+    if not found:
+        print(json.dumps({
+            "present": False,
+            "path": None,
+            "appleOnly": None,
+            "abi": None,
+            "searched": deduped,
+        }, indent=2), flush=True)
+        return 0
+
+    apple_only = None
+    try:
+        id_res = subprocess.run(["/usr/bin/otool", "-D", found], capture_output=True, text=True, timeout=10)
+        self_ids = set()
+        if id_res.returncode == 0:
+            self_ids = {ln.strip() for ln in id_res.stdout.splitlines()[1:] if ln.strip()}
+        ot = subprocess.run(["/usr/bin/otool", "-L", found], capture_output=True, text=True, timeout=10)
+        if ot.returncode == 0:
+            deps = [
+                ln.strip().split(" (compatibility version ", 1)[0]
+                for ln in ot.stdout.splitlines()
+                if ln.startswith(("\t", " "))
+            ]
+            non_apple = [
+                d for d in deps
+                if d not in self_ids and not any(d.startswith(p) for p in APPLE_SYSTEM_LIB_PREFIXES)
+            ]
+            apple_only = len(deps) > 0 and len(non_apple) == 0
+    except OSError:
+        pass
+
+    sr_symbols = []
+    try:
+        nm = subprocess.run(["/usr/bin/nm", "-gU", found], capture_output=True, text=True, timeout=10)
+        if nm.returncode == 0:
+            for line in nm.stdout.splitlines():
+                parts = line.split()
+                if parts:
+                    sym = parts[-1]
+                    if sym.startswith("_sr_"):
+                        sym = sym[1:]
+                    if sym.startswith("sr_"):
+                        sr_symbols.append(sym)
+            sr_symbols = sorted(set(sr_symbols))
+    except OSError:
+        pass
+
+    abi_version = None
+    try:
+        hv = subprocess.run(["/usr/bin/otool", "-hv", found], capture_output=True, text=True, timeout=5)
+        is_dylib = hv.returncode == 0 and bool(re.search(r"\bDYLIB\b", hv.stdout))
+        if is_dylib and "sr_abi_version" in sr_symbols:
+            lib = ctypes.CDLL(found)
+            fn = lib.sr_abi_version
+            fn.restype = ctypes.c_int32
+            abi_version = int(fn())
+    except (OSError, AttributeError):
+        pass
+
+    print(json.dumps({
+        "present": True,
+        "path": found,
+        "appleOnly": apple_only,
+        "abi": {
+            "version": abi_version,
+            "symbolCount": len(sr_symbols),
+            "sampleSymbols": sr_symbols[:20],
+        },
+        "searched": deduped,
+    }, indent=2), flush=True)
+    return 0
+
+
+def main(argv):
+    if not argv:
+        _complain("missing command; see safarium --help")
+        return os.EX_USAGE
+    cmd = argv[0]
+    rest = argv[1:]
+
+    if cmd in ("-h", "--help", "help") and not rest:
+        print(HELP, end="", flush=True)
+        return 0
+
+    if cmd in RENDER_DIRECT_MODES:
+        return _exec_sibling("safarium-render", argv)
+
+    if cmd == "media":
+        if not rest or rest in (["-h"], ["--help"], ["help"]):
+            if not rest:
+                _complain("media requires a mode; see safarium media --help")
+                return os.EX_USAGE
+            print(MEDIA_HELP, end="", flush=True)
+            return 0
+        sub = rest[0]
+        if sub not in MEDIA_MODES:
+            _complain(f"unknown media mode '{sub}'; see safarium media --help")
+            return os.EX_USAGE
+        return _exec_sibling("safarium-render", rest)
+
+    if cmd == "prism":
+        forwarded = ["forge", "prism", *(rest if rest else ["--help"])]
+        return _exec_sibling("safarium-render", forwarded)
+
+    if cmd == "hf":
+        return _exec_sibling("safarium-hf", rest)
+
+    if cmd == "raster":
+        if rest in (["-h"], ["--help"], ["help"]):
+            print(RASTER_HELP, end="", flush=True)
+            return 0
+        if rest in (["info"], ["info", "--json"]):
+            return _inspect_raster()
+        _complain("invalid raster subcommand; see safarium raster --help")
+        return os.EX_USAGE
+
+    _complain(f"unknown command '{cmd}'; see safarium --help")
+    return os.EX_USAGE
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

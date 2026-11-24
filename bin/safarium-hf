@@ -1,0 +1,55 @@
+#!/bin/sh
+# Run the local HyperFrames check/render pipeline with Safarium's WebKit browser.
+set -eu
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
+usage() {
+  echo 'usage: bin/safarium-hf {check|render} PROJECT [HyperFrames options...]' >&2
+}
+case ${1:-} in
+  check|render) ;;
+  --help|-h) usage; exit 0 ;;
+  *) usage; exit 2 ;;
+esac
+for arg in "$@"; do
+  case "$arg" in
+    --docker|--docker=*|--browser-path|--browser-path=*|--cloud|--cloud=*)
+      echo "safarium-hf: $arg selects a different browser/runtime" >&2; exit 2 ;;
+  esac
+done
+launcher=${HYPERFRAMES_LAUNCHER:-"$HOME/.config/opencode/skills/hyperframes/scripts/plugin-cli.mjs"}
+test -f "$launcher" || { echo 'safarium-hf: set HYPERFRAMES_LAUNCHER to the installed plugin-cli.mjs' >&2; exit 2; }
+version=${SAFARIUM_HF_VERSION:-0.9.72}
+case "$version" in *[!0-9.]*)
+  echo 'safarium-hf: use a numeric HyperFrames release' >&2; exit 2 ;;
+esac
+if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+  echo 'safarium-hf: SAFARIUM_HF_VERSION must be an exact version, e.g. 0.9.72' >&2; exit 2
+fi
+if [ -n "${SAFARIUM_CDP:-}" ]; then
+  shim=$SAFARIUM_CDP
+else
+  build=${SAFARIUM_BUILD_DIR:-"$HOME/Library/Caches/Safarium/hf-swiftpm"}
+  swift build --package-path "$root" --scratch-path "$build" -c release --product safarium-cdp >&2
+  bindir=$(swift build --package-path "$root" --scratch-path "$build" -c release --show-bin-path)
+  shim="$bindir/safarium-cdp"
+fi
+# HF changes working directory before it launches the browser.
+case "$shim" in /*) ;; *) shim="$PWD/$shim" ;; esac
+test -x "$shim" || { echo "safarium-hf: missing executable: $shim" >&2; exit 2; }
+banner=$("$shim" --version)
+case "$banner" in 'Safarium CDP shim '*' (WebKit)') ;; *)
+  echo 'safarium-hf: the selected executable is not the Safarium WebKit shim' >&2; exit 2 ;;
+esac
+export HYPERFRAMES_BROWSER_PATH="$shim" PRODUCER_HEADLESS_SHELL_PATH="$shim"
+export PRODUCER_FORCE_SCREENSHOT=true PRODUCER_EXPERIMENTAL_FAST_CAPTURE=false
+export HYPERFRAMES_NO_UPDATE_CHECK=1 DO_NOT_TRACK=1
+# The standalone launcher reads this variable; a plugin-managed launcher chooses
+# its own release and explicitly rejects the --cli-version flag. Keep both local.
+export HYPERFRAMES_STANDALONE_CLI_VERSION="$version" npm_config_offline=true
+if [ -n "${SAFARIUM_HF_VERSION:-}" ]; then
+  actual=$(node "$launcher" --version)
+  if [ "$actual" != "$version" ]; then
+    echo "safarium-hf: launcher provides $actual; requested $version" >&2; exit 2
+  fi
+fi
+exec node "$launcher" "$@"

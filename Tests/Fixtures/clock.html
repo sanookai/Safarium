@@ -1,0 +1,34 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{margin:0;background:#fff}
+.b{position:absolute;left:0;width:100px;height:100px}
+#css{top:0;background:#f00;animation:mv 4s linear forwards}
+@keyframes mv{from{transform:translateX(0)}to{transform:translateX(800px)}}
+#waapi{top:120px;background:#0a0}
+#raf{top:240px;background:#00f}
+#tmo{top:360px;background:#f0f}
+#tick{top:480px;background:#0cc}
+#late{top:600px;background:#cc0}
+</style></head><body>
+<div class="b" id="css"></div><div class="b" id="waapi"></div><div class="b" id="raf"></div>
+<div class="b" id="tmo"></div><div class="b" id="tick"></div><div class="b" id="late"></div>
+<script src="ticker.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+window.log={intervals:0,timeouts:[],dateStart:Date.now(),perfStart:performance.now(),micro:0,rafTs:[]};
+// WAAPI: 0 -> 800px over 2s linear
+$('waapi').animate([{transform:'translateX(0)'},{transform:'translateX(800px)'}],{duration:2000,fill:'both',easing:'linear'});
+// rAF-driven: x = 400 * t(s)
+(function loop(t){ $('raf').style.transform='translateX('+(400*t/1000)+'px)'; log.rafTs.push(t); requestAnimationFrame(loop)})(0);
+// setTimeout: at 1000ms jump to 500px; at 2000ms jump to 900px (must NOT have fired at 1.5s)
+setTimeout(()=>{ $('tmo').style.transform='translateX(500px)'; log.timeouts.push(1000) },1000);
+setTimeout(()=>{ $('tmo').style.transform='translateX(900px)'; log.timeouts.push(2000) },2000);
+// setInterval every 500ms
+setInterval(()=>{ log.intervals++ },500);
+// cleared timeout must never fire
+const dead=setTimeout(()=>{log.timeouts.push(-1)},100); clearTimeout(dead);
+// GSAP-like tween: 0 -> 800px over 2s
+ticker.to($('tick'),0,800,2000,0);
+// timer created from within a timer callback (due at 1200ms+300 = 1500ms), chained
+setTimeout(()=>{ setTimeout(()=>{ $('late').style.transform='translateX(250px)' },300) },1200);
+queueMicrotask(()=>{log.micro++});
+</script></body></html>
