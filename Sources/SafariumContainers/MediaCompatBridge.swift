@@ -360,35 +360,41 @@ public enum MediaCompatBridge {
         }
         let cookie = try makeESDescriptorWrappingASC(cleanASC)
         var desc: CMAudioFormatDescription?
-        let st = cookie.withUnsafeBytes { raw in
-            if let layoutTag {
-                var layout = AudioChannelLayout(
-                    mChannelLayoutTag: layoutTag,
-                    mChannelBitmap: [],
-                    mNumberChannelDescriptions: 0,
-                    mChannelDescriptions: AudioChannelDescription()
-                )
-                return CMAudioFormatDescriptionCreate(
+        let st: OSStatus
+        if let layoutTag {
+            let layout = AudioChannelLayout(
+                mChannelLayoutTag: layoutTag,
+                mChannelBitmap: [],
+                mNumberChannelDescriptions: 0,
+                mChannelDescriptions: AudioChannelDescription()
+            )
+            st = withUnsafePointer(to: layout) { layoutPtr in
+                cookie.withUnsafeBytes { raw in
+                    CMAudioFormatDescriptionCreate(
+                        allocator: kCFAllocatorDefault,
+                        asbd: &asbd,
+                        layoutSize: MemoryLayout<AudioChannelLayout>.size,
+                        layout: layoutPtr,
+                        magicCookieSize: cookie.count,
+                        magicCookie: raw.baseAddress,
+                        extensions: nil,
+                        formatDescriptionOut: &desc
+                    )
+                }
+            }
+        } else {
+            st = cookie.withUnsafeBytes { raw in
+                CMAudioFormatDescriptionCreate(
                     allocator: kCFAllocatorDefault,
                     asbd: &asbd,
-                    layoutSize: MemoryLayout<AudioChannelLayout>.size,
-                    layout: &layout,
+                    layoutSize: 0,
+                    layout: nil,
                     magicCookieSize: cookie.count,
                     magicCookie: raw.baseAddress,
                     extensions: nil,
                     formatDescriptionOut: &desc
                 )
             }
-            return CMAudioFormatDescriptionCreate(
-                allocator: kCFAllocatorDefault,
-                asbd: &asbd,
-                layoutSize: 0,
-                layout: nil,
-                magicCookieSize: cookie.count,
-                magicCookie: raw.baseAddress,
-                extensions: nil,
-                formatDescriptionOut: &desc
-            )
         }
         guard st == noErr, let desc else {
             throw SafariumError.encode("CMAudioFormatDescriptionCreate failed (\(st))")
@@ -1439,7 +1445,142 @@ public enum MediaCompatBridge {
 
         if didModify, let maxDur = trackDurations.max() {
             writeHeaderDuration(&data, box: mvhd, v0Offset: 16, v1Offset: 24, value: maxDur)
+        }
+
+        if injectMissingAACRollSampleGroups(in: &data) {
+            didModify = true
+        }
+
+        if didModify {
             try data.write(to: url, options: .atomic)
         }
+    }
+
+    /// Injects ISO 14496-12 `sgpd` (`roll_distance = -1`) and `sbgp` (`roll`) sample-group boxes into
+    /// passthrough `mp4a` audio tracks that lack them, growing ancestor boxes and shifting post-`moov`
+    /// `stco`/`co64` chunk offsets so pre-macOS 27 `AVAssetReader` does not emit a duplicate preroll packet.
+    private static func injectMissingAACRollSampleGroups(in data: inout Data) -> Bool {
+        let initialTopBoxes = parseBoxes(in: data, from: 0, to: data.count)
+        guard let initialMoov = initialTopBoxes.first(where: { $0.type == "moov" }),
+              initialMoov.headerSize == 8 else {
+            return false
+        }
+        let oldMoovEnd = initialMoov.end
+        var totalDelta = 0
+
+        for _ in 0..<16 {
+            let topBoxes = parseBoxes(in: data, from: 0, to: data.count)
+            guard let moov = topBoxes.first(where: { $0.type == "moov" }),
+                  moov.headerSize == 8 else {
+                break
+            }
+            let moovChildren = parseBoxes(in: data, from: moov.start + moov.headerSize, to: moov.end)
+            var insertedThisPass = false
+
+            for trak in moovChildren where trak.type == "trak" && trak.headerSize == 8 {
+                let trakChildren = parseBoxes(in: data, from: trak.start + trak.headerSize, to: trak.end)
+                guard let mdia = trakChildren.first(where: { $0.type == "mdia" && $0.headerSize == 8 }) else {
+                    continue
+                }
+                let mdiaChildren = parseBoxes(in: data, from: mdia.start + mdia.headerSize, to: mdia.end)
+                guard let hdlr = mdiaChildren.first(where: { $0.type == "hdlr" }),
+                      hdlr.start + hdlr.headerSize + 12 <= hdlr.end,
+                      readFourCC(data, at: hdlr.start + hdlr.headerSize + 8) == "soun",
+                      let minf = mdiaChildren.first(where: { $0.type == "minf" && $0.headerSize == 8 }) else {
+                    continue
+                }
+                let minfChildren = parseBoxes(in: data, from: minf.start + minf.headerSize, to: minf.end)
+                guard let stbl = minfChildren.first(where: { $0.type == "stbl" && $0.headerSize == 8 }) else {
+                    continue
+                }
+                let stblChildren = parseBoxes(in: data, from: stbl.start + stbl.headerSize, to: stbl.end)
+                guard !stblChildren.contains(where: { $0.type == "sgpd" || $0.type == "sbgp" }),
+                      let stsd = stblChildren.first(where: { $0.type == "stsd" && $0.headerSize == 8 }),
+                      stsd.start + 24 <= stsd.end,
+                      readFourCC(data, at: stsd.start + 20) == "mp4a",
+                      let stsz = stblChildren.first(where: { $0.type == "stsz" && $0.headerSize == 8 }),
+                      stsz.start + 20 <= stsz.end else {
+                    continue
+                }
+                let sampleCount = readU32BE(data, at: stsz.start + 16)
+                guard sampleCount > 0 else { continue }
+
+                let groupBoxes: [UInt8] = [
+                    // sgpd (26 bytes): version=1, grouping='roll', default_length=2, entry_count=1, roll_distance=-1
+                    0x00, 0x00, 0x00, 0x1A,
+                    0x73, 0x67, 0x70, 0x64,
+                    0x01, 0x00, 0x00, 0x00,
+                    0x72, 0x6F, 0x6C, 0x6C,
+                    0x00, 0x00, 0x00, 0x02,
+                    0x00, 0x00, 0x00, 0x01,
+                    0xFF, 0xFF,
+                    // sbgp (28 bytes): version=0, grouping='roll', entry_count=1, sample_count, group=1
+                    0x00, 0x00, 0x00, 0x1C,
+                    0x73, 0x62, 0x67, 0x70,
+                    0x00, 0x00, 0x00, 0x00,
+                    0x72, 0x6F, 0x6C, 0x6C,
+                    0x00, 0x00, 0x00, 0x01,
+                    UInt8((sampleCount >> 24) & 0xFF),
+                    UInt8((sampleCount >> 16) & 0xFF),
+                    UInt8((sampleCount >> 8) & 0xFF),
+                    UInt8(sampleCount & 0xFF),
+                    0x00, 0x00, 0x00, 0x01,
+                ]
+                let deltaU32 = UInt32(groupBoxes.count)
+                for box in [stbl, minf, mdia, trak, moov] {
+                    let oldSize = readU32BE(data, at: box.start)
+                    writeU32BE(&data, at: box.start, value: oldSize + deltaU32)
+                }
+                data.insert(contentsOf: groupBoxes, at: stsd.end)
+                totalDelta += groupBoxes.count
+                insertedThisPass = true
+                break
+            }
+            if !insertedThisPass {
+                break
+            }
+        }
+
+        guard totalDelta > 0 else { return false }
+
+        let updatedTopBoxes = parseBoxes(in: data, from: 0, to: data.count)
+        guard let updatedMoov = updatedTopBoxes.first(where: { $0.type == "moov" }) else {
+            return true
+        }
+        let moovChildren = parseBoxes(in: data, from: updatedMoov.start + updatedMoov.headerSize, to: updatedMoov.end)
+        for trak in moovChildren where trak.type == "trak" {
+            let trakChildren = parseBoxes(in: data, from: trak.start + trak.headerSize, to: trak.end)
+            guard let mdia = trakChildren.first(where: { $0.type == "mdia" }),
+                  let minf = parseBoxes(in: data, from: mdia.start + mdia.headerSize, to: mdia.end).first(where: { $0.type == "minf" }),
+                  let stbl = parseBoxes(in: data, from: minf.start + minf.headerSize, to: minf.end).first(where: { $0.type == "stbl" }) else {
+                continue
+            }
+            let stblChildren = parseBoxes(in: data, from: stbl.start + stbl.headerSize, to: stbl.end)
+            for box in stblChildren where box.type == "stco" && box.start + box.headerSize + 8 <= box.end {
+                let count = Int(readU32BE(data, at: box.start + box.headerSize + 4))
+                let entriesStart = box.start + box.headerSize + 8
+                guard entriesStart + count * 4 <= box.end else { continue }
+                for idx in 0..<count {
+                    let offPos = entriesStart + idx * 4
+                    let oldOff = readU32BE(data, at: offPos)
+                    if Int(oldOff) >= oldMoovEnd {
+                        writeU32BE(&data, at: offPos, value: oldOff + UInt32(totalDelta))
+                    }
+                }
+            }
+            for box in stblChildren where box.type == "co64" && box.start + box.headerSize + 8 <= box.end {
+                let count = Int(readU32BE(data, at: box.start + box.headerSize + 4))
+                let entriesStart = box.start + box.headerSize + 8
+                guard entriesStart + count * 8 <= box.end else { continue }
+                for idx in 0..<count {
+                    let offPos = entriesStart + idx * 8
+                    let oldOff = readU64BE(data, at: offPos)
+                    if oldOff >= UInt64(oldMoovEnd) {
+                        writeU64BE(&data, at: offPos, value: oldOff + UInt64(totalDelta))
+                    }
+                }
+            }
+        }
+        return true
     }
 }

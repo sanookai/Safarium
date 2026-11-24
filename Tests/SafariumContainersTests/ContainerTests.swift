@@ -873,6 +873,7 @@ final class ContainerTests: XCTestCase {
 
         let opaque = makeComplexGraphicCGImage(width: 320, height: 240, includeAlpha: false)
         let alpha = makeComplexGraphicCGImage(width: 320, height: 240, includeAlpha: true)
+        let avifSupported = ((CGImageDestinationCopyTypeIdentifiers() as? [String]) ?? []).contains("public.avif")
 
         for (fmt, img, q, ext) in [
             (ContainerFormat.webp, alpha, Optional<Double>.none, "webp"),
@@ -883,6 +884,15 @@ final class ContainerTests: XCTestCase {
             (ContainerFormat.jpg, opaque, Optional(0.90), "jpg"),
         ] {
             let u = dir.appendingPathComponent("out.\(ext)")
+            if fmt == .avif && !avifSupported {
+                XCTAssertThrowsError(
+                    try WebPAVIFEncoder.writeStillImage(cgImage: img, format: fmt, quality: q, to: u, overwrite: false)
+                ) { err in
+                    XCTAssertTrue(err is SafariumError)
+                }
+                XCTAssertFalse(FileManager.default.fileExists(atPath: u.path))
+                continue
+            }
             let rep = try WebPAVIFEncoder.writeStillImage(cgImage: img, format: fmt, quality: q, to: u, overwrite: false)
             XCTAssertEqual(rep.width, 320)
             XCTAssertEqual(rep.height, 240)

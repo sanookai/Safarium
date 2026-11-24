@@ -272,10 +272,17 @@ final class CLIIntegrationTests: XCTestCase {
 
         let pngURL = dir.appendingPathComponent("still.png")
         _ = try runCLI(["image", srcMP4.path, "-o", pngURL.path, "--frames", "1"])
+        let avifSupported = ((CGImageDestinationCopyTypeIdentifiers() as? [String]) ?? []).contains("public.avif")
         let avifOK = dir.appendingPathComponent("ok.avif")
-        let avifRes = try runCLI(["image", pngURL.path, "-o", avifOK.path, "--quality", "0.80"])
-        let avifRep = try JSONDecoder().decode(StillImageWriteReport.self, from: avifRes.stdout)
-        XCTAssertEqual(avifRep.format, .avif)
+        if avifSupported {
+            let avifRes = try runCLI(["image", pngURL.path, "-o", avifOK.path, "--quality", "0.80"])
+            let avifRep = try JSONDecoder().decode(StillImageWriteReport.self, from: avifRes.stdout)
+            XCTAssertEqual(avifRep.format, .avif)
+        } else {
+            let unsupportedAVIF = try runCLI(["image", pngURL.path, "-o", avifOK.path, "--quality", "0.80"], expectZero: false)
+            XCTAssertNotEqual(unsupportedAVIF.status, 0)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: avifOK.path))
+        }
 
         let avifBad = dir.appendingPathComponent("bad.avif")
         let failAVIF = try runCLI(["image", pngURL.path, "-o", avifBad.path, "--quality", "1.0"], expectZero: false)
