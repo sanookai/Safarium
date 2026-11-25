@@ -9,7 +9,7 @@ Zero-dependency **Model Context Protocol (MCP)** `stdio` JSON-RPC 2.0 server (`b
 
 ---
 
-## Exposed Tools (18)
+## Exposed Tools (23 — MCP v2)
 
 ### Fast Read-Only Tools (FIFO Bypass — Instant)
 
@@ -18,6 +18,9 @@ Zero-dependency **Model Context Protocol (MCP)** `stdio` JSON-RPC 2.0 server (`b
 | `doctor` | Environment, worker, Apple-only `otool -L`, and queue health audit |
 | `status` | Live SF-VIDEO-1 FIFO queue status, active ticket, waiting jobs, and thermal state |
 | `capabilities` | Hardware capabilities (Metal GPU, ANE, Media Engines, all 12 VideoToolbox codecs, VTFrameProcessor, AudioToolbox, APFS `clonefile`) |
+| `encoding_capabilities` | **Wave 11** live Apple VideoToolbox runtime capability profiler: enumerates real HW/SW encoders (`avc1`, `hvc1`, `muxa`, `apcn`, `apch`, `ap4h`, `av01`) and probes live `VTCompressionSession` properties (`Main10`, 2-pass, SpatialAQ, LookAhead, CQF) with per-machine/OS cache |
+| `encoding_conformance` | **Wave 11** independent zero-FFmpeg bitstream & HLS validator: inspects ISOBMFF (`ftyp`/`moov`/`stsd`/`hvcC`/`avcC`/`dvcC`/`colr`/`mdcv`/`clli`/`moof`/`tfdt`/`trun`), 188-byte MPEG-TS (`PAT`/`PMT`/`CC`/`PCR`/`PTS`), or full RFC 8216 + Apple HLS Authoring ladders (`master.m3u8`, shared-IDR alignment, peak `BANDWIDTH`) plus optional independent `AVAssetReader` frame decode |
+| `encoding_plan` | **Wave 13** SPEC dry-run perceptual planner: analyzes shots, noise/grain, Vision text/face masks, banding risk, and transition types (hard cut vs flash/fade/pan), returning a structured per-shot `SPECPlan` (expected Mbps, estimated time, forced IDR frames, explanations) with optional reusable `SPECAnalysisSidecar` JSON |
 | `raster_info` | `libSafariumRaster.dylib` path, Apple-only linkage, ABI version, and symbol count (`418` symbols) |
 | `forge_schema` | Machine-readable JSON schemas (`all`, `recipe`, `subcommands`, `errors`) |
 | `forge_validate` | Validate a Forge recipe file or inline JSON object (with optional `--dry-run`) |
@@ -30,6 +33,8 @@ Zero-dependency **Model Context Protocol (MCP)** `stdio` JSON-RPC 2.0 server (`b
 
 | Tool | Purpose |
 |---|---|
+| `encoding_encode` | **Wave 13/14** intent-level SPEC closed-loop quality-target hardware encode: declare perceptual goals (`target_vmaf`, `target_ms_ssim`, `max_deltae_p95`, `protect_text`, `protect_faces`, `preserve_grain`, `banding_sensitive`, `hdr_policy`, `power_budget`); runs short-window proxy convergence measuring real MS-SSIM & CIEDE2000 p95, encodes via VideoToolbox + thermal hysteresis scheduler + atomic staging publish |
+| `encoding_ladder` | **Wave 13/14** Per-Title Convex-Hull HLS ABR Ladder planner & packager: reuses one `SPECAnalysisSidecar` across all rungs (zero upscaling), aligns shared-IDR boundaries, packages CMAF fMP4 or MPEG-TS HLS, and auto-validates via `HLSConformanceValidator` *(pass `plan_only: true` for instant FIFO-bypass planning)* |
 | `forge_run` | Run a declarative SafariumForge JSON DAG recipe (`--progress jsonl`, `--json-errors`) |
 | `html_render` | Render HTML/CSS/SVG/WebGL2 deterministically via windowless `WKWebView` + `VideoToolbox` (all 12 codecs, 10-bit P010/P210/P410, CQF, SpatialAQ, Dolby Vision 8.4/HDR10/HLG) |
 | `transcode_supremacy` | Wave 9/10 Apple Silicon hardware transcode: **19 built-in `--scenario` presets**, hardware **HDR→SDR tone-mapping (`tonemap_sdr`)**, 10-bit HEVC (`4:2:0`/`4:2:2`/`4:4:4`), 6 ProRes tiers, SpatialAQ + LookAhead + VBV, CQF, **True 2-Pass `VTMultiPassStorage`**, **Mini-CAE** multi-engine adaptive encoding, zero-copy `VTFrameProcessor` denoise/retime, and HDR mastering |

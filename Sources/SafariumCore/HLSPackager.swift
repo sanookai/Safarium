@@ -94,11 +94,13 @@ public struct HLSVariantResult: Codable, Sendable {
     public let height: Int
     public let fps: Double
     public let bitrate: Int
+    public let peakBandwidth: Int
     public let averageBitrate: Int
     public let codecs: String
     public let playlistPath: String
     public let initSegmentPath: String?
     public let segmentCount: Int
+    public let segmentDurations: [Double]
     public let totalBytes: Int64
 }
 
@@ -107,6 +109,7 @@ public struct HLSPackageResult: Codable, Sendable {
     public let masterPlaylistPath: String
     public let variants: [HLSVariantResult]
     public let subtitlePlaylistPath: String?
+    public let sharedIDRBoundaries: [Double]
     public let totalBytes: Int64
     public let elapsedMs: Double
     public let format: HLSFormat
@@ -114,6 +117,24 @@ public struct HLSPackageResult: Codable, Sendable {
 
 /// Native Apple Silicon HLS / CMAF ABR packager (0% FFmpeg).
 public enum HLSPackager {
+    /// Computes deterministic shared-IDR segment boundary timestamps (`0, segDur, 2*segDur, ...`)
+    /// so every ABR rung cuts segments at identical presentation timestamps.
+    public static func computeSharedIDRBoundaries(
+        totalDurationSeconds: Double,
+        segmentDurationSeconds: Double
+    ) -> [Double] {
+        let segDur = max(0.5, segmentDurationSeconds)
+        let totalDur = max(0.0, totalDurationSeconds)
+        var boundaries: [Double] = [0.0]
+        var nextBoundary = segDur
+        // Only add a boundary if at least 0.1s of media remains after it to avoid tiny trailing slivers.
+        while nextBoundary + 0.10 < totalDur {
+            boundaries.append((nextBoundary * 1000.0).rounded() / 1000.0)
+            nextBoundary += segDur
+        }
+        return boundaries
+    }
+
     /// Packages `inputURL` into a complete RFC 8216 multi-rung HLS stream inside `outputDirectory`.
     public static func package(
         inputURL: URL,
@@ -150,6 +171,12 @@ public enum HLSPackager {
 
         let audioTracks = try await asset.loadTracks(withMediaType: .audio)
         let hasAudio = !audioTracks.isEmpty
+
+        // Compute exact shared-IDR boundary timestamps once for all rungs
+        let sharedIDRBoundaries = computeSharedIDRBoundaries(
+            totalDurationSeconds: totalDurationSec,
+            segmentDurationSeconds: options.segmentDurationSeconds
+        )
 
         // Filter rungs: skip rungs taller than source unless only 1 rung was requested.
         let activeRungs: [HLSRung]
@@ -200,7 +227,8 @@ public enum HLSPackager {
                     variantName: safeName,
                     variantDir: variantDir,
                     effectiveFPS: effectiveFPS,
-                    segmentDuration: options.segmentDurationSeconds
+                    segmentDuration: options.segmentDurationSeconds,
+                    sharedIDRBoundaries: sharedIDRBoundaries
                 )
             case .mpegTS:
                 variant = try await encodeMPEGTSVariant(
@@ -210,7 +238,8 @@ public enum HLSPackager {
                     variantName: safeName,
                     variantDir: variantDir,
                     effectiveFPS: effectiveFPS,
-                    segmentDuration: options.segmentDurationSeconds
+                    segmentDuration: options.segmentDurationSeconds,
+                    sharedIDRBoundaries: sharedIDRBoundaries
                 )
             }
             variants.append(variant)
@@ -246,8 +275,8 @@ public enum HLSPackager {
             grandTotalBytes += fileSize(vttDest) + fileSize(subPlaylistURL)
         }
 
-        // Write RFC 8216 master.m3u8 sorted by bandwidth ascending
-        let sortedVariants = variants.sorted { $0.bitrate < $1.bitrate }
+        // Write RFC 8216 master.m3u8 sorted by measured peak bandwidth ascending
+        let sortedVariants = variants.sorted { $0.peakBandwidth < $1.peakBandwidth }
         var masterLines: [String] = [
             "#EXTM3U",
             "#EXT-X-VERSION:\(options.format == .fmp4CMAF ? 7 : 3)",
@@ -261,8 +290,8 @@ public enum HLSPackager {
             )
         }
         for v in sortedVariants {
-            let peakBW = max(v.bitrate, Int(Double(v.averageBitrate) * 1.15))
-            let avgBW = max(100_000, v.averageBitrate)
+            let peakBW = max(v.peakBandwidth, v.averageBitrate, 1_000)
+            let avgBW = min(peakBW, max(1_000, v.averageBitrate))
             var attrs = "BANDWIDTH=\(peakBW),AVERAGE-BANDWIDTH=\(avgBW),RESOLUTION=\(v.width)x\(v.height),FRAME-RATE=\(String(format: "%.3f", v.fps)),CODECS=\"\(v.codecs)\""
             if subtitlePlaylistPath != nil {
                 attrs += ",SUBTITLES=\"subs\""
@@ -282,10 +311,36 @@ public enum HLSPackager {
             masterPlaylistPath: masterURL.path,
             variants: sortedVariants,
             subtitlePlaylistPath: subtitlePlaylistPath,
+            sharedIDRBoundaries: sharedIDRBoundaries,
             totalBytes: grandTotalBytes,
             elapsedMs: (elapsedMs * 100.0).rounded() / 100.0,
             format: options.format
         )
+    }
+
+    private static func measureVariantBandwidths(
+        segments: [RecordedSegment],
+        fallbackBitrate: Int
+    ) -> (peakBandwidth: Int, averageBandwidth: Int) {
+        let totalDur = segments.reduce(0.0) { $0 + $1.durationSeconds }
+        let totalBytes = segments.reduce(Int64(0)) { $0 + $1.bytes }
+        let avgBW: Int
+        if totalDur > 0.05 && totalBytes > 0 {
+            avgBW = max(1_000, Int((Double(totalBytes) * 8.0 / totalDur).rounded()))
+        } else {
+            avgBW = max(1_000, fallbackBitrate)
+        }
+        var maxSegBitrate = Double(avgBW)
+        for seg in segments {
+            if seg.durationSeconds > 0.05 && seg.bytes > 0 {
+                let segBW = (Double(seg.bytes) * 8.0) / seg.durationSeconds
+                if segBW > maxSegBitrate {
+                    maxSegBitrate = segBW
+                }
+            }
+        }
+        let peakBW = max(avgBW, Int(ceil(maxSegBitrate)))
+        return (peakBW, avgBW)
     }
 
     // MARK: - CMAF fMP4 Variant Encoder (Native AVAssetWriter .mpeg4AppleHLS)
@@ -369,7 +424,8 @@ public enum HLSPackager {
         variantName: String,
         variantDir: URL,
         effectiveFPS: Double,
-        segmentDuration: Double
+        segmentDuration: Double,
+        sharedIDRBoundaries: [Double]
     ) async throws -> HLSVariantResult {
         let writer = AVAssetWriter(contentType: .mpeg4Movie)
         writer.outputFileTypeProfile = .mpeg4AppleHLS
@@ -515,10 +571,12 @@ public enum HLSPackager {
             autoreleasepool { out.copyNextSampleBuffer() }
         }
         let firstVideoPTS = nextVideoSB.map { CMSampleBufferGetPresentationTimeStamp($0) } ?? .zero
-        let firstAudioPTS = nextAudioSB.map { CMSampleBufferGetPresentationTimeStamp($0) } ?? firstVideoPTS
-        let basePTS = CMTimeCompare(firstVideoPTS, firstAudioPTS) <= 0 ? firstVideoPTS : firstAudioPTS
+        // Anchor all rungs to firstVideoPTS so frame 0 lands at t = 0.000s identically across every rung.
+        let basePTS = firstVideoPTS
 
         let minFrameStep = 1.0 / effectiveFPS
+        let halfFrameTol = minFrameStep * 0.45
+        var nextBoundaryIdx = 0
         var lastAppendedVideoSec = -Double.greatestFiniteMagnitude
         var encodedFrames = 0
         var videoMarkedFinished = false
@@ -562,8 +620,16 @@ public enum HLSPackager {
                 let normPTS = CMTimeMaximum(.zero, CMTimeSubtract(rawPTS, basePTS))
                 let ptsSec = normPTS.seconds
 
-                // Optional FPS decimation when rung.fps < sourceFPS
-                if encodedFrames > 0 && (ptsSec - lastAppendedVideoSec) < (minFrameStep * 0.90) {
+                // Check whether this frame hits a shared IDR segment boundary; boundary frames are never skipped.
+                var hitsSharedBoundary = false
+                while nextBoundaryIdx < sharedIDRBoundaries.count &&
+                      ptsSec >= (sharedIDRBoundaries[nextBoundaryIdx] - halfFrameTol) {
+                    hitsSharedBoundary = true
+                    nextBoundaryIdx += 1
+                }
+
+                // Optional FPS decimation when rung.fps < sourceFPS (never drop shared IDR boundary frames)
+                if !hitsSharedBoundary && encodedFrames > 0 && (ptsSec - lastAppendedVideoSec) < (minFrameStep * 0.90) {
                     continue
                 }
 
@@ -617,7 +683,6 @@ public enum HLSPackager {
 
         let maxSegDur = snap.segments.map(\.durationSeconds).max() ?? segmentDuration
         let targetDuration = max(1, Int(ceil(maxSegDur)))
-        let totalSegDur = snap.segments.reduce(0.0) { $0 + $1.durationSeconds }
         let segBytes = snap.segments.reduce(Int64(0)) { $0 + $1.bytes }
 
         var m3u8Lines: [String] = [
@@ -640,9 +705,10 @@ public enum HLSPackager {
         try Data(m3u8Lines.joined(separator: "\n").utf8).write(to: playlistURL, options: .atomic)
 
         let totalVariantBytes = snap.initBytes + segBytes + fileSize(playlistURL)
-        let avgBitrate = totalSegDur > 0.05
-            ? Int((Double(segBytes) * 8.0 / totalSegDur).rounded())
-            : rung.bitrate
+        let measured = measureVariantBandwidths(
+            segments: snap.segments,
+            fallbackBitrate: rung.bitrate + (hasMuxedAudio ? rung.audioBitrate : 0)
+        )
         let codecsStr = rfc6381CodecsString(videoCodec: hlsCodec, width: rung.width, height: rung.height, hasAudio: hasMuxedAudio)
 
         return HLSVariantResult(
@@ -650,12 +716,14 @@ public enum HLSPackager {
             width: rung.width,
             height: rung.height,
             fps: effectiveFPS,
-            bitrate: rung.bitrate + (hasMuxedAudio ? rung.audioBitrate : 0),
-            averageBitrate: avgBitrate,
+            bitrate: measured.peakBandwidth,
+            peakBandwidth: measured.peakBandwidth,
+            averageBitrate: measured.averageBandwidth,
             codecs: codecsStr,
             playlistPath: playlistURL.path,
             initSegmentPath: variantDir.appendingPathComponent("init.mp4").path,
             segmentCount: snap.segments.count,
+            segmentDurations: snap.segments.map(\.durationSeconds),
             totalBytes: totalVariantBytes
         )
     }
@@ -669,7 +737,8 @@ public enum HLSPackager {
         variantName: String,
         variantDir: URL,
         effectiveFPS: Double,
-        segmentDuration: Double
+        segmentDuration: Double,
+        sharedIDRBoundaries: [Double]
     ) async throws -> HLSVariantResult {
         let tsCodec: VideoCodec = (rung.codec == .h264) ? .h264 : .hevc
         let cmCodec: CMVideoCodecType = (tsCodec == .h264) ? kCMVideoCodecType_H264 : kCMVideoCodecType_HEVC
@@ -695,11 +764,13 @@ public enum HLSPackager {
         }
         defer { VTCompressionSessionInvalidate(session) }
 
+        let keyframeInterval = max(1, Int((effectiveFPS * segmentDuration).rounded()))
         _ = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanFalse)
         _ = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: rung.bitrate))
         _ = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: NSNumber(value: effectiveFPS))
         _ = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         _ = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowOpenGOP, value: kCFBooleanFalse)
+        _ = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: keyframeInterval))
         _ = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: NSNumber(value: segmentDuration))
         VTCompressionSessionPrepareToEncodeFrames(session)
 
@@ -745,15 +816,32 @@ public enum HLSPackager {
         }
         let collector = Collector()
 
-        let framesPerSeg = max(1, Int((effectiveFPS * segmentDuration).rounded()))
+        let minFrameStep = 1.0 / effectiveFPS
+        let halfFrameTol = minFrameStep * 0.45
         var firstPTS: CMTime?
-        var frameIdx = 0
+        var nextBoundaryIdx = 0
+        var lastEncodedSec = -Double.greatestFiniteMagnitude
+        var encodedFrames = 0
+
         while let sb = autoreleasepool(invoking: { videoOutput.copyNextSampleBuffer() }) {
             guard let srcPB = CMSampleBufferGetImageBuffer(sb) else { continue }
             let rawPTS = CMSampleBufferGetPresentationTimeStamp(sb)
             if firstPTS == nil { firstPTS = rawPTS }
             let normPTS = CMTimeMaximum(.zero, CMTimeSubtract(rawPTS, firstPTS ?? .zero))
+            let ptsSec = normPTS.seconds
             let dur = CMSampleBufferGetDuration(sb)
+
+            // Force an IDR keyframe on every shared segment boundary timestamp across all rungs.
+            var forceKey = false
+            while nextBoundaryIdx < sharedIDRBoundaries.count &&
+                  ptsSec >= (sharedIDRBoundaries[nextBoundaryIdx] - halfFrameTol) {
+                forceKey = true
+                nextBoundaryIdx += 1
+            }
+
+            if !forceKey && encodedFrames > 0 && (ptsSec - lastEncodedSec) < (minFrameStep * 0.90) {
+                continue
+            }
 
             var dstPBOpt: CVPixelBuffer?
             guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &dstPBOpt) == kCVReturnSuccess,
@@ -761,7 +849,6 @@ public enum HLSPackager {
             try scalePixelBuffer(srcPB, into: dstPB, transferSession: transferSession, ciContext: fallbackCI)
             ColorMasteringProfile.sdrBT709.tagPixelBuffer(dstPB)
 
-            let forceKey = (frameIdx % framesPerSeg) == 0
             let props: CFDictionary? = forceKey
                 ? ([kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary)
                 : nil
@@ -781,7 +868,8 @@ public enum HLSPackager {
                 reader.cancelReading()
                 throw SafariumError.encode("VTCompressionSessionEncodeFrame for MPEG-TS failed (\(encSt))")
             }
-            frameIdx += 1
+            lastEncodedSec = ptsSec
+            encodedFrames += 1
         }
         reader.cancelReading()
         VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
@@ -790,20 +878,25 @@ public enum HLSPackager {
             throw SafariumError.encode("MPEG-TS encode produced no samples (status \(collector.err))")
         }
 
-        // Partition encoded samples at IDR boundaries into 188-byte MPEG-TS segment files
+        // Partition encoded samples at the exact shared IDR boundary timestamps into 188-byte MPEG-TS segment files
         var segmentBuckets: [[CMSampleBuffer]] = []
         var currentBucket: [CMSampleBuffer] = []
-        var bucketStartSec = 0.0
+        var cutBoundaryIdx = 1 // index 0 is t=0.0
 
         for sb in collector.samples {
             let ptsSec = CMSampleBufferGetPresentationTimeStamp(sb).seconds
             let isKey = isKeyframeSampleBuffer(sb)
-            if !currentBucket.isEmpty && isKey && (ptsSec - bucketStartSec) >= (segmentDuration * 0.85) {
+            if !currentBucket.isEmpty &&
+               isKey &&
+               cutBoundaryIdx < sharedIDRBoundaries.count &&
+               ptsSec >= (sharedIDRBoundaries[cutBoundaryIdx] - halfFrameTol) {
                 segmentBuckets.append(currentBucket)
                 currentBucket = [sb]
-                bucketStartSec = ptsSec
+                while cutBoundaryIdx < sharedIDRBoundaries.count &&
+                      ptsSec >= (sharedIDRBoundaries[cutBoundaryIdx] - halfFrameTol) {
+                    cutBoundaryIdx += 1
+                }
             } else {
-                if currentBucket.isEmpty { bucketStartSec = ptsSec }
                 currentBucket.append(sb)
             }
         }
@@ -823,10 +916,17 @@ public enum HLSPackager {
             tsData.append(buildPMTPacket(videoStreamType: streamTypeByte, cc: &pmtCC))
 
             let firstSec = CMSampleBufferGetPresentationTimeStamp(bucket[0]).seconds
-            let lastSB = bucket[bucket.count - 1]
-            let lastPTS = CMSampleBufferGetPresentationTimeStamp(lastSB).seconds
-            let lastDur = CMSampleBufferGetDuration(lastSB).seconds
-            let segDur = max(1.0 / effectiveFPS, (lastPTS - firstSec) + (lastDur.isFinite && lastDur > 0 ? lastDur : (1.0 / effectiveFPS)))
+            let segDur: Double
+            if segIdx + 1 < segmentBuckets.count, let nextFirst = segmentBuckets[segIdx + 1].first {
+                let nextFirstSec = CMSampleBufferGetPresentationTimeStamp(nextFirst).seconds
+                segDur = max(1.0 / effectiveFPS, nextFirstSec - firstSec)
+            } else {
+                let lastSB = bucket[bucket.count - 1]
+                let lastPTS = CMSampleBufferGetPresentationTimeStamp(lastSB).seconds
+                let lastDur = CMSampleBufferGetDuration(lastSB).seconds
+                let frameDur = (lastDur.isFinite && lastDur > 0) ? lastDur : (1.0 / effectiveFPS)
+                segDur = max(1.0 / effectiveFPS, (lastPTS - firstSec) + frameDur)
+            }
 
             for sb in bucket {
                 let annexB = extractAnnexBBytes(from: sb, isHEVC: tsCodec != .h264)
@@ -844,7 +944,6 @@ public enum HLSPackager {
 
         let maxSegDur = recorded.map(\.durationSeconds).max() ?? segmentDuration
         let targetDur = max(1, Int(ceil(maxSegDur)))
-        let totalDur = recorded.reduce(0.0) { $0 + $1.durationSeconds }
         let totalSegBytes = recorded.reduce(Int64(0)) { $0 + $1.bytes }
 
         var m3u8Lines: [String] = [
@@ -865,9 +964,7 @@ public enum HLSPackager {
         try Data(m3u8Lines.joined(separator: "\n").utf8).write(to: playlistURL, options: .atomic)
 
         let totalBytes = totalSegBytes + fileSize(playlistURL)
-        let avgBitrate = totalDur > 0.05
-            ? Int((Double(totalSegBytes) * 8.0 / totalDur).rounded())
-            : rung.bitrate
+        let measured = measureVariantBandwidths(segments: recorded, fallbackBitrate: rung.bitrate)
         let codecsStr = rfc6381CodecsString(videoCodec: tsCodec, width: rung.width, height: rung.height, hasAudio: false)
 
         return HLSVariantResult(
@@ -875,12 +972,14 @@ public enum HLSPackager {
             width: rung.width,
             height: rung.height,
             fps: effectiveFPS,
-            bitrate: rung.bitrate,
-            averageBitrate: avgBitrate,
+            bitrate: measured.peakBandwidth,
+            peakBandwidth: measured.peakBandwidth,
+            averageBitrate: measured.averageBandwidth,
             codecs: codecsStr,
             playlistPath: playlistURL.path,
             initSegmentPath: nil,
             segmentCount: recorded.count,
+            segmentDurations: recorded.map(\.durationSeconds),
             totalBytes: totalBytes
         )
     }

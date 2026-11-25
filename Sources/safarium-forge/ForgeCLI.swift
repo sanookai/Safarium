@@ -59,6 +59,12 @@ Commands:
   cache         <hash|store|lookup|stats|prune> [options]
   ab-gallery    --manifest <manifest.json> -o <gallery.html> [--overwrite]
   capabilities  Report Apple Silicon VT/AudioToolbox/ImageIO/Metal/ANE/VTFrameProcessor/APFS capabilities and OS walls
+  probe-capabilities [--refresh | --no-cache] Live VideoToolbox runtime capability profiler (honest HW/SW, Main10, multipass, AQ, LookAhead)
+  conformance   <path> [--type auto|media|hls] [--expected-codec C] [--expected-bit-depth N] [--expected-chroma N] [--expected-primaries N] [--no-decode] [--strict]
+  spec-plan     <input> [--target-vmaf 95] [--target-ms-ssim 0.995] [--max-deltae-p95 2.0] [--max-bytes N] [--protect-text|--no-protect-text] [--protect-faces|--no-protect-faces] [--preserve-grain] [--banding-sensitive|--no-banding-sensitive] [--hdr-policy preserve|recompute|strip-dynamic-metadata|tone-map-to-sdr] [--codec hevc-10bit] [--save-sidecar PATH] [--load-sidecar PATH]
+  spec-encode   <input> -o <output> [...contract flags...] [--max-proxy-iters 3] [--power-budget low|balanced|max] [--strict] [--overwrite]
+  spec-ladder   <input> [-o <out-dir>] [--format fmp4|ts] [--max-rungs 4] [--segment-sec 4.0] [--subtitles <vtt> --subtitle-lang en --subtitle-name English] [--save-sidecar PATH] [--load-sidecar PATH] [--plan-only]
+  calibrate-hw  [--codec hevc|h264|hevc-10bit|prores422hq] [--width 640] [--height 360] [--frames 15] [--max-sessions 4]
   version       Print safarium-forge version
 
 Run `safarium-forge <command> --help` for subcommand options.
@@ -118,6 +124,12 @@ private let subcommandHelp: [String: String] = [
     """,
     "ab-gallery": "Usage: safarium-forge ab-gallery --manifest <manifest.json> -o <gallery.html> [--overwrite]",
     "capabilities": "Usage: safarium-forge capabilities",
+    "probe-capabilities": "Usage: safarium-forge probe-capabilities [--refresh | --no-cache]",
+    "conformance": "Usage: safarium-forge conformance <path> [--type auto|media|hls] [--expected-codec C] [--expected-bit-depth N] [--expected-chroma N] [--expected-primaries N] [--no-decode] [--strict]",
+    "spec-plan": "Usage: safarium-forge spec-plan <input> [--target-vmaf 95] [--target-ms-ssim 0.995] [--max-deltae-p95 2.0] [--max-bytes N] [--max-latency-sec S] [--protect-text|--no-protect-text] [--protect-faces|--no-protect-faces] [--preserve-grain] [--banding-sensitive|--no-banding-sensitive] [--hdr-policy preserve|recompute|strip-dynamic-metadata|tone-map-to-sdr] [--intent NAME] [--codec hevc-10bit] [--save-sidecar PATH] [--load-sidecar PATH]",
+    "spec-encode": "Usage: safarium-forge spec-encode <input> -o <output> [--target-vmaf 95] [--target-ms-ssim 0.995] [--max-deltae-p95 2.0] [--max-bytes N] [--max-latency-sec S] [--protect-text|--no-protect-text] [--protect-faces|--no-protect-faces] [--preserve-grain] [--banding-sensitive|--no-banding-sensitive] [--hdr-policy preserve|recompute|strip-dynamic-metadata|tone-map-to-sdr] [--intent NAME] [--codec hevc-10bit] [--max-proxy-iters 3] [--power-budget low|balanced|max] [--strict] [--overwrite]",
+    "spec-ladder": "Usage: safarium-forge spec-ladder <input> [-o <out-dir>] [--format fmp4|ts] [--max-rungs 4] [--segment-sec 4.0] [--subtitles <vtt> --subtitle-lang en --subtitle-name English] [--save-sidecar PATH] [--load-sidecar PATH] [--plan-only]",
+    "calibrate-hw": "Usage: safarium-forge calibrate-hw [--codec hevc|h264|hevc-10bit|prores422hq] [--width 640] [--height 360] [--frames 15] [--max-sessions 4]",
 ]
 
 // MARK: - Shared Argument & Serialization Helpers
@@ -3305,21 +3317,11 @@ private func runTranscodeCommand(_ args: [String], progressEmitter: SafariumProg
         }
     }
 
-    // Wave 9/10 Apple Silicon Supremacy path (CQF, Constrained VBR+VBV, True 2-Pass, Mini-CAE, Multi-Engine, Temporal Denoise, HDR/DV8.4, HDR->SDR ToneMap, 10-bit HEVC, Pro Audio)
-    let wantSupremacy = (
-        scenarioProfile != nil ||
-        toneMapToSDR ||
-        supremacyMode != nil ||
-        cqfValue != nil ||
-        vbvMaxBitrate != nil ||
-        spatialAQ != nil ||
-        lookAheadFrames != nil ||
-        parallelEngines != nil ||
-        enableDenoise ||
-        hdrMastering != nil ||
-        proAudioCodec != nil ||
-        codec == .hevc10 || codec == .hevc42210 || codec == .hevc44410
-    ) && (maxBytes == nil && targetWidth == nil && targetHeight == nil && targetFPS == nil && quality == nil)
+    // Wave 9-12 Apple Silicon Supremacy path (lossless NV12->P010 / zero-roundtrip YUV / Metal Chroma Pipeline,
+    // CQF, Constrained VBR+VBV, True 2-Pass, Mini-CAE, Multi-Engine, Temporal Denoise, HDR/DV8.4, HDR->SDR ToneMap, Pro Audio).
+    // Route all standard non-alpha transcodes here by default unless explicit legacy resize / --max-bytes / --quality is requested.
+    let wantSupremacy = (codec != .hevcAlpha)
+        && (maxBytes == nil && targetWidth == nil && targetHeight == nil && targetFPS == nil && quality == nil)
 
     if wantSupremacy {
         return try await withPlayableVideoURL(inputURL: inURL) { playableURL in
@@ -3893,6 +3895,470 @@ private func runABGalleryCommand(_ args: [String]) async throws -> Data {
     return try encodeJSON(report)
 }
 
+// MARK: - Waves 11-14: Live Capabilities, Conformance, SPEC Controller & Hardware Auto-Tuner
+
+private func parseHDRMetadataPolicy(_ raw: String) throws -> HDRMetadataPolicy {
+    switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "preserve": return .preserve
+    case "recompute": return .recompute
+    case "strip", "strip-dynamic-metadata", "strip_dynamic_metadata": return .stripDynamicMetadata
+    case "tonemap", "tonemap-sdr", "tone-map-to-sdr", "tone_map_to_sdr": return .toneMapToSDR
+    default:
+        throw CLIUsageError("unsupported --hdr-policy '\(raw)' (expected preserve|recompute|strip-dynamic-metadata|tone-map-to-sdr)")
+    }
+}
+
+private func parsePowerBudget(_ raw: String) throws -> PowerBudget {
+    switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "low": return .low
+    case "balanced": return .balanced
+    case "max": return .max
+    default:
+        throw CLIUsageError("unsupported --power-budget '\(raw)' (expected low|balanced|max)")
+    }
+}
+
+private func runProbeCapabilitiesCommand(_ args: [String]) throws -> Data {
+    try checkSubcommandHelp(args, command: "probe-capabilities")
+    var forceRefresh = false
+    var useCache = true
+    for a in args {
+        switch a {
+        case "--refresh": forceRefresh = true
+        case "--no-cache": useCache = false
+        default:
+            throw CLIUsageError("unknown option for probe-capabilities: \(a)")
+        }
+    }
+    let snapshot = EncoderCapabilityProfiler.probeLive(useCache: useCache, forceRefresh: forceRefresh)
+    return try encodeJSON(snapshot)
+}
+
+private func runConformanceCommand(_ args: [String]) async throws -> (data: Data, exitCode: Int32) {
+    try checkSubcommandHelp(args, command: "conformance")
+    var targetPath: String?
+    var mode = "auto"
+    var expectedCodec: String?
+    var expectedBitDepth: Int?
+    var expectedChroma: Int?
+    var expectedPrimaries: UInt16?
+    var requireDecode = true
+    var strict = false
+
+    var i = 0
+    while i < args.count {
+        let a = args[i]
+        switch a {
+        case "--type":
+            mode = try nextValue(args, index: &i, flag: a).lowercased()
+            guard mode == "auto" || mode == "media" || mode == "hls" else {
+                throw CLIUsageError("unsupported --type '\(mode)' (expected auto|media|hls)")
+            }
+        case "--expected-codec":
+            expectedCodec = try nextValue(args, index: &i, flag: a)
+        case "--expected-bit-depth":
+            expectedBitDepth = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--expected-chroma":
+            expectedChroma = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--expected-primaries":
+            let v = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+            guard v >= 0 && v <= Int(UInt16.max) else {
+                throw CLIUsageError("--expected-primaries out of UInt16 range: \(v)")
+            }
+            expectedPrimaries = UInt16(v)
+        case "--no-decode":
+            requireDecode = false
+        case "--strict":
+            strict = true
+        default:
+            if a.hasPrefix("-") { throw CLIUsageError("unknown option for conformance: \(a)") }
+            if targetPath == nil { targetPath = a } else { throw CLIUsageError("unexpected arg for conformance: \(a)") }
+        }
+        i += 1
+    }
+
+    guard let targetPath else {
+        throw CLIUsageError("conformance requires <path> (media file or HLS directory)")
+    }
+    let url = URL(fileURLWithPath: targetPath)
+    var isDir: ObjCBool = false
+    let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
+    guard exists else {
+        throw SafariumError.invalidState("conformance target does not exist: \(url.path)")
+    }
+
+    let resolvedMode: String
+    if mode == "auto" {
+        if isDir.boolValue || url.pathExtension.lowercased() == "m3u8" {
+            resolvedMode = "hls"
+        } else {
+            resolvedMode = "media"
+        }
+    } else {
+        resolvedMode = mode
+    }
+
+    if resolvedMode == "hls" {
+        let dirURL = isDir.boolValue ? url : url.deletingLastPathComponent()
+        let report = try await HLSConformanceValidator.validate(directory: dirURL)
+        let data = try encodeJSON(report)
+        return (data, (strict && !report.passed) ? 1 : 0)
+    } else {
+        let report = try await BitstreamConformance.verifyMediaFile(
+            url: url,
+            expectedCodec: expectedCodec,
+            expectedBitDepth: expectedBitDepth,
+            expectedChroma: expectedChroma,
+            expectedPrimaries: expectedPrimaries,
+            requireIndependentDecode: requireDecode
+        )
+        let data = try encodeJSON(report)
+        return (data, (strict && !report.passed) ? 1 : 0)
+    }
+}
+
+private struct ParsedSPECContractCLI {
+    var inputPath: String?
+    var outputPath: String?
+    var contract = SPECQualityContract()
+    var saveSidecarPath: String?
+    var loadSidecarPath: String?
+    var maxProxyIters: Int = 3
+    var powerBudget: PowerBudget = .balanced
+    var strict: Bool = false
+    var overwrite: Bool = false
+}
+
+private func parseSPECContractArgs(_ args: [String], command: String, allowOutput: Bool) throws -> ParsedSPECContractCLI {
+    var parsed = ParsedSPECContractCLI()
+    var i = 0
+    while i < args.count {
+        let a = args[i]
+        switch a {
+        case "-o", "--output", "--out":
+            guard allowOutput else { throw CLIUsageError("unknown option for \(command): \(a)") }
+            parsed.outputPath = try nextValue(args, index: &i, flag: a)
+        case "--target-vmaf":
+            parsed.contract.targetVMAF = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--target-ms-ssim":
+            parsed.contract.targetMSSSIM = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--max-deltae-p95", "--max-de00-p95":
+            parsed.contract.maxDeltaE00P95 = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--max-bytes":
+            let raw = try nextValue(args, index: &i, flag: a)
+            guard let v = Int64(raw), v > 0 else {
+                throw CLIUsageError("invalid --max-bytes '\(raw)' (expected positive integer)")
+            }
+            parsed.contract.maxBytes = v
+        case "--max-latency-sec":
+            parsed.contract.maxLatencySeconds = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--protect-text":
+            parsed.contract.protectText = true
+        case "--no-protect-text":
+            parsed.contract.protectText = false
+        case "--protect-faces":
+            parsed.contract.protectFaces = true
+        case "--no-protect-faces":
+            parsed.contract.protectFaces = false
+        case "--preserve-grain":
+            parsed.contract.preserveGrain = true
+        case "--no-preserve-grain":
+            parsed.contract.preserveGrain = false
+        case "--banding-sensitive":
+            parsed.contract.bandingSensitive = true
+        case "--no-banding-sensitive":
+            parsed.contract.bandingSensitive = false
+        case "--hdr-policy":
+            parsed.contract.hdrPolicy = try parseHDRMetadataPolicy(try nextValue(args, index: &i, flag: a))
+        case "--intent":
+            parsed.contract.intent = try nextValue(args, index: &i, flag: a)
+        case "--codec":
+            parsed.contract.codec = try parseCodec(try nextValue(args, index: &i, flag: a))
+        case "--save-sidecar":
+            parsed.saveSidecarPath = try nextValue(args, index: &i, flag: a)
+        case "--load-sidecar":
+            parsed.loadSidecarPath = try nextValue(args, index: &i, flag: a)
+        case "--max-proxy-iters":
+            guard allowOutput else { throw CLIUsageError("unknown option for \(command): \(a)") }
+            parsed.maxProxyIters = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--power-budget":
+            guard allowOutput else { throw CLIUsageError("unknown option for \(command): \(a)") }
+            parsed.powerBudget = try parsePowerBudget(try nextValue(args, index: &i, flag: a))
+        case "--strict":
+            guard allowOutput else { throw CLIUsageError("unknown option for \(command): \(a)") }
+            parsed.strict = true
+        case "--overwrite":
+            guard allowOutput else { throw CLIUsageError("unknown option for \(command): \(a)") }
+            parsed.overwrite = true
+        default:
+            if a.hasPrefix("-") { throw CLIUsageError("unknown option for \(command): \(a)") }
+            if parsed.inputPath == nil { parsed.inputPath = a } else { throw CLIUsageError("unexpected arg for \(command): \(a)") }
+        }
+        i += 1
+    }
+    return parsed
+}
+
+private struct SPECPlanCLIOutput: Codable {
+    let inputPath: String
+    let sidecarSavedPath: String?
+    let sidecarReused: Bool
+    let plan: SPECPlan
+}
+
+private func runSPECPlanCommand(_ args: [String]) async throws -> Data {
+    try checkSubcommandHelp(args, command: "spec-plan")
+    let parsed = try parseSPECContractArgs(args, command: "spec-plan", allowOutput: false)
+    guard let inputPath = parsed.inputPath else {
+        throw CLIUsageError("spec-plan requires <input>")
+    }
+    let inURL = URL(fileURLWithPath: inputPath)
+    return try await withPlayableVideoURL(inputURL: inURL) { playableURL in
+        let sidecar: SPECAnalysisSidecar
+        let reused: Bool
+        if let loadPath = parsed.loadSidecarPath {
+            sidecar = try SPECAnalysisSidecar.load(from: URL(fileURLWithPath: loadPath))
+            reused = true
+        } else {
+            sidecar = try await SPECAnalyzer.analyze(inputURL: playableURL)
+            reused = false
+        }
+        if let savePath = parsed.saveSidecarPath {
+            try sidecar.save(to: URL(fileURLWithPath: savePath))
+        }
+        let plan = try await SPECController.plan(
+            inputURL: playableURL,
+            contract: parsed.contract,
+            sidecar: sidecar
+        )
+        let out = SPECPlanCLIOutput(
+            inputPath: inURL.path,
+            sidecarSavedPath: parsed.saveSidecarPath,
+            sidecarReused: reused,
+            plan: plan
+        )
+        return try encodeJSON(out)
+    }
+}
+
+private struct SPECEncodeCLIOutput: Codable {
+    let report: SPECEncodeReport
+    let powerBudget: String
+    let thermalState: String
+    let recommendedConcurrency: Int
+    let atomicPublished: Bool
+}
+
+private func runSPECEncodeCommand(_ args: [String]) async throws -> (data: Data, exitCode: Int32) {
+    try checkSubcommandHelp(args, command: "spec-encode")
+    let parsed = try parseSPECContractArgs(args, command: "spec-encode", allowOutput: true)
+    guard let inputPath = parsed.inputPath, let outputPath = parsed.outputPath else {
+        throw CLIUsageError("spec-encode requires <input> and -o <output>")
+    }
+    let inURL = URL(fileURLWithPath: inputPath)
+    let outURL = URL(fileURLWithPath: outputPath)
+    if !parsed.overwrite && FileManager.default.fileExists(atPath: outURL.path) {
+        throw SafariumError.invalidState("output already exists (pass --overwrite): \(outURL.path)")
+    }
+
+    let scheduler = ThermalHysteresisScheduler(powerBudget: parsed.powerBudget)
+    let thermalNow = scheduler.pollSystemThermalState()
+    let maxCalibrated = max(1, AppleSiliconMediaEngineInfo.probe().recommendedParallelEngines)
+    let recommendedSessions = scheduler.recommendedConcurrency(maxCalibrated: maxCalibrated)
+
+    let publisher = AtomicOutputPublisher(destinationURL: outURL, overwrite: parsed.overwrite)
+    let stateMachine = PipelineStateMachine()
+    try stateMachine.transition(to: .probing)
+    let staging = try publisher.prepareStaging(stateMachine: stateMachine)
+    try stateMachine.transition(to: .encoding)
+
+    let report: SPECEncodeReport
+    do {
+        report = try await withPlayableVideoURL(inputURL: inURL) { playableURL in
+            try await SPECController.encodeWithClosedLoop(
+                inputURL: playableURL,
+                outputURL: staging.tempURL,
+                contract: parsed.contract,
+                maxProxyIterations: parsed.maxProxyIters
+            )
+        }
+        try stateMachine.transition(to: .publishing)
+        _ = try publisher.commit(staging, stateMachine: stateMachine)
+        try stateMachine.complete()
+    } catch {
+        stateMachine.fail(reason: error.localizedDescription)
+        throw error
+    }
+
+    let correctedReport = SPECEncodeReport(
+        plan: report.plan,
+        proxyIterations: report.proxyIterations,
+        finalOutputPath: outURL.path,
+        finalBytes: report.finalBytes,
+        finalBitrateMbps: report.finalBitrateMbps,
+        elapsedSeconds: report.elapsedSeconds,
+        measuredMSSSIM: report.measuredMSSSIM,
+        measuredDeltaE00P95: report.measuredDeltaE00P95,
+        contractMet: report.contractMet,
+        explanations: report.explanations
+    )
+
+    let envelope = SPECEncodeCLIOutput(
+        report: correctedReport,
+        powerBudget: parsed.powerBudget.rawValue,
+        thermalState: ThermalHysteresisScheduler.thermalStateName(thermalNow),
+        recommendedConcurrency: recommendedSessions,
+        atomicPublished: true
+    )
+    let data = try encodeJSON(envelope)
+    return (data, (parsed.strict && !correctedReport.contractMet) ? 1 : 0)
+}
+
+private struct SPECLadderCLIOutput: Codable {
+    let inputPath: String
+    let plan: PerTitleLadderPlan
+    let packaged: HLSPackageResult?
+    let conformance: HLSConformanceReport?
+}
+
+private func runSPECLadderCommand(_ args: [String]) async throws -> Data {
+    try checkSubcommandHelp(args, command: "spec-ladder")
+    var inputPath: String?
+    var outputDirPath: String?
+    var format: HLSFormat = .fmp4CMAF
+    var maxRungs = 4
+    var segmentSec = 4.0
+    var subtitlesPath: String?
+    var subtitleLang = "en"
+    var subtitleName = "English"
+    var saveSidecarPath: String?
+    var loadSidecarPath: String?
+    var planOnly = false
+
+    var i = 0
+    while i < args.count {
+        let a = args[i]
+        switch a {
+        case "-o", "--output", "--out", "--out-dir":
+            outputDirPath = try nextValue(args, index: &i, flag: a)
+        case "--format":
+            let raw = try nextValue(args, index: &i, flag: a).lowercased()
+            switch raw {
+            case "fmp4", "cmaf", "fmp4-cmaf": format = .fmp4CMAF
+            case "ts", "mpeg-ts", "mpegts": format = .mpegTS
+            default: throw CLIUsageError("unsupported --format '\(raw)' (expected fmp4|ts)")
+            }
+        case "--max-rungs":
+            maxRungs = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--segment-sec":
+            segmentSec = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--subtitles":
+            subtitlesPath = try nextValue(args, index: &i, flag: a)
+        case "--subtitle-lang", "--lang":
+            subtitleLang = try nextValue(args, index: &i, flag: a)
+        case "--subtitle-name":
+            subtitleName = try nextValue(args, index: &i, flag: a)
+        case "--save-sidecar":
+            saveSidecarPath = try nextValue(args, index: &i, flag: a)
+        case "--load-sidecar":
+            loadSidecarPath = try nextValue(args, index: &i, flag: a)
+        case "--plan-only":
+            planOnly = true
+        default:
+            if a.hasPrefix("-") { throw CLIUsageError("unknown option for spec-ladder: \(a)") }
+            if inputPath == nil { inputPath = a } else { throw CLIUsageError("unexpected arg for spec-ladder: \(a)") }
+        }
+        i += 1
+    }
+
+    guard let inputPath else {
+        throw CLIUsageError("spec-ladder requires <input>")
+    }
+    if !planOnly && outputDirPath == nil {
+        throw CLIUsageError("spec-ladder requires -o <out-dir> unless --plan-only is specified")
+    }
+
+    let inURL = URL(fileURLWithPath: inputPath)
+    return try await withPlayableVideoURL(inputURL: inURL) { playableURL in
+        let sidecar: SPECAnalysisSidecar
+        if let loadPath = loadSidecarPath {
+            sidecar = try SPECAnalysisSidecar.load(from: URL(fileURLWithPath: loadPath))
+        } else {
+            sidecar = try await SPECAnalyzer.analyze(inputURL: playableURL)
+        }
+        if let savePath = saveSidecarPath {
+            try sidecar.save(to: URL(fileURLWithPath: savePath))
+        }
+
+        let ladderPlan = SPECController.planPerTitleHLSLadder(sidecar: sidecar, maxRungs: maxRungs)
+        if planOnly {
+            return try encodeJSON(SPECLadderCLIOutput(
+                inputPath: inURL.path,
+                plan: ladderPlan,
+                packaged: nil,
+                conformance: nil
+            ))
+        }
+
+        let outDir = URL(fileURLWithPath: outputDirPath!, isDirectory: true)
+        let primaryCodec = ladderPlan.rungs.first?.codec ?? .hevc10
+        let opts = HLSPackageOptions(
+            rungs: ladderPlan.rungs,
+            segmentDurationSeconds: segmentSec,
+            format: format,
+            codec: primaryCodec,
+            subtitleVTTPath: subtitlesPath.map { URL(fileURLWithPath: $0) },
+            subtitleLanguage: subtitleLang,
+            subtitleName: subtitleName
+        )
+        let pkgResult = try await HLSPackager.package(
+            inputURL: playableURL,
+            outputDirectory: outDir,
+            options: opts
+        )
+        let confReport = try await HLSConformanceValidator.validate(directory: outDir)
+        return try encodeJSON(SPECLadderCLIOutput(
+            inputPath: inURL.path,
+            plan: ladderPlan,
+            packaged: pkgResult,
+            conformance: confReport
+        ))
+    }
+}
+
+private func runCalibrateHWCommand(_ args: [String]) throws -> Data {
+    try checkSubcommandHelp(args, command: "calibrate-hw")
+    var codec: VideoCodec = .hevc
+    var width = 640
+    var height = 360
+    var frames = 15
+    var maxSessions = 4
+
+    var i = 0
+    while i < args.count {
+        let a = args[i]
+        switch a {
+        case "--codec": codec = try parseCodec(try nextValue(args, index: &i, flag: a))
+        case "--width": width = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--height": height = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--frames": frames = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--max-sessions": maxSessions = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        default:
+            throw CLIUsageError("unknown option for calibrate-hw: \(a)")
+        }
+        i += 1
+    }
+
+    let report = HardwareAutoTuner.calibrateConcurrency(
+        codec: codec,
+        width: width,
+        height: height,
+        framesPerSession: frames,
+        maxSessions: maxSessions
+    )
+    return try encodeJSON(report)
+}
+
 // MARK: - CLI Entry Point
 
 @main
@@ -4043,6 +4509,26 @@ private struct SafariumForgeCLI {
                 FileHandle.standardOutput.write(out)
             case "capabilities":
                 let out = try runCapabilitiesCommand(rest)
+                FileHandle.standardOutput.write(out)
+            case "probe-capabilities":
+                let out = try runProbeCapabilitiesCommand(rest)
+                FileHandle.standardOutput.write(out)
+            case "conformance":
+                let res = try await runConformanceCommand(rest)
+                FileHandle.standardOutput.write(res.data)
+                if res.exitCode != 0 { exit(res.exitCode) }
+            case "spec-plan":
+                let out = try await runSPECPlanCommand(rest)
+                FileHandle.standardOutput.write(out)
+            case "spec-encode":
+                let res = try await runSPECEncodeCommand(rest)
+                FileHandle.standardOutput.write(res.data)
+                if res.exitCode != 0 { exit(res.exitCode) }
+            case "spec-ladder":
+                let out = try await runSPECLadderCommand(rest)
+                FileHandle.standardOutput.write(out)
+            case "calibrate-hw":
+                let out = try runCalibrateHWCommand(rest)
                 FileHandle.standardOutput.write(out)
             default:
                 throw CLIUsageError("unknown subcommand '\(sub)' (see --help)")

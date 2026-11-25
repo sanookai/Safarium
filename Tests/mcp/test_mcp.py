@@ -93,6 +93,21 @@ if args[:2] == ["forge", "clip"]:
 if args[:3] == ["forge", "audio", "encode"]:
     print(json.dumps({"ok": True, "codec": "alac", "argv": args}))
     sys.exit(0)
+if args[:2] == ["forge", "probe-capabilities"]:
+    print(json.dumps({"schemaVersion": 1, "codecs": [{"codecFourCC": "hvc1", "hardwareAccelerated": True}], "argv": args}))
+    sys.exit(0)
+if args[:2] == ["forge", "conformance"]:
+    print(json.dumps({"passed": True, "containerKind": "isobmff", "violations": [], "argv": args}))
+    sys.exit(0)
+if args[:2] == ["forge", "spec-plan"]:
+    print(json.dumps({"sidecarReused": False, "plan": {"codec": "hevc-10bit", "shots": 2, "expectedMbps": 4.2}, "argv": args}))
+    sys.exit(0)
+if args[:2] == ["forge", "spec-encode"]:
+    print(json.dumps({"atomicPublished": True, "powerBudget": "balanced", "report": {"contractMet": True, "measuredMSSSIM": 0.996}, "argv": args}))
+    sys.exit(0)
+if args[:2] == ["forge", "spec-ladder"]:
+    print(json.dumps({"plan": {"rungs": [{"name": "720p"}, {"name": "1080p"}], "analysisReused": True}, "argv": args}))
+    sys.exit(0)
 if args[:2] == ["forge", "qa"]:
     if "fail-envelope" in args[2]:
         sys.stderr.write(json.dumps({
@@ -193,8 +208,14 @@ print(json.dumps({"present": True, "appleOnly": True, "abi": {"version": 1, "sym
                 "audio_encode",
                 "verify_media",
                 "qa_inspect",
+                "encoding_capabilities",
+                "encoding_conformance",
+                "encoding_plan",
+                "encoding_encode",
+                "encoding_ladder",
             },
         )
+        self.assertEqual(len(tools), 23)
         self.assertGreaterEqual(len(resps[2]["result"]["resources"]), 5)
         self.assertEqual(resps[3]["result"]["resourceTemplates"], [])
         self.assertEqual(len(resps[4]["result"]["prompts"]), 3)
@@ -207,6 +228,8 @@ print(json.dumps({"present": True, "appleOnly": True, "abi": {"version": 1, "sym
         out_hls = str(self.tmp / "hls-out")
         out_webp = str(self.tmp / "clip.webp")
         out_sc = str(self.tmp / "out-scenario.mp4")
+        out_spec = str(self.tmp / "out-spec.mp4")
+        out_spec_hls = str(self.tmp / "spec-hls-out")
         resps = self._rpc_session([
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
             {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "doctor", "arguments": {}}},
@@ -356,6 +379,65 @@ print(json.dumps({"present": True, "appleOnly": True, "abi": {"version": 1, "sym
                     },
                 },
             },
+            {
+                "jsonrpc": "2.0",
+                "id": 21,
+                "method": "tools/call",
+                "params": {"name": "encoding_capabilities", "arguments": {"refresh": True}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 22,
+                "method": "tools/call",
+                "params": {
+                    "name": "encoding_conformance",
+                    "arguments": {"path": str(self.media_file), "expected_codec": "hvc1", "expected_bit_depth": 10},
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 23,
+                "method": "tools/call",
+                "params": {
+                    "name": "encoding_plan",
+                    "arguments": {
+                        "input_path": str(self.media_file),
+                        "target_vmaf": 96.0,
+                        "max_deltae_p95": 1.5,
+                        "protect_text": True,
+                        "codec": "hevc-10bit",
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 24,
+                "method": "tools/call",
+                "params": {
+                    "name": "encoding_encode",
+                    "arguments": {
+                        "input_path": str(self.media_file),
+                        "output_path": out_spec,
+                        "target_ms_ssim": 0.995,
+                        "max_proxy_iters": 2,
+                        "power_budget": "balanced",
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 25,
+                "method": "tools/call",
+                "params": {
+                    "name": "encoding_ladder",
+                    "arguments": {
+                        "input_path": str(self.media_file),
+                        "output_dir": out_spec_hls,
+                        "max_rungs": 3,
+                        "format": "fmp4",
+                    },
+                },
+            },
         ])
 
         by_id = {r["id"]: r for r in resps if "id" in r}
@@ -397,6 +479,20 @@ print(json.dumps({"present": True, "appleOnly": True, "abi": {"version": 1, "sym
         self.assertIn("--tonemap-sdr", by_id[20]["result"]["structuredContent"]["argv"])
         self.assertFalse(by_id[16]["result"]["isError"])
         self.assertIn("alac", by_id[16]["result"]["structuredContent"]["argv"])
+        # Wave 11-14 Intent-Level MCP v2 tools
+        self.assertFalse(by_id[21]["result"]["isError"])
+        self.assertIn("--refresh", by_id[21]["result"]["structuredContent"]["argv"])
+        self.assertFalse(by_id[22]["result"]["isError"])
+        self.assertTrue(by_id[22]["result"]["structuredContent"]["passed"])
+        self.assertIn("--expected-codec", by_id[22]["result"]["structuredContent"]["argv"])
+        self.assertFalse(by_id[23]["result"]["isError"])
+        self.assertIn("--target-vmaf", by_id[23]["result"]["structuredContent"]["argv"])
+        self.assertFalse(by_id[24]["result"]["isError"])
+        self.assertTrue(by_id[24]["result"]["structuredContent"]["atomicPublished"])
+        self.assertIn("--power-budget", by_id[24]["result"]["structuredContent"]["argv"])
+        self.assertFalse(by_id[25]["result"]["isError"])
+        self.assertTrue(by_id[25]["result"]["structuredContent"]["plan"]["analysisReused"])
+        self.assertIn("--max-rungs", by_id[25]["result"]["structuredContent"]["argv"])
 
     def test_error_codes_and_strict_validation(self):
         resps = self._rpc_session([

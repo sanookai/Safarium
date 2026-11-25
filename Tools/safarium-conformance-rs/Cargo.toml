@@ -1,0 +1,7 @@
+[package]
+name = "safarium-conformance-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Zero-dependency memory-safe ISOBMFF/MP4/MOV/CMAF, MPEG-TS, and HLS conformance verifier for Safarium"
+
+[dependencies]

@@ -210,6 +210,15 @@ jobs:
         run: |
           script -q /dev/null xcrun swift test --no-parallel --jobs 2 --scratch-path "$CI_BUILD_ROOT" < /dev/null
 
+      - name: Independent Rust Conformance CLI tests (Tools/safarium-conformance-rs)
+        run: |
+          if command -v cargo >/dev/null 2>&1; then
+            CARGO_TARGET_DIR=/tmp/safarium-ci-scratch/conformance-rs-target \
+              cargo test --manifest-path Tools/safarium-conformance-rs/Cargo.toml
+          else
+            echo "cargo not installed on runner; skipping optional Rust conformance CLI check"
+          fi
+
       - name: Install release into isolated prefix & test unified CLI + Queue + Rule-Sync + SDKs
         run: |
           BUNDLE_DIR="$RELEASE_BIN/Safarium_SafariumCore.bundle"

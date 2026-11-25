@@ -568,6 +568,10 @@ private func configureVTCompressionSession(
 
     if let prof = codec.defaultProfileLevel {
         _ = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: prof as CFString)
+    } else if codec == .hevc {
+        _ = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_HEVC_Main_AutoLevel)
+    } else if codec == .h264 {
+        _ = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel)
     }
 
     // Color & HDR tags
@@ -666,32 +670,348 @@ private func makePixelBufferPool(width: Int, height: Int, pixelFormat: OSType) t
     return pool
 }
 
-private func maybeConvertPixelBufferForCodec(
-    _ pb: CVPixelBuffer,
-    codec: VideoCodec,
-    colorMastering: ColorMasteringProfile,
-    pool10Bit: CVPixelBufferPool?
-) throws -> CVPixelBuffer {
-    let targetFmt = codec.defaultPixelFormat
-    let curFmt = CVPixelBufferGetPixelFormatType(pb)
+/// Returns `true` when the source video track is definitively limited-range 8-bit 4:2:0 SDR
+/// (e.g. H.264 Baseline/Main/High or HEVC Main 8-bit).
+///
+/// Requesting `x420` (10-bit P010) from `AVAssetReaderTrackOutput` on an 8-bit 4:2:0 source
+/// triggers Apple's internal 8->10 `VTPixelTransfer` conversion, which rescales luma by
+/// `*1023/255` instead of `<< 2` and vertically resamples/blurs chroma edges (-13 to -17 dB
+/// chroma PSNR, ~2x ΔE00 p95). Reading native `420v` (`alwaysCopiesSampleData = false`) and
+/// widening via lossless `widenNV12ToP010` (`UInt16(v8) << 8`) preserves bit-exact luma and
+/// chroma edges while keeping true 10-bit/HDR/ProRes sources on the native 10-bit read path.
+private func isDefinitively8BitLimited420(track: AVAssetTrack) async -> Bool {
+    guard let descs = try? await track.load(.formatDescriptions),
+          let fd = descs.first else {
+        return false
+    }
+    let ext = CMFormatDescriptionGetExtensions(fd) as? [String: Any] ?? [:]
 
-    if targetFmt.is10Bit && curFmt == kCVPixelFormatType_32BGRA, let pool10Bit {
-        var outOpt: CVPixelBuffer?
-        let st = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool10Bit, &outOpt)
-        guard st == kCVReturnSuccess, let out = outOpt else {
-            throw SafariumError.encode("10-bit CVPixelBufferPoolCreatePixelBuffer failed (\(st))")
+    if let fullRange = ext[kCMFormatDescriptionExtension_FullRangeVideo as String] as? NSNumber,
+       fullRange.boolValue {
+        return false
+    }
+
+    if let trc = ext[kCMFormatDescriptionExtension_TransferFunction as String] as? String {
+        if trc == (kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ as String) ||
+           trc == (kCVImageBufferTransferFunction_ITU_R_2100_HLG as String) ||
+           trc == (kCVImageBufferTransferFunction_Linear as String) {
+            return false
         }
-        try AVAssetWriterSink.convertBGRAPixelBufferTo10Bit(
-            pb,
-            into: out,
-            pixelFormat: targetFmt,
-            colorMastering: colorMastering
-        )
-        colorMastering.tagPixelBuffer(out)
+    }
+
+    if let bpc = ext[kCMFormatDescriptionExtension_BitsPerComponent as String] as? NSNumber,
+       bpc.intValue > 8 {
+        return false
+    }
+
+    let subType = CMFormatDescriptionGetMediaSubType(fd)
+    let atoms = ext[kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms as String] as? [String: Any]
+
+    // H.264 (avc1 / avc3): inspect avcC AVCProfileIndication (byte 1).
+    // 66 = Baseline, 77 = Main, 88 = Extended, 100 = High are strictly 8-bit 4:2:0.
+    if subType == kCMVideoCodecType_H264 || subType == 0x61766333 /* 'avc3' */ {
+        if let avcC = atoms?["avcC"] as? Data, avcC.count >= 2 {
+            let bytes = [UInt8](avcC.prefix(2))
+            let profileIDC = bytes[1]
+            return profileIDC == 66 || profileIDC == 77 || profileIDC == 88 || profileIDC == 100
+        }
+        return false
+    }
+
+    // HEVC (hvc1 / hev1): inspect hvcC (ISO/IEC 14496-15 §8.3.3.1.2).
+    // byte 16 & 0x03 = chromaFormat (1 = 4:2:0), byte 17 & 0x07 = bitDepthLumaMinus8,
+    // byte 18 & 0x07 = bitDepthChromaMinus8.
+    if subType == kCMVideoCodecType_HEVC || subType == 0x68657631 /* 'hev1' */ {
+        if let hvcC = atoms?["hvcC"] as? Data, hvcC.count >= 19 {
+            let bytes = [UInt8](hvcC.prefix(19))
+            let chromaFormat = bytes[16] & 0x03
+            let lumaMinus8 = bytes[17] & 0x07
+            let chromaMinus8 = bytes[18] & 0x07
+            return chromaFormat == 1 && lumaMinus8 == 0 && chromaMinus8 == 0
+        }
+        return false
+    }
+
+    return false
+}
+
+private func preferredReadPixelFormat(for codec: VideoCodec) -> OSType {
+    if codec.hasAlpha {
+        return kCVPixelFormatType_32BGRA
+    }
+    switch codec.defaultPixelFormat {
+    case .p010:
+        return kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+    case .p210:
+        return kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
+    case .p410:
+        return kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange
+    case .bgra:
+        return kCVPixelFormatType_32BGRA
+    case .nv12vImage, .nv12Left:
+        return kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+    }
+}
+
+private func preferredReadPixelFormat(for codec: VideoCodec, sourceTrack: AVAssetTrack) async -> OSType {
+    if !codec.hasAlpha && codec.defaultPixelFormat == .p010 {
+        if await isDefinitively8BitLimited420(track: sourceTrack) {
+            return kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        }
+    }
+    return preferredReadPixelFormat(for: codec)
+}
+
+private func makeSupremacyVideoTrackOutput(
+    reader: AVAssetReader,
+    track: AVAssetTrack,
+    preferredFormat: OSType
+) throws -> AVAssetReaderTrackOutput {
+    var candidates: [OSType] = [preferredFormat]
+    if preferredFormat != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange {
+        candidates.append(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
+    }
+    if preferredFormat != kCVPixelFormatType_32BGRA {
+        candidates.append(kCVPixelFormatType_32BGRA)
+    }
+    for fmt in candidates {
+        let settings: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: fmt,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any],
+            kCVPixelBufferMetalCompatibilityKey as String: true,
+        ]
+        let ro = AVAssetReaderTrackOutput(track: track, outputSettings: settings)
+        ro.alwaysCopiesSampleData = false
+        if reader.canAdd(ro) {
+            reader.add(ro)
+            return ro
+        }
+    }
+    throw SafariumError.encode("AVAssetReader cannot decode source video track in any supported pixel format")
+}
+
+private func expectedYCbCrMatrixString(for colorMastering: ColorMasteringProfile) -> String {
+    colorMastering.isBT2020
+        ? (kCVImageBufferYCbCrMatrix_ITU_R_2020 as String)
+        : (kCVImageBufferYCbCrMatrix_ITU_R_709_2 as String)
+}
+
+private func tagConvertedPixelBufferColorimetry(
+    _ pb: CVPixelBuffer,
+    colorMastering: ColorMasteringProfile
+) {
+    colorMastering.tagPixelBuffer(pb)
+    CVBufferSetAttachment(
+        pb,
+        kCVImageBufferChromaLocationTopFieldKey,
+        kCVImageBufferChromaLocation_Left,
+        .shouldPropagate
+    )
+    CVBufferSetAttachment(
+        pb,
+        kCVImageBufferChromaLocationBottomFieldKey,
+        kCVImageBufferChromaLocation_Left,
+        .shouldPropagate
+    )
+}
+
+private func tagNativePixelBufferColorimetry(
+    _ pb: CVPixelBuffer,
+    colorMastering: ColorMasteringProfile
+) {
+    let existingMatrix = CVBufferCopyAttachment(pb, kCVImageBufferYCbCrMatrixKey, nil) as? String
+    let targetMatrix = expectedYCbCrMatrixString(for: colorMastering)
+    // Preserve an explicit different source matrix (e.g. BT.601 -> BT.709) so VideoToolbox
+    // runs an exact hardware matrix conversion instead of mislabeling pixels. When untagged
+    // or already matching target matrix, stamp complete primaries/transfer/matrix + chroma siting.
+    if existingMatrix == nil || existingMatrix == targetMatrix {
+        let existingTop = CVBufferCopyAttachment(pb, kCVImageBufferChromaLocationTopFieldKey, nil)
+        let existingBottom = CVBufferCopyAttachment(pb, kCVImageBufferChromaLocationBottomFieldKey, nil)
+        colorMastering.tagPixelBuffer(pb)
+        if let existingTop {
+            CVBufferSetAttachment(pb, kCVImageBufferChromaLocationTopFieldKey, existingTop, .shouldPropagate)
+        }
+        let bottomVal: CFTypeRef = existingBottom ?? existingTop ?? kCVImageBufferChromaLocation_Left
+        CVBufferSetAttachment(pb, kCVImageBufferChromaLocationBottomFieldKey, bottomVal, .shouldPropagate)
+    }
+}
+
+/// Lossless YUV-domain 8-bit NV12 (`420v`) -> 10-bit P010 (`x420`) widening (`q10 = q8 << 2`, MSB-aligned `<< 6` => `q8 << 8`).
+/// Exact for ITU-R limited-range video (`16..235 -> 64..940`, `16..240 -> 64..960`, neutral `128 -> 512`) with zero RGB roundtrip.
+private func widenNV12ToP010(src: CVPixelBuffer, dst: CVPixelBuffer) throws {
+    guard CVPixelBufferLockBaseAddress(src, .readOnly) == kCVReturnSuccess else {
+        throw SafariumError.encode("widenNV12ToP010: failed to lock source NV12 pixel buffer")
+    }
+    defer { _ = CVPixelBufferUnlockBaseAddress(src, .readOnly) }
+    guard CVPixelBufferLockBaseAddress(dst, []) == kCVReturnSuccess else {
+        throw SafariumError.encode("widenNV12ToP010: failed to lock destination P010 pixel buffer")
+    }
+    defer { _ = CVPixelBufferUnlockBaseAddress(dst, []) }
+
+    guard let srcYBase = CVPixelBufferGetBaseAddressOfPlane(src, 0)?.assumingMemoryBound(to: UInt8.self),
+          let srcUVBase = CVPixelBufferGetBaseAddressOfPlane(src, 1)?.assumingMemoryBound(to: UInt8.self),
+          let dstYBase = CVPixelBufferGetBaseAddressOfPlane(dst, 0)?.assumingMemoryBound(to: UInt16.self),
+          let dstUVBase = CVPixelBufferGetBaseAddressOfPlane(dst, 1)?.assumingMemoryBound(to: UInt16.self) else {
+        throw SafariumError.encode("widenNV12ToP010: missing Y/UV plane base addresses")
+    }
+
+    let yW = min(CVPixelBufferGetWidthOfPlane(src, 0), CVPixelBufferGetWidthOfPlane(dst, 0))
+    let yH = min(CVPixelBufferGetHeightOfPlane(src, 0), CVPixelBufferGetHeightOfPlane(dst, 0))
+    let srcYStride = CVPixelBufferGetBytesPerRowOfPlane(src, 0)
+    let dstYStride = CVPixelBufferGetBytesPerRowOfPlane(dst, 0) / 2
+
+    for row in 0..<yH {
+        let sRow = srcYBase.advanced(by: row * srcYStride)
+        let dRow = dstYBase.advanced(by: row * dstYStride)
+        for x in 0..<yW {
+            dRow[x] = UInt16(sRow[x]) << 8
+        }
+    }
+
+    let uvPairs = min(CVPixelBufferGetWidthOfPlane(src, 1), CVPixelBufferGetWidthOfPlane(dst, 1))
+    let uvH = min(CVPixelBufferGetHeightOfPlane(src, 1), CVPixelBufferGetHeightOfPlane(dst, 1))
+    let uvCount = uvPairs * 2
+    let srcUVStride = CVPixelBufferGetBytesPerRowOfPlane(src, 1)
+    let dstUVStride = CVPixelBufferGetBytesPerRowOfPlane(dst, 1) / 2
+
+    for row in 0..<uvH {
+        let sRow = srcUVBase.advanced(by: row * srcUVStride)
+        let dRow = dstUVBase.advanced(by: row * dstUVStride)
+        for i in 0..<uvCount {
+            dRow[i] = UInt16(sRow[i]) << 8
+        }
+    }
+}
+
+/// Zero-copy native YUV passthrough + lossless NV12->P010 YUV widening + MetalChromaPipeline BGRA->NV12/P010 converter.
+private final class SupremacyPixelConverter {
+    let width: Int
+    let height: Int
+    let codec: VideoCodec
+    let colorMastering: ColorMasteringProfile
+
+    private var targetPool: CVPixelBufferPool?
+    private var chromaPipeline: MetalChromaPipeline?
+    private var chromaPipelineAttempted = false
+
+    init(width: Int, height: Int, codec: VideoCodec, colorMastering: ColorMasteringProfile) {
+        self.width = width
+        self.height = height
+        self.codec = codec
+        self.colorMastering = colorMastering
+    }
+
+    private func ensureTargetPool(pixelFormat: OSType) throws -> CVPixelBufferPool {
+        if let targetPool { return targetPool }
+        let pool = try makePixelBufferPool(width: width, height: height, pixelFormat: pixelFormat)
+        self.targetPool = pool
+        return pool
+    }
+
+    private func allocateTargetBuffer(pixelFormat: OSType) throws -> CVPixelBuffer {
+        let pool = try ensureTargetPool(pixelFormat: pixelFormat)
+        var outOpt: CVPixelBuffer?
+        let st = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &outOpt)
+        guard st == kCVReturnSuccess, let out = outOpt else {
+            throw SafariumError.encode("CVPixelBufferPoolCreatePixelBuffer failed (\(st))")
+        }
         return out
     }
-    colorMastering.tagPixelBuffer(pb)
-    return pb
+
+    private func ensureChromaPipeline() -> MetalChromaPipeline? {
+        if !chromaPipelineAttempted {
+            chromaPipelineAttempted = true
+            chromaPipeline = try? MetalChromaPipeline()
+        }
+        return chromaPipeline
+    }
+
+    func prepareForEncode(_ pb: CVPixelBuffer, frameIndex: Int) throws -> CVPixelBuffer {
+        let targetFmt = codec.defaultPixelFormat
+        let targetCV = targetFmt.cvPixelFormat
+        let curFmt = CVPixelBufferGetPixelFormatType(pb)
+
+        // 1. Native zero-copy fast path (420v->8-bit, x420->10-bit 4:2:0, x422->4:2:2 10-bit, x444->4:4:4 10-bit, BGRA->alpha)
+        if curFmt == targetCV {
+            tagNativePixelBufferColorimetry(pb, colorMastering: colorMastering)
+            return pb
+        }
+
+        // 2. Lossless YUV-domain 8-bit NV12 -> 10-bit P010 widening (zero RGB roundtrip)
+        if curFmt == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange && targetFmt == .p010 {
+            let out = try allocateTargetBuffer(pixelFormat: targetCV)
+            try widenNV12ToP010(src: pb, dst: out)
+            CVBufferPropagateAttachments(pb, out)
+            tagNativePixelBufferColorimetry(out, colorMastering: colorMastering)
+            return out
+        }
+
+        // 3. BGRA -> 4:2:0 NV12 / P010 via MetalChromaPipeline (linear-light, co-sited Left,
+        //    luma-guided edge-aware chroma filtering + temporal IGN dithering), with CPU fallback.
+        if curFmt == kCVPixelFormatType_32BGRA && (targetFmt == .p010 || targetFmt == .nv12Left || targetFmt == .nv12vImage) {
+            let out = try allocateTargetBuffer(pixelFormat: targetCV)
+            if let pipeline = ensureChromaPipeline(),
+               CVPixelBufferGetIOSurface(pb) != nil,
+               CVPixelBufferGetWidth(pb) == width,
+               CVPixelBufferGetHeight(pb) == height,
+               width % 2 == 0,
+               height % 2 == 0 {
+                let cfg = ChromaConversionConfig(
+                    bitDepth: targetFmt.is10Bit ? 10 : 8,
+                    siting: .coSited,
+                    filterMode: .lumaGuidedEdgeAware,
+                    ditherMode: .temporalInterleavedGradient,
+                    isBT2020: colorMastering.isBT2020,
+                    fullRange: false,
+                    frameIndex: UInt32(truncatingIfNeeded: max(0, frameIndex))
+                )
+                try pipeline.convertBGRAtoYUV(src: pb, dst: out, config: cfg)
+                tagConvertedPixelBufferColorimetry(out, colorMastering: colorMastering)
+                return out
+            }
+            if targetFmt.is10Bit {
+                try AVAssetWriterSink.convertBGRAPixelBufferTo10Bit(
+                    pb,
+                    into: out,
+                    pixelFormat: targetFmt,
+                    colorMastering: colorMastering
+                )
+                tagConvertedPixelBufferColorimetry(out, colorMastering: colorMastering)
+                return out
+            }
+            if CVPixelBufferLockBaseAddress(pb, .readOnly) == kCVReturnSuccess {
+                defer { _ = CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+                if let base = CVPixelBufferGetBaseAddress(pb) {
+                    try SafariumAccelerate.convertRawBGRAToNV12BT709Left(
+                        bgra: base,
+                        bgraBytesPerRow: CVPixelBufferGetBytesPerRow(pb),
+                        into: out,
+                        width: width,
+                        height: height
+                    )
+                    tagConvertedPixelBufferColorimetry(out, colorMastering: colorMastering)
+                    return out
+                }
+            }
+        }
+
+        // 4. BGRA -> 10-bit 4:2:2 / 4:4:4 (P210 / P410)
+        if curFmt == kCVPixelFormatType_32BGRA && targetFmt.is10Bit {
+            let out = try allocateTargetBuffer(pixelFormat: targetCV)
+            try AVAssetWriterSink.convertBGRAPixelBufferTo10Bit(
+                pb,
+                into: out,
+                pixelFormat: targetFmt,
+                colorMastering: colorMastering
+            )
+            tagConvertedPixelBufferColorimetry(out, colorMastering: colorMastering)
+            return out
+        }
+
+        // 5. Fallback passthrough with accurate colorimetry tagging
+        tagNativePixelBufferColorimetry(pb, colorMastering: colorMastering)
+        return pb
+    }
 }
 
 /// Thread-safe accumulator for compressed `CMSampleBuffer`s emitted by `VTCompressionSession`.
@@ -905,6 +1225,26 @@ private func muxCompressedVideoAndAudio(
     return (audioMode, outBytes)
 }
 
+// MARK: - Unified Supremacy Encoder Facade
+
+/// High-level entry point for Safarium's Apple Silicon Supremacy transcode pipeline
+/// (native zero-copy YUV, MetalChromaPipeline BGRA->NV12/P010, and VideoToolbox 1-pass / 2-pass / Mini-CAE).
+public enum SupremacyEncoder {
+    public static func transcode(
+        inputURL: URL,
+        outputURL: URL,
+        config: SupremacyTranscodeConfig = SupremacyTranscodeConfig(),
+        framePreprocessor: ((CVPixelBuffer, CMTime, Bool) throws -> CVPixelBuffer)? = nil
+    ) async throws -> SupremacyTranscodeReport {
+        try await VTMultiPassEncoder.encode(
+            inputURL: inputURL,
+            outputURL: outputURL,
+            config: config,
+            framePreprocessor: framePreprocessor
+        )
+    }
+}
+
 // MARK: - Pillar 2: True Native 2-Pass VideoToolbox Encoder (VTMultiPassStorage)
 
 /// True 2-Pass Apple Silicon hardware encoder using `VTMultiPassStorage` (impossible in FFmpeg `hevc_videotoolbox`!).
@@ -1012,13 +1352,13 @@ public enum VTMultiPassEncoder {
             multiPassStorage: storage
         )
 
-        let needs10BitConvert = config.codec.defaultPixelFormat.is10Bit
-        let readPixelFormat: OSType = needs10BitConvert
-            ? kCVPixelFormatType_32BGRA
-            : (config.codec.hasAlpha ? kCVPixelFormatType_32BGRA : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
-        let pool10Bit = needs10BitConvert
-            ? try makePixelBufferPool(width: width, height: height, pixelFormat: config.codec.defaultPixelFormat.cvPixelFormat)
-            : nil
+        let readPixelFormat = await preferredReadPixelFormat(for: config.codec, sourceTrack: track)
+        let pixelConverter = SupremacyPixelConverter(
+            width: width,
+            height: height,
+            codec: config.codec,
+            colorMastering: config.colorMastering
+        )
 
         let dvGen = (config.colorMastering == .dolbyVision84) ? HDRDynamicMetadataGenerator(fps: Float(fps)) : nil
         var dvAttached = false
@@ -1048,14 +1388,11 @@ public enum VTMultiPassEncoder {
                 }
 
                 let reader = try AVAssetReader(asset: asset)
-                let ro = AVAssetReaderTrackOutput(track: track, outputSettings: [
-                    kCVPixelBufferPixelFormatTypeKey as String: readPixelFormat,
-                ])
-                ro.alwaysCopiesSampleData = false
-                guard reader.canAdd(ro) else {
-                    throw SafariumError.encode("AVAssetReader cannot decode source video for pass \(passesExecuted)")
-                }
-                reader.add(ro)
+                let ro = try makeSupremacyVideoTrackOutput(
+                    reader: reader,
+                    track: track,
+                    preferredFormat: readPixelFormat
+                )
                 guard reader.startReading() else {
                     throw SafariumError.encode("AVAssetReader startReading failed: \(reader.error?.localizedDescription ?? "?")")
                 }
@@ -1066,6 +1403,7 @@ public enum VTMultiPassEncoder {
                     let pts = CMSampleBufferGetPresentationTimeStamp(sb)
                     let dur = CMSampleBufferGetDuration(sb)
                     let isCut = forcedCuts.contains(frameIdx)
+                    let curFrameIndex = frameIdx
                     frameIdx += 1
 
                     if let ranges = activeRanges {
@@ -1074,12 +1412,7 @@ public enum VTMultiPassEncoder {
                     }
 
                     let processedPB = try framePreprocessor?(rawPB, pts, isCut) ?? rawPB
-                    let encodePB = try maybeConvertPixelBufferForCodec(
-                        processedPB,
-                        codec: config.codec,
-                        colorMastering: config.colorMastering,
-                        pool10Bit: pool10Bit
-                    )
+                    let encodePB = try pixelConverter.prepareForEncode(processedPB, frameIndex: curFrameIndex)
                     if let dvGen, dvGen.attach(to: encodePB, sceneChange: isCut) {
                         dvAttached = true
                     }
@@ -1173,14 +1506,11 @@ public enum VTMultiPassEncoder {
             // Single-pass modern VTCompressionSession (fast / balanced / high-quality / CQF)
             passesExecuted = 1
             let reader = try AVAssetReader(asset: asset)
-            let ro = AVAssetReaderTrackOutput(track: track, outputSettings: [
-                kCVPixelBufferPixelFormatTypeKey as String: readPixelFormat,
-            ])
-            ro.alwaysCopiesSampleData = false
-            guard reader.canAdd(ro) else {
-                throw SafariumError.encode("AVAssetReader cannot decode source video")
-            }
-            reader.add(ro)
+            let ro = try makeSupremacyVideoTrackOutput(
+                reader: reader,
+                track: track,
+                preferredFormat: readPixelFormat
+            )
             guard reader.startReading() else {
                 throw SafariumError.encode("AVAssetReader startReading failed: \(reader.error?.localizedDescription ?? "?")")
             }
@@ -1191,15 +1521,11 @@ public enum VTMultiPassEncoder {
                 let pts = CMSampleBufferGetPresentationTimeStamp(sb)
                 let dur = CMSampleBufferGetDuration(sb)
                 let isCut = forcedCuts.contains(frameIdx)
+                let curFrameIndex = frameIdx
                 frameIdx += 1
 
                 let processedPB = try framePreprocessor?(rawPB, pts, isCut) ?? rawPB
-                let encodePB = try maybeConvertPixelBufferForCodec(
-                    processedPB,
-                    codec: config.codec,
-                    colorMastering: config.colorMastering,
-                    pool10Bit: pool10Bit
-                )
+                let encodePB = try pixelConverter.prepareForEncode(processedPB, frameIndex: curFrameIndex)
                 if let dvGen, dvGen.attach(to: encodePB, sceneChange: isCut) {
                     dvAttached = true
                 }
@@ -1387,6 +1713,14 @@ public enum MultiEngineChunkEncoder {
             ))
         }
 
+        let sourceVideoTrack = try? await asset.loadTracks(withMediaType: .video).first
+        let chunkReadPixelFormat: OSType
+        if let sourceVideoTrack {
+            chunkReadPixelFormat = await preferredReadPixelFormat(for: config.codec, sourceTrack: sourceVideoTrack)
+        } else {
+            chunkReadPixelFormat = preferredReadPixelFormat(for: config.codec)
+        }
+
         // If a stateful framePreprocessor (like VTTemporalNoiseFilter) is attached, run chunks sequentially
         // so the stateful filter executes safely on a single thread while still getting per-shot Mini-CAE adaptation.
         let effectiveEngines = (framePreprocessor != nil) ? 1 : min(maxEngines, jobs.count)
@@ -1403,6 +1737,7 @@ public enum MultiEngineChunkEncoder {
                     fps: analysis.fps,
                     job: job,
                     config: config,
+                    readPixelFormat: chunkReadPixelFormat,
                     framePreprocessor: framePreprocessor
                 )
                 results.append(r)
@@ -1423,6 +1758,7 @@ public enum MultiEngineChunkEncoder {
                             fps: analysis.fps,
                             job: job,
                             config: config,
+                            readPixelFormat: chunkReadPixelFormat,
                             framePreprocessor: nil
                         )
                     }
@@ -1440,6 +1776,7 @@ public enum MultiEngineChunkEncoder {
                                 fps: analysis.fps,
                                 job: job,
                                 config: config,
+                                readPixelFormat: chunkReadPixelFormat,
                                 framePreprocessor: nil
                             )
                         }
@@ -1511,6 +1848,7 @@ public enum MultiEngineChunkEncoder {
         fps: Double,
         job: ChunkJob,
         config: SupremacyTranscodeConfig,
+        readPixelFormat: OSType,
         framePreprocessor: ((CVPixelBuffer, CMTime, Bool) throws -> CVPixelBuffer)?
     ) throws -> ChunkResult {
         let asset = AVURLAsset(url: inputURL, options: [
@@ -1531,18 +1869,11 @@ public enum MultiEngineChunkEncoder {
             : durT
         reader.timeRange = CMTimeRange(start: startT, duration: max(CMTime(value: 1, timescale: 600_000), adjDur))
 
-        let needs10BitConvert = config.codec.defaultPixelFormat.is10Bit
-        let readPixelFormat: OSType = needs10BitConvert
-            ? kCVPixelFormatType_32BGRA
-            : (config.codec.hasAlpha ? kCVPixelFormatType_32BGRA : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
-        let ro = AVAssetReaderTrackOutput(track: track, outputSettings: [
-            kCVPixelBufferPixelFormatTypeKey as String: readPixelFormat,
-        ])
-        ro.alwaysCopiesSampleData = false
-        guard reader.canAdd(ro) else {
-            throw SafariumError.encode("chunk \(job.index): AVAssetReader cannot add track output")
-        }
-        reader.add(ro)
+        let ro = try makeSupremacyVideoTrackOutput(
+            reader: reader,
+            track: track,
+            preferredFormat: readPixelFormat
+        )
         guard reader.startReading() else {
             throw SafariumError.encode("chunk \(job.index): AVAssetReader failed: \(reader.error?.localizedDescription ?? "?")")
         }
@@ -1589,9 +1920,12 @@ public enum MultiEngineChunkEncoder {
             sourceFrameCount: job.frameCount
         )
 
-        let pool10Bit = needs10BitConvert
-            ? try makePixelBufferPool(width: width, height: height, pixelFormat: config.codec.defaultPixelFormat.cvPixelFormat)
-            : nil
+        let pixelConverter = SupremacyPixelConverter(
+            width: width,
+            height: height,
+            codec: config.codec,
+            colorMastering: config.colorMastering
+        )
         let dvGen = (config.colorMastering == .dolbyVision84) ? HDRDynamicMetadataGenerator(fps: Float(fps)) : nil
         var dvAttached = false
 
@@ -1602,15 +1936,11 @@ public enum MultiEngineChunkEncoder {
             let pts = CMSampleBufferGetPresentationTimeStamp(sb)
             let dur = CMSampleBufferGetDuration(sb)
             let isFirst = (frameIdx == 0)
+            let curFrameIndex = frameIdx
             frameIdx += 1
 
             let processedPB = try framePreprocessor?(rawPB, pts, isFirst) ?? rawPB
-            let encodePB = try maybeConvertPixelBufferForCodec(
-                processedPB,
-                codec: config.codec,
-                colorMastering: config.colorMastering,
-                pool10Bit: pool10Bit
-            )
+            let encodePB = try pixelConverter.prepareForEncode(processedPB, frameIndex: curFrameIndex)
             if let dvGen, dvGen.attach(to: encodePB, sceneChange: isFirst) {
                 dvAttached = true
             }
@@ -1806,27 +2136,36 @@ public enum MVHEVCSpatialEncoder {
             multiPassStorage: nil
         )
 
-        let readFmt: OSType = config.tenBit
-            ? kCVPixelFormatType_32BGRA
-            : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        let leftReadFmt = await preferredReadPixelFormat(for: targetCodec, sourceTrack: leftTrack)
+        let rightReadFmt = await preferredReadPixelFormat(for: targetCodec, sourceTrack: rightTrack)
         let leftReader = try AVAssetReader(asset: leftAsset)
         let rightReader = try AVAssetReader(asset: rightAsset)
-        let leftOut = AVAssetReaderTrackOutput(track: leftTrack, outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: readFmt])
-        let rightOut = AVAssetReaderTrackOutput(track: rightTrack, outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: readFmt])
-        leftOut.alwaysCopiesSampleData = false
-        rightOut.alwaysCopiesSampleData = false
-        guard leftReader.canAdd(leftOut), rightReader.canAdd(rightOut) else {
-            throw SafariumError.encode("MV-HEVC readers cannot decode stereo inputs")
-        }
-        leftReader.add(leftOut)
-        rightReader.add(rightOut)
+        let leftOut = try makeSupremacyVideoTrackOutput(
+            reader: leftReader,
+            track: leftTrack,
+            preferredFormat: leftReadFmt
+        )
+        let rightOut = try makeSupremacyVideoTrackOutput(
+            reader: rightReader,
+            track: rightTrack,
+            preferredFormat: rightReadFmt
+        )
         guard leftReader.startReading(), rightReader.startReading() else {
             throw SafariumError.encode("MV-HEVC readers failed to start")
         }
 
-        let pool10Bit = config.tenBit
-            ? try makePixelBufferPool(width: width, height: height, pixelFormat: kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange)
-            : nil
+        let leftConverter = SupremacyPixelConverter(
+            width: width,
+            height: height,
+            codec: targetCodec,
+            colorMastering: config.colorMastering
+        )
+        let rightConverter = SupremacyPixelConverter(
+            width: width,
+            height: height,
+            codec: targetCodec,
+            colorMastering: config.colorMastering
+        )
         let accumulator = SampleAccumulator()
         var framesEncoded = 0
 
@@ -1837,8 +2176,8 @@ public enum MVHEVCSpatialEncoder {
             let pts = CMSampleBufferGetPresentationTimeStamp(lSB)
             let dur = CMSampleBufferGetDuration(lSB)
 
-            let pbL = try maybeConvertPixelBufferForCodec(rawL, codec: targetCodec, colorMastering: config.colorMastering, pool10Bit: pool10Bit)
-            let pbR = try maybeConvertPixelBufferForCodec(rawR, codec: targetCodec, colorMastering: config.colorMastering, pool10Bit: pool10Bit)
+            let pbL = try leftConverter.prepareForEncode(rawL, frameIndex: framesEncoded)
+            let pbR = try rightConverter.prepareForEncode(rawR, frameIndex: framesEncoded)
 
             let leftTagged = CMTaggedBuffer(
                 tags: [.videoLayerID(0), .stereoView(.leftEye)],

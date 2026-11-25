@@ -1,0 +1,672 @@
+{
+  "schema_version": 1,
+  "mode": "quick",
+  "started_at_utc": "2026-11-25T18:47:44Z",
+  "finished_at_utc": "2026-11-25T18:48:04Z",
+  "elapsed_s": 20.455,
+  "host": {
+    "platform": "macOS-27.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "python": "3.12.13",
+    "baseline_pmset_therm": {
+      "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "cpu_speed_limit": null,
+      "cpu_scheduler_limit": null,
+      "cpu_available_cpus": null,
+      "thermal_warnings": false
+    }
+  },
+  "config": {
+    "duration_sec": 20.0,
+    "safarium_bin": "$HOME/.local/bin/safarium",
+    "input_clip": "/tmp/oacp-501/bd8c1158/run-IeBvAN/safarium-thermal-soak-4a_utiu_/deterministic_input.mp4",
+    "input_sha256": "8a746f4fc5016eb75217cf5352505f77f01e5f923293623903f10672f6b596b6",
+    "width": 640,
+    "height": 360,
+    "fps": 30,
+    "frames": 60,
+    "codec": "hevc",
+    "bitrate": 2500000
+  },
+  "summary": {
+    "iterations_total": 31,
+    "iterations_succeeded": 31,
+    "iterations_failed": 0,
+    "mean_wall_s": 0.6326,
+    "p50_wall_s": 0.4953,
+    "p95_wall_s": 1.4725,
+    "mean_fps": 111.6,
+    "min_fps": 23.91,
+    "max_fps": 133.92,
+    "fps_degradation_pct": 5.18,
+    "max_peak_rss_mb": 36.08,
+    "rss_growth_mb": 0.06,
+    "min_cpu_speed_limit": null,
+    "unique_output_sha256_count": 31,
+    "output_sha256_consistent": false,
+    "unique_mdat_sha256_count": 31,
+    "mdat_sha256_consistent": false
+  },
+  "iterations": [
+    {
+      "timestamp_utc": "2026-11-25T18:47:45Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.4763,
+      "fps": 125.97,
+      "peak_rss_mb": 35.88,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "1660c98ce71b23ea43b23eb72922adb92ef4e1db85a559cd8bf1be3ee90e59d5",
+      "mdat_sha256": "39497e6f0db720ffdd7215709a2c1443d9ecb3a273d83d78d5b83bfb0c73ea7b",
+      "stderr_tail": "",
+      "iteration": 1
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:47:45Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.4581,
+      "fps": 130.97,
+      "peak_rss_mb": 35.75,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "bc7748843102e3ec5ab018d0b83222ccd46abc85d63001a889e042adce53703d",
+      "mdat_sha256": "ae7ae7932534d6463ba6a1a6cab85f979911f68b9fad47a787c9bae983b3c83a",
+      "stderr_tail": "",
+      "iteration": 2
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:47:46Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.4731,
+      "fps": 126.82,
+      "peak_rss_mb": 35.88,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "af5ae5f3bd59d1ecda408893078096921c700c2e4574df0ab2201f1a28d2d6ed",
+      "mdat_sha256": "302a0e7bfc6ddbf40c121c316a69fd0a48236e6ba029675286be8c2605234a38",
+      "stderr_tail": "",
+      "iteration": 3
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:47:46Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.495,
+      "fps": 121.22,
+      "peak_rss_mb": 35.97,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "e19fcb6f9974ba16d641829ba2118fa63ac56dfbaebe36c1c388f73d74d370c8",
+      "mdat_sha256": "151c0800c159ea16895b5825f8963c8e2b864edaf0b676efb751a9e4111c0de5",
+      "stderr_tail": "",
+      "iteration": 4
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:47:47Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.4709,
+      "fps": 127.43,
+      "peak_rss_mb": 35.97,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "012485e07d18ce42f10aa66885623809fd86cb77149f1d85aead06437773e9d8",
+      "mdat_sha256": "3d4fe43b3f8e1d3fb1f836abcb3bc2c3f6d895b88df4d87a12cbf432287f747b",
+      "stderr_tail": "",
+      "iteration": 5
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:47:47Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.5248,
+      "fps": 114.32,
+      "peak_rss_mb": 35.89,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "8a5ebf5b2cdb732ccdb52904efd0bce40a1ffc2bc6e1570f61d6be650470901c",
+      "mdat_sha256": "8c17e7aaf667de3d8f9f48c7c694d66de7ead3189f3927464b4b77eda31a48c1",
+      "stderr_tail": "",
+      "iteration": 6
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:47:48Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.4763,
+      "fps": 125.96,
+      "peak_rss_mb": 35.89,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "a3a87b8f9b09dd61606ea60365f09f9193ba19830ee48759a7c2bff01d7147f8",
+      "mdat_sha256": "87d11bd0cb3f42edb2b5aa7cad6ee2cbc5c33af60f927732f3248eb44896cc0b",
+      "stderr_tail": "",
+      "iteration": 7
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:47:48Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.4826,
+      "fps": 124.33,
+      "peak_rss_mb": 35.94,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "f4a7c529ab768986a2d706046d7424a0823b7ed01c05343411c0e8b354ede3ad",
+      "mdat_sha256": "b15108404669fa3fb4a3fb3dd8336482d1673c99f7d29d68a387f612f9b287f9",
+      "stderr_tail": "",
+      "iteration": 8
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:47:49Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.5024,
+      "fps": 119.42,
+      "peak_rss_mb": 35.89,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "eca429fb9ec95320ec806fa4a386bd23636ddf48249f9c47af880b387961e88b",
+      "mdat_sha256": "69d1989aaa822b502a9591d56dcb81b5fa191bf09e94fd9b1e1cc848f3522ebe",
+      "stderr_tail": "",
+      "iteration": 9
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:47:49Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.5263,
+      "fps": 114.0,
+      "peak_rss_mb": 35.94,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "189e7d21f5344f1f3414165a9f87f2097d2fa508842c8fd00e149a4b847efd51",
+      "mdat_sha256": "cf142a86dfbb00a48758edc05477dda638d93a7503e4206bee2e9aed0f1aaf3f",
+      "stderr_tail": "",
+      "iteration": 10
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:47:50Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.5452,
+      "fps": 110.05,
+      "peak_rss_mb": 35.98,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "f4fb57785c1cee7cf2e29ad82f801680dc529551c162ca3e0d50a8cdd369823b",
+      "mdat_sha256": "234cd55afca0160468ab79422ee11541be82e324cd992beb23b602a59b5f9569",
+      "stderr_tail": "",
+      "iteration": 11
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:47:50Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.4871,
+      "fps": 123.17,
+      "peak_rss_mb": 35.89,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "72a1f86411c6274a2cf28aa3602a35f841c94d851b4a16a897165c5996f5285c",
+      "mdat_sha256": "d6e3ac4cbf58ae8f774066f450afd705c6876b408cc7fe98be0c1bf254566342",
+      "stderr_tail": "",
+      "iteration": 12
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:47:51Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.4696,
+      "fps": 127.77,
+      "peak_rss_mb": 35.89,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "c5a8f60d75795bf73623827467afd5b25fccd31dd3c2de542f9d64e668215b6e",
+      "mdat_sha256": "c2cf4d3bb99b53d13eb4d7b50bdd6e4a1feb907d044a106488c4096f4791ee4b",
+      "stderr_tail": "",
+      "iteration": 13
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:47:51Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.5404,
+      "fps": 111.03,
+      "peak_rss_mb": 36.0,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "371116ff5076b4ab22855e1dab109d46ec82497d79550a3d24ff10b194d0b228",
+      "mdat_sha256": "c73cbd0cd36d5a680bd23d63bd2bc45a562e867e3d8874edeccba4cee060594b",
+      "stderr_tail": "",
+      "iteration": 14
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:47:53Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 1.9536,
+      "fps": 30.71,
+      "peak_rss_mb": 34.5,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "3236e5992a0d2ca36e9899f33947e0199079c05927ca8bc794b81f7da800a21e",
+      "mdat_sha256": "e6478e5ddb9417d95447dfa6f22dfd3f630ee14d4e36b593071f65e6232e2039",
+      "stderr_tail": "",
+      "iteration": 15
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:47:56Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 2.5097,
+      "fps": 23.91,
+      "peak_rss_mb": 34.52,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "995841b61fee797c308c506cd266074e31a693d13c960b9b2d52a642a9330233",
+      "mdat_sha256": "5fc8ce1e956351b3ca315056832e6bed610e335f096f32b454afa5e1e93ea2c8",
+      "stderr_tail": "",
+      "iteration": 16
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:47:57Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.9913,
+      "fps": 60.52,
+      "peak_rss_mb": 36.08,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "c3b93fe8ce2c87ba7ec3331612da9a6fdcc35ab9476b00777d8dffcd013cc595",
+      "mdat_sha256": "dfb3a72f23a231820a90647dc262c8e4ebb1e2bc91b16715ee277d5dec88c3d4",
+      "stderr_tail": "",
+      "iteration": 17
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:47:58Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.628,
+      "fps": 95.54,
+      "peak_rss_mb": 36.02,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "a03734e2a1e92d8ac519a6a0f145ade8becc85e7f74f2cc575cd68cf7389462a",
+      "mdat_sha256": "f9746ee328e678ee661e5c59ef3e0e03c3bf8d4b9126e2acc2365e81d2749159",
+      "stderr_tail": "",
+      "iteration": 18
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:47:58Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.5872,
+      "fps": 102.19,
+      "peak_rss_mb": 35.92,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "27de2ddb1c56229127ad1fc9c3f635c63cea6a9c77ac1b44bba311fe2f88d39d",
+      "mdat_sha256": "16cd7c8f3a4df19f3a6bc3a050e8c24e062c40587e3c40ad81068ba8ff81bf25",
+      "stderr_tail": "",
+      "iteration": 19
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:47:59Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.4601,
+      "fps": 130.39,
+      "peak_rss_mb": 35.86,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "2cfc23f7d46fc9a655494b4b7d75c10265aa32d10cbf6c715ae499b2e5d00e9a",
+      "mdat_sha256": "55c4fcaba3770bc72e30aec7b10be895c4d1d9f3d751de4f7ad5ac030d00550a",
+      "stderr_tail": "",
+      "iteration": 20
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:47:59Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.4897,
+      "fps": 122.52,
+      "peak_rss_mb": 35.92,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "84d9b15191d4592362aa8aa2104bc4b7b814400798c4a5695bdfd2d77b602ebb",
+      "mdat_sha256": "0c7bd5f46796295c0c91a2c4eada9fb544dba01c3d73405a7b0e00e8685b243d",
+      "stderr_tail": "",
+      "iteration": 21
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:48:00Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.448,
+      "fps": 133.92,
+      "peak_rss_mb": 35.89,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "27804bd7d552755ee1cbda4a5e3a653c5c8278c1ba340fd476d3814095abf73d",
+      "mdat_sha256": "5d2723ed399482102b279649e9192807705efdc177aaebf1f0420e5a0862d1d0",
+      "stderr_tail": "",
+      "iteration": 22
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:48:00Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.5008,
+      "fps": 119.81,
+      "peak_rss_mb": 36.05,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "976662e5154eb69ae9db74b9267fb35e4777bd5911681c8e6851e0470a7dd9ac",
+      "mdat_sha256": "dcdb54551f8c65fe0af38194d874f556c82a5e2f4da6bacfa89218c3d9edcbec",
+      "stderr_tail": "",
+      "iteration": 23
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:48:01Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.5451,
+      "fps": 110.08,
+      "peak_rss_mb": 35.73,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "cc9041d0bd1f4fa37acc3467c1ef80449c2a9bb1d071281d1b1a88e2255400f1",
+      "mdat_sha256": "bd0591dc13f6071e1de12e5644ae6394dd418324edd708ee23c9254ddf1728df",
+      "stderr_tail": "",
+      "iteration": 24
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:48:01Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.4822,
+      "fps": 124.42,
+      "peak_rss_mb": 35.89,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "860bec941357adbcb8ef0d09c4bcf8246426d31528f2bbee1de7164229cee784",
+      "mdat_sha256": "16ef7660b135350cb377307b0e3ad590158cb68354ecf8735edb78158d0998f5",
+      "stderr_tail": "",
+      "iteration": 25
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:48:02Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.4832,
+      "fps": 124.18,
+      "peak_rss_mb": 35.92,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "f9803338d3b9fed28c9c49c03ffde1379aa8b6e9df38de273fafb6e2dda1893f",
+      "mdat_sha256": "2e46bc0be2f56e099bb4da7bd01e8dd26cbe41a0cb7aeb1a21034edb368d9aaa",
+      "stderr_tail": "",
+      "iteration": 26
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:48:02Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.4854,
+      "fps": 123.61,
+      "peak_rss_mb": 35.98,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "dc61c3fb2562be83a8ad31433916e3211efe288d6660a970690f2785b54daef0",
+      "mdat_sha256": "b2776d614d009206d339f84e5353d32345ab40b972401b1922a0ac6b30fc712f",
+      "stderr_tail": "",
+      "iteration": 27
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:48:03Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.5198,
+      "fps": 115.42,
+      "peak_rss_mb": 35.94,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "ce62626915343397335315a3c14265a45fd4fe10455d35a5efe313f8685ccf7e",
+      "mdat_sha256": "2261c3f7e27de0d100f32c4ce17667a41ca36da1cc37ee3e571342614e7295cd",
+      "stderr_tail": "",
+      "iteration": 28
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:48:03Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.5879,
+      "fps": 102.07,
+      "peak_rss_mb": 36.0,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "cd08e4413e2b5bb6530bc91e5bde769428dad324c640909e8fbc38bc27ff827c",
+      "mdat_sha256": "2b10ce52ee9864f2ba13522c5a7426b6e1872bcb635effe9e58eb87a48dfb763",
+      "stderr_tail": "",
+      "iteration": 29
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:48:04Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.4953,
+      "fps": 121.14,
+      "peak_rss_mb": 35.95,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "3466928980c59895d1901e45108ea1f87da209323dd5ee733b4773714a37ae2f",
+      "mdat_sha256": "bf4efe723944e88405ab80bf71d9f22eb5be4efe410540ad81de517bb7f70f78",
+      "stderr_tail": "",
+      "iteration": 30
+    },
+    {
+      "timestamp_utc": "2026-11-25T18:48:04Z",
+      "ok": true,
+      "returncode": 0,
+      "wall_s": 0.5142,
+      "fps": 116.68,
+      "peak_rss_mb": 35.94,
+      "pmset_therm": {
+        "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+        "cpu_speed_limit": null,
+        "cpu_scheduler_limit": null,
+        "cpu_available_cpus": null,
+        "thermal_warnings": false
+      },
+      "output_bytes": 508290,
+      "output_sha256": "19d1d229e1b38d4d282cf12084339f26e698e62b489d25f5922e3213f890f725",
+      "mdat_sha256": "42cb7de7e1d336f2d494be9ad7018f4a9e724fce03193fb845f77b4016d0df62",
+      "stderr_tail": "",
+      "iteration": 31
+    }
+  ]
+}

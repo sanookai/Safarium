@@ -51,7 +51,7 @@ EXPORTED_TOOL_FILES = (
 )
 
 FORBIDDEN_FILENAMES = {".DS_Store", ".env"}
-FORBIDDEN_DIRNAMES = {"__pycache__", ".pytest_cache", ".build", ".git", ".swiftpm"}
+FORBIDDEN_DIRNAMES = {"__pycache__", ".pytest_cache", ".build", ".git", ".swiftpm", "target"}
 FORBIDDEN_SUFFIXES = (".pyc", ".pyo", ".o", ".so", ".dylib", ".mp4", ".mov", ".wav", ".m4a", ".mpeg", ".ogg", ".blend")
 
 PERSONAL_PATH_PATTERNS = (
@@ -356,9 +356,12 @@ def _collect_export_pairs(source: Path) -> tuple[list[tuple[Path, str]], list[st
     for rel_str in EXPORTED_TOOL_FILES:
         add_file(source / rel_str, rel_str)
     add_tree("Tools/rules")
+    add_tree("Tools/safarium-conformance-rs")
 
-    # 4. Public docs (exclude private Vault audit/draft notes) & published benchmark JSON
+    # 4. Public docs (exclude private Vault audit/draft notes) & published benchmark harness/JSON
     add_tree("docs", skip_pred=lambda r: r in EXCLUDED_DOCS)
+    add_file(source / "bench/harness/spec_bench.py", "bench/harness/spec_bench.py")
+    add_file(source / "bench/soak/thermal_soak.py", "bench/soak/thermal_soak.py")
     add_file(
         source / "bench/experiments/2026-11-25-wave9-supremacy/results.json",
         "bench/experiments/2026-11-25-wave9-supremacy/results.json",
@@ -366,6 +369,14 @@ def _collect_export_pairs(source: Path) -> tuple[list[tuple[Path, str]], list[st
     add_file(
         source / "bench/experiments/2026-11-25-wave10-complete/results.json",
         "bench/experiments/2026-11-25-wave10-complete/results.json",
+    )
+    add_file(
+        source / "bench/experiments/2026-11-26-wave11-14-spec/results.json",
+        "bench/experiments/2026-11-26-wave11-14-spec/results.json",
+    )
+    add_file(
+        source / "bench/experiments/2026-11-26-wave11-14-spec/soak_quick.json",
+        "bench/experiments/2026-11-26-wave11-14-spec/soak_quick.json",
     )
 
     return pairs, sorted(set(excluded))

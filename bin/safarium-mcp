@@ -20,7 +20,7 @@ import time
 
 
 SERVER_NAME = "safarium-mcp"
-SERVER_VERSION = "1.0.0"
+SERVER_VERSION = "2.0.0"
 SUPPORTED_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 DEFAULT_NEGOTIATED_VERSION = "2025-03-26"
 
@@ -32,12 +32,15 @@ MAX_DIM = 8192
 MAX_PIXELS = 33_554_432
 
 SERVER_INSTRUCTIONS = (
-    "Safarium is a native macOS Apple Silicon HTML, 3D, 2D Raster, and Media Rendering Engine "
-    "(0% external video/browser/CV binaries). Read-only inspection tools (doctor, status, "
-    "capabilities, raster_info, forge_schema, forge_validate, probe_media, cache_stats) bypass "
-    "the queue and return immediately. Heavy render/verify/QA tools automatically serialize "
-    "through the per-user SF-VIDEO-1 FIFO queue. Always run doctor and forge_validate before "
-    "heavy renders, and verify outputs with verify_media or qa_inspect."
+    "Safarium is a native macOS Apple Silicon HTML, 3D, 2D Raster, and Media Encoding/Rendering Engine "
+    "(0% external video/browser/CV binaries). Read-only inspection & planning tools (doctor, status, "
+    "capabilities, encoding_capabilities, encoding_conformance, encoding_plan, list_scenarios, raster_info, "
+    "forge_schema, forge_validate, probe_media, cache_stats, and encoding_ladder with plan_only=true) bypass "
+    "the queue and return immediately. Heavy encode/render/verify/QA tools (encoding_encode, encoding_ladder, "
+    "transcode_supremacy, package_hls, forge_run, html_render, verify_media, qa_inspect) automatically serialize "
+    "through the per-user SF-VIDEO-1 FIFO queue. Prefer intent-level SPEC tools (encoding_capabilities -> "
+    "encoding_plan -> encoding_encode / encoding_ladder -> encoding_conformance) so agents declare perceptual "
+    "contracts instead of guessing fragile low-level codec flags."
 )
 
 # Active child subprocess reference for clean signal shutdown.
@@ -1062,6 +1065,202 @@ TOOLS = [
             "openWorldHint": False,
         },
     },
+    {
+        "name": "encoding_capabilities",
+        "description": (
+            "Wave 11 live Apple VideoToolbox runtime capability profiler (non-blocking FIFO bypass). "
+            "Enumerates real hardware/software encoders (avc1, hvc1, muxa, apcn, apch, ap4h, av01) and probes "
+            "live VTCompressionSession support for Main10 10-bit, 2-pass multipass, SpatialAQ, LookAhead, "
+            "ConstantQualityFactor, and hardware acceleration with cached per-machine/OS truth."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "refresh": {"type": "boolean", "description": "Force a fresh live VideoToolbox probe instead of reading disk cache."},
+                "no_cache": {"type": "boolean", "description": "Bypass reading/writing the per-machine capability cache."},
+            },
+            "additionalProperties": False,
+        },
+        "annotations": READONLY_ANNOTATIONS,
+    },
+    {
+        "name": "encoding_conformance",
+        "description": (
+            "Wave 11 independent zero-FFmpeg bitstream & HLS conformance validator (non-blocking FIFO bypass). "
+            "Inspects MP4/MOV/CMAF boxes (ftyp/moov/stsd/hvcC/avcC/dvcC/colr/mdcv/clli/moof/tfdt/trun), "
+            "MPEG-TS 188-byte PAT/PMT/CC/PCR/PTS, or full RFC 8216 + Apple HLS Authoring ladders (master.m3u8, "
+            "shared-IDR alignment, peak BANDWIDTH) plus optional independent AVAssetReader frame decode."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path to a media file (.mp4/.mov/.m4s/.ts) or HLS directory / master.m3u8."},
+                "type": {
+                    "type": "string",
+                    "enum": ["auto", "media", "hls"],
+                    "description": "Validation mode ('auto' infers media vs HLS directory/m3u8). Default 'auto'.",
+                },
+                "expected_codec": {"type": "string", "description": "Optional expected FourCC (e.g. 'hvc1', 'avc1', 'apch')."},
+                "expected_bit_depth": {"type": "integer", "minimum": 8, "maximum": 16, "description": "Optional expected luma bit depth (e.g. 8 or 10)."},
+                "expected_chroma": {"type": "integer", "minimum": 0, "maximum": 3, "description": "Optional expected chroma_format_idc (1=4:2:0, 2=4:2:2, 3=4:4:4)."},
+                "expected_primaries": {"type": "integer", "minimum": 1, "maximum": 255, "description": "Optional expected ISO color_primaries code (1=BT.709, 9=BT.2020)."},
+                "no_decode": {"type": "boolean", "description": "Skip full-frame AVAssetReader decode check (bitstream structure only)."},
+                "strict": {"type": "boolean", "description": "Return error status if conformance violations are found. Default false."},
+                "timeout_sec": {
+                    "type": "integer",
+                    "minimum": MIN_TIMEOUT_SEC,
+                    "maximum": MAX_TIMEOUT_SEC,
+                    "description": "Maximum timeout in seconds (default 180, max 1800).",
+                },
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+        "annotations": READONLY_ANNOTATIONS,
+    },
+    {
+        "name": "encoding_plan",
+        "description": (
+            "Wave 13 SPEC dry-run perceptual encoding planner (non-blocking FIFO bypass). Analyzes shots, "
+            "noise/grain, Vision text/face masks, banding risk, and transition types (hard cut vs flash/fade/pan), "
+            "then returns a structured per-shot SPECPlan with expected Mbps, estimated time, forced IDR frames, "
+            "and agent-readable explanations without running a heavy encode."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "input_path": {"type": "string", "description": "Path to source video file."},
+                "target_vmaf": {"type": "number", "minimum": 50.0, "maximum": 100.0, "description": "Target perceptual VMAF score (default 95.0)."},
+                "target_ms_ssim": {"type": "number", "minimum": 0.80, "maximum": 1.0, "description": "Target MS-SSIM floor (default 0.995)."},
+                "max_deltae_p95": {"type": "number", "exclusiveMinimum": 0.0, "maximum": 20.0, "description": "Maximum allowed CIEDE2000 p95 color error (default 2.0)."},
+                "max_bytes": {"type": "integer", "minimum": 1024, "description": "Optional output file size cap in bytes."},
+                "max_latency_sec": {"type": "number", "exclusiveMinimum": 0.0, "maximum": 3600.0, "description": "Optional encode latency budget in seconds."},
+                "protect_text": {"type": "boolean", "description": "Protect crisp text/UI/Thai subtitles from denoise blur (default true)."},
+                "protect_faces": {"type": "boolean", "description": "Protect detected faces from over-smoothing (default true)."},
+                "preserve_grain": {"type": "boolean", "description": "Preserve intentional film grain instead of denoising (default false)."},
+                "banding_sensitive": {"type": "boolean", "description": "Boost bitrate/10-bit protection on smooth gradients (default true)."},
+                "hdr_policy": {
+                    "type": "string",
+                    "enum": ["preserve", "recompute", "strip-dynamic-metadata", "tone-map-to-sdr"],
+                    "description": "HDR metadata integrity policy (default 'preserve').",
+                },
+                "intent": {"type": "string", "description": "High-level delivery intent label (e.g. 'balanced_delivery', 'thai_subtitles_web', 'cinema_archive')."},
+                "codec": {
+                    "type": "string",
+                    "enum": ["h264", "hevc", "hevc-10bit", "hevc-422-10", "hevc-444-10", "prores422", "prores422hq", "prores4444"],
+                    "description": "Target native Apple hardware codec (default 'hevc-10bit').",
+                },
+                "save_sidecar_path": {"type": "string", "description": "Optional path to save the reusable SPECAnalysisSidecar JSON."},
+                "load_sidecar_path": {"type": "string", "description": "Optional path to reuse a previously computed SPECAnalysisSidecar JSON."},
+                "timeout_sec": {
+                    "type": "integer",
+                    "minimum": MIN_TIMEOUT_SEC,
+                    "maximum": MAX_TIMEOUT_SEC,
+                    "description": "Maximum timeout in seconds (default 180, max 1800).",
+                },
+            },
+            "required": ["input_path"],
+            "additionalProperties": False,
+        },
+        "annotations": READONLY_ANNOTATIONS,
+    },
+    {
+        "name": "encoding_encode",
+        "description": (
+            "Wave 13/14 intent-level SPEC closed-loop quality-target hardware encode via the SF-VIDEO-1 FIFO queue. "
+            "Declare perceptual goals (target_vmaf, target_ms_ssim, max_deltae_p95, protect_text, preserve_grain, "
+            "power_budget); Safarium runs short-window proxy convergence measuring real MS-SSIM & CIEDE2000 p95, "
+            "encodes with VideoToolbox + atomic staging publish, and returns verified metrics + explanations."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "input_path": {"type": "string", "description": "Path to source video file."},
+                "output_path": {"type": "string", "description": "Destination .mp4 or .mov path (published atomically)."},
+                "target_vmaf": {"type": "number", "minimum": 50.0, "maximum": 100.0, "description": "Target perceptual VMAF score (default 95.0)."},
+                "target_ms_ssim": {"type": "number", "minimum": 0.80, "maximum": 1.0, "description": "Target MS-SSIM floor (default 0.995)."},
+                "max_deltae_p95": {"type": "number", "exclusiveMinimum": 0.0, "maximum": 20.0, "description": "Maximum allowed CIEDE2000 p95 color error (default 2.0)."},
+                "max_bytes": {"type": "integer", "minimum": 1024, "description": "Optional output file size cap in bytes."},
+                "max_latency_sec": {"type": "number", "exclusiveMinimum": 0.0, "maximum": 3600.0, "description": "Optional encode latency budget in seconds."},
+                "protect_text": {"type": "boolean", "description": "Protect crisp text/UI/Thai subtitles from denoise blur (default true)."},
+                "protect_faces": {"type": "boolean", "description": "Protect detected faces from over-smoothing (default true)."},
+                "preserve_grain": {"type": "boolean", "description": "Preserve intentional film grain instead of denoising (default false)."},
+                "banding_sensitive": {"type": "boolean", "description": "Boost bitrate/10-bit protection on smooth gradients (default true)."},
+                "hdr_policy": {
+                    "type": "string",
+                    "enum": ["preserve", "recompute", "strip-dynamic-metadata", "tone-map-to-sdr"],
+                    "description": "HDR metadata integrity policy (default 'preserve').",
+                },
+                "intent": {"type": "string", "description": "High-level delivery intent label."},
+                "codec": {
+                    "type": "string",
+                    "enum": ["h264", "hevc", "hevc-10bit", "hevc-422-10", "hevc-444-10", "prores422", "prores422hq", "prores4444"],
+                    "description": "Target native Apple hardware codec (default 'hevc-10bit').",
+                },
+                "max_proxy_iters": {"type": "integer", "minimum": 1, "maximum": 6, "description": "Max closed-loop proxy calibration iterations (default 3)."},
+                "power_budget": {
+                    "type": "string",
+                    "enum": ["low", "balanced", "max"],
+                    "description": "Thermal/power budget for hardware scheduler ('low'|'balanced'|'max', default 'balanced').",
+                },
+                "strict": {"type": "boolean", "description": "Return error if final verified output misses quality contract. Default false."},
+                "overwrite": {"type": "boolean", "description": "Allow overwriting existing output_path. Default false."},
+                "timeout_sec": {
+                    "type": "integer",
+                    "minimum": MIN_TIMEOUT_SEC,
+                    "maximum": MAX_TIMEOUT_SEC,
+                    "description": "Maximum timeout in seconds (default 600, max 1800).",
+                },
+            },
+            "required": ["input_path", "output_path"],
+            "additionalProperties": False,
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "encoding_ladder",
+        "description": (
+            "Wave 13/14 Per-Title Convex-Hull HLS ABR Ladder planner & packager. Reuses a single SPECAnalysisSidecar "
+            "pass across all rungs without upscaling, aligns shared-IDR segment boundaries across variants, "
+            "packages CMAF fMP4 or MPEG-TS HLS, and runs HLSConformanceValidator automatically. Pass plan_only=true "
+            "for a non-blocking read-only ladder plan."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "input_path": {"type": "string", "description": "Path to source video file."},
+                "output_dir": {"type": "string", "description": "Destination directory for master.m3u8 and variant folders (required unless plan_only=true)."},
+                "format": {"type": "string", "enum": ["fmp4", "ts"], "description": "HLS segment format ('fmp4' CMAF default, or 'ts')."},
+                "max_rungs": {"type": "integer", "minimum": 1, "maximum": 6, "description": "Maximum number of ABR rungs (default 4)."},
+                "segment_sec": {"type": "number", "exclusiveMinimum": 0.4, "maximum": 30.0, "description": "Target shared-IDR segment duration in seconds (default 4.0)."},
+                "subtitles_vtt_path": {"type": "string", "description": "Optional WebVTT (.vtt) subtitle file path."},
+                "subtitle_lang": {"type": "string", "description": "Subtitle BCP-47 language tag (default 'en')."},
+                "subtitle_name": {"type": "string", "description": "Human-readable subtitle track name (default 'English')."},
+                "save_sidecar_path": {"type": "string", "description": "Optional path to save the reusable SPECAnalysisSidecar JSON."},
+                "load_sidecar_path": {"type": "string", "description": "Optional path to reuse a previously computed SPECAnalysisSidecar JSON."},
+                "plan_only": {"type": "boolean", "description": "Return per-title convex-hull rung plan only without encoding (non-blocking FIFO bypass)."},
+                "timeout_sec": {
+                    "type": "integer",
+                    "minimum": MIN_TIMEOUT_SEC,
+                    "maximum": MAX_TIMEOUT_SEC,
+                    "description": "Maximum timeout in seconds (default 600, max 1800).",
+                },
+            },
+            "required": ["input_path"],
+            "additionalProperties": False,
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
+    },
 ]
 
 TOOL_NAMES = {t["name"] for t in TOOLS}
@@ -1582,6 +1781,153 @@ def _handle_tool_call(name, arguments, *, progress_token=None, negotiated_versio
                 argv.append("--strict")
             if overwrite:
                 argv.append("--overwrite")
+            exe = _require_render_bin()
+            res = _run_subprocess(exe, argv, timeout_sec=timeout_sec)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "encoding_capabilities":
+            argv = ["forge", "probe-capabilities", "--json-errors"]
+            if _validate_bool(arguments.get("refresh", False), "refresh"):
+                argv.append("--refresh")
+            if _validate_bool(arguments.get("no_cache", False), "no_cache"):
+                argv.append("--no-cache")
+            exe = _require_render_bin()
+            res = _run_subprocess(exe, argv, timeout_sec=30)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "encoding_conformance":
+            raw_path = arguments.get("path")
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                raise ValueError("'path' must be a non-empty string path")
+            path_abs = _validate_path(raw_path, "path", must_exist=False)
+            if not (os.path.isfile(path_abs) or os.path.isdir(path_abs)):
+                raise ValueError(f"'path' does not exist: {path_abs}")
+            timeout_sec = _validate_timeout(arguments, 180)
+            argv = ["forge", "conformance", path_abs, "--json-errors"]
+            if arguments.get("type") is not None:
+                argv.extend(["--type", _validate_enum(arguments["type"], "type", {"auto", "media", "hls"})])
+            if arguments.get("expected_codec") is not None:
+                ec = arguments["expected_codec"]
+                if not isinstance(ec, str) or not ec.strip():
+                    raise ValueError("'expected_codec' must be a non-empty string")
+                argv.extend(["--expected-codec", ec.strip()])
+            if arguments.get("expected_bit_depth") is not None:
+                argv.extend(["--expected-bit-depth", str(_validate_int(arguments["expected_bit_depth"], "expected_bit_depth", lo=8, hi=16))])
+            if arguments.get("expected_chroma") is not None:
+                argv.extend(["--expected-chroma", str(_validate_int(arguments["expected_chroma"], "expected_chroma", lo=0, hi=3))])
+            if arguments.get("expected_primaries") is not None:
+                argv.extend(["--expected-primaries", str(_validate_int(arguments["expected_primaries"], "expected_primaries", lo=1, hi=255))])
+            if _validate_bool(arguments.get("no_decode", False), "no_decode"):
+                argv.append("--no-decode")
+            if _validate_bool(arguments.get("strict", False), "strict"):
+                argv.append("--strict")
+            exe = _require_render_bin()
+            res = _run_subprocess(exe, argv, timeout_sec=timeout_sec)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name in ("encoding_plan", "encoding_encode"):
+            in_path = _validate_path(arguments.get("input_path"), "input_path", must_exist=True)
+            is_encode = (name == "encoding_encode")
+            timeout_sec = _validate_timeout(arguments, 600 if is_encode else 180)
+            argv = ["forge", "spec-encode" if is_encode else "spec-plan", in_path, "--json-errors"]
+            if is_encode:
+                overwrite = _validate_bool(arguments.get("overwrite", False), "overwrite")
+                out_path = _validate_path(
+                    arguments.get("output_path"), "output_path", must_not_exist=not overwrite, parent_must_exist=True
+                )
+                argv.extend(["--output", out_path])
+                if overwrite:
+                    argv.append("--overwrite")
+            if arguments.get("target_vmaf") is not None:
+                argv.extend(["--target-vmaf", str(_validate_number(arguments["target_vmaf"], "target_vmaf", lo=50.0, hi=100.0))])
+            if arguments.get("target_ms_ssim") is not None:
+                argv.extend(["--target-ms-ssim", str(_validate_number(arguments["target_ms_ssim"], "target_ms_ssim", lo=0.80, hi=1.0))])
+            if arguments.get("max_deltae_p95") is not None:
+                argv.extend(["--max-deltae-p95", str(_validate_number(arguments["max_deltae_p95"], "max_deltae_p95", exclusive_lo=0.0, hi=20.0))])
+            if arguments.get("max_bytes") is not None:
+                argv.extend(["--max-bytes", str(_validate_int(arguments["max_bytes"], "max_bytes", lo=1024))])
+            if arguments.get("max_latency_sec") is not None:
+                argv.extend(["--max-latency-sec", str(_validate_number(arguments["max_latency_sec"], "max_latency_sec", exclusive_lo=0.0, hi=3600.0))])
+            if arguments.get("protect_text") is not None:
+                argv.append("--protect-text" if _validate_bool(arguments["protect_text"], "protect_text") else "--no-protect-text")
+            if arguments.get("protect_faces") is not None:
+                argv.append("--protect-faces" if _validate_bool(arguments["protect_faces"], "protect_faces") else "--no-protect-faces")
+            if arguments.get("preserve_grain") is not None:
+                argv.append("--preserve-grain" if _validate_bool(arguments["preserve_grain"], "preserve_grain") else "--no-preserve-grain")
+            if arguments.get("banding_sensitive") is not None:
+                argv.append("--banding-sensitive" if _validate_bool(arguments["banding_sensitive"], "banding_sensitive") else "--no-banding-sensitive")
+            if arguments.get("hdr_policy") is not None:
+                hdr_pol = _validate_enum(
+                    arguments["hdr_policy"],
+                    "hdr_policy",
+                    {"preserve", "recompute", "strip-dynamic-metadata", "tone-map-to-sdr"},
+                )
+                argv.extend(["--hdr-policy", hdr_pol])
+            if arguments.get("intent") is not None:
+                intent = arguments["intent"]
+                if not isinstance(intent, str) or not intent.strip():
+                    raise ValueError("'intent' must be a non-empty string")
+                argv.extend(["--intent", intent.strip()])
+            if arguments.get("codec") is not None:
+                codec = _validate_enum(
+                    arguments["codec"],
+                    "codec",
+                    {"h264", "hevc", "hevc-10bit", "hevc-422-10", "hevc-444-10", "prores422", "prores422hq", "prores4444"},
+                )
+                argv.extend(["--codec", codec])
+            if not is_encode:
+                if arguments.get("save_sidecar_path") is not None:
+                    sp = _validate_path(arguments["save_sidecar_path"], "save_sidecar_path", parent_must_exist=True)
+                    argv.extend(["--save-sidecar", sp])
+                if arguments.get("load_sidecar_path") is not None:
+                    lp = _validate_path(arguments["load_sidecar_path"], "load_sidecar_path", must_exist=True)
+                    argv.extend(["--load-sidecar", lp])
+            else:
+                if arguments.get("max_proxy_iters") is not None:
+                    argv.extend(["--max-proxy-iters", str(_validate_int(arguments["max_proxy_iters"], "max_proxy_iters", lo=1, hi=6))])
+                if arguments.get("power_budget") is not None:
+                    argv.extend(["--power-budget", _validate_enum(arguments["power_budget"], "power_budget", {"low", "balanced", "max"})])
+                if _validate_bool(arguments.get("strict", False), "strict"):
+                    argv.append("--strict")
+            exe = _require_render_bin()
+            res = _run_subprocess(exe, argv, timeout_sec=timeout_sec, progress_token=progress_token if is_encode else None)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "encoding_ladder":
+            in_path = _validate_path(arguments.get("input_path"), "input_path", must_exist=True)
+            plan_only = _validate_bool(arguments.get("plan_only", False), "plan_only")
+            timeout_sec = _validate_timeout(arguments, 180 if plan_only else 600)
+            argv = ["forge", "spec-ladder", in_path, "--json-errors"]
+            if plan_only:
+                argv.append("--plan-only")
+            else:
+                out_dir = _validate_path(arguments.get("output_dir"), "output_dir", parent_must_exist=True)
+                argv.extend(["--output", out_dir])
+            if arguments.get("format") is not None:
+                argv.extend(["--format", _validate_enum(arguments["format"], "format", {"fmp4", "ts"})])
+            if arguments.get("max_rungs") is not None:
+                argv.extend(["--max-rungs", str(_validate_int(arguments["max_rungs"], "max_rungs", lo=1, hi=6))])
+            if arguments.get("segment_sec") is not None:
+                argv.extend(["--segment-sec", str(_validate_number(arguments["segment_sec"], "segment_sec", lo=0.5, hi=30.0))])
+            if arguments.get("subtitles_vtt_path") is not None:
+                vtt = _validate_path(arguments["subtitles_vtt_path"], "subtitles_vtt_path", must_exist=True)
+                argv.extend(["--subtitles", vtt])
+            if arguments.get("subtitle_lang") is not None:
+                slang = arguments["subtitle_lang"]
+                if not isinstance(slang, str) or not slang.strip():
+                    raise ValueError("'subtitle_lang' must be a non-empty string")
+                argv.extend(["--subtitle-lang", slang.strip()])
+            if arguments.get("subtitle_name") is not None:
+                sname = arguments["subtitle_name"]
+                if not isinstance(sname, str) or not sname.strip():
+                    raise ValueError("'subtitle_name' must be a non-empty string")
+                argv.extend(["--subtitle-name", sname.strip()])
+            if arguments.get("save_sidecar_path") is not None:
+                sp = _validate_path(arguments["save_sidecar_path"], "save_sidecar_path", parent_must_exist=True)
+                argv.extend(["--save-sidecar", sp])
+            if arguments.get("load_sidecar_path") is not None:
+                lp = _validate_path(arguments["load_sidecar_path"], "load_sidecar_path", must_exist=True)
+                argv.extend(["--load-sidecar", lp])
             exe = _require_render_bin()
             res = _run_subprocess(exe, argv, timeout_sec=timeout_sec)
             return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
