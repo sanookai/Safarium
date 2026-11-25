@@ -117,6 +117,7 @@ jobs:
           #include "SafariumRasterC.h"
           #include "sr_linalg.h"
           #include "sr_ops.h"
+          #include "sr_ops_perf.h"
 
           int64_t sr_deflate_bound(int64_t n);
           int64_t sr_deflate_fast(const uint8_t *in, int64_t n, uint8_t *out, int64_t cap);
@@ -174,6 +175,24 @@ jobs:
               assert(sr_c_clahe_u8(gray, 32, 32, 32, cl, 32, 2.0, 4, 4) == 0);
               assert(sr_c_canny_u8(gray, 32, 32, 1, 32, ed, 32, 50.0, 150.0, 3, 0) == 0);
               assert(ed[16 * 32 + 15] == 255 || ed[16 * 32 + 16] == 255);
+
+              // 7. Wave 10 cc_fast.c + NEON contour kernels under ASan/UBSan
+              uint8_t cc_in[32 * 32];
+              memset(cc_in, 0, sizeof(cc_in));
+              for (int y = 2; y < 8; y++) for (int x = 2; x < 8; x++) cc_in[y * 32 + x] = 255;
+              for (int y = 16; y < 22; y++) for (int x = 16; x < 22; x++) cc_in[y * 32 + x] = 255;
+              int32_t cc_lab[32 * 32];
+              int32_t cc_n = 0;
+              void *cc_h = NULL;
+              assert(sr_c_connected_components(cc_in, 32, cc_lab, 32 * 4, 32, 32, 8, &cc_n, &cc_h) == 0);
+              assert(cc_n == 3 && cc_h != NULL);
+              int32_t cc_stats[3 * 5];
+              double cc_cen[3 * 2];
+              assert(sr_c_cc_take(cc_h, cc_stats, cc_cen) == 0);
+              assert(cc_stats[1 * 5 + 4] == 36 && cc_stats[2 * 5 + 4] == 36);
+              float tri[6] = {0, 0, 3, 0, 3, 4};
+              assert(fabs(sr_c_arc_length_f32(tri, 3, 1) - 12.0) < 1e-4);
+              assert(fabs(sr_c_point_polygon_test_f32(tri, 3, 1.0, 1.0, 1) - 0.2) < 1e-4);
               return 0;
           }
           EOF
@@ -325,6 +344,7 @@ jobs:
             sdk/python/tests/test_parity_imgproc.py
             sdk/python/tests/test_parity_phase4.py
             sdk/python/tests/test_parity_phase8.py
+            sdk/python/tests/test_parity_phases9_16.py
             sdk/python/tests/test_gpu.py
             sdk/python/tests/test_bench_raster.py
           )

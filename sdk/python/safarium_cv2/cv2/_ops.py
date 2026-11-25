@@ -65,6 +65,8 @@ _c_find = declare("sr_find_contours", IMG_ARGS + [I32, I32, I32, I32, ctypes.POI
                                                   ctypes.POINTER(ctypes.c_int64), ctypes.POINTER(VP)])
 _c_find_take = declare("sr_contours_take", [VP, PI32, PI32, PI32])
 _c_approx = declare("sr_approx_poly_dp", [VP, I32, I32, F64, I32, VP, PI32])
+_c_arc_length = declare("sr_arc_length", [VP, I32, I32, I32, PF64])
+_c_point_polygon_test = declare("sr_point_polygon_test", [VP, I32, I32, F64, F64, I32, PF64])
 _c_morph = declare("sr_morph", IMG_ARGS + IMG_ARGS + [ctypes.POINTER(ctypes.c_uint8), I32, I32, I32, I32, I32, I32, I32, PF64])
 
 
@@ -697,7 +699,7 @@ def distanceTransform(src, distanceType, maskSize, dst=None, dstType=5):
     return out
 
 
-def _cc(image, labels, connectivity, ltype, who):
+def _cc(image, labels, connectivity, ltype, who, need_handle=True):
     a = np.asarray(image)
     if a.dtype != np.uint8 or a.ndim != 2:
         raise _lib.error(f"{who}: image must be a single-channel uint8 array")
@@ -708,14 +710,16 @@ def _cc(image, labels, connectivity, ltype, who):
     a = a if _usable(a) else np.ascontiguousarray(a)
     lab = _dst(labels if ltype == 4 else None, a.shape, np.int32)
     n = I32(0)
-    handle = VP()
-    check(_c_cc(*img_args(a), *img_args(lab), int(connectivity), ctypes.byref(n), ctypes.byref(handle)), who)
-    return int(n.value), lab, handle
+    if need_handle:
+        handle = VP()
+        check(_c_cc(*img_args(a), *img_args(lab), int(connectivity), ctypes.byref(n), ctypes.byref(handle)), who)
+        return int(n.value), lab, handle
+    check(_c_cc(*img_args(a), *img_args(lab), int(connectivity), ctypes.byref(n), None), who)
+    return int(n.value), lab, None
 
 
 def connectedComponents(image, labels=None, connectivity=8, ltype=4):
-    n, lab, handle = _cc(image, labels, connectivity, ltype, "connectedComponents")
-    check(_c_cc_take(handle, None, None), "connectedComponents")
+    n, lab, _ = _cc(image, labels, connectivity, ltype, "connectedComponents", need_handle=False)
     if ltype == 2:
         if n > 65535:
             raise _lib.error("connectedComponents: too many labels for CV_16U")
@@ -792,48 +796,27 @@ def approxPolyDP(curve, epsilon, closed):
 
 def arcLength(curve, closed):
     _, flat = _curve(curve, "arcLength")
-    p = flat.astype(np.float32)
-    if len(p) < 2:
+    n = flat.shape[0]
+    if n < 2:
         return 0.0
-    d = np.diff(p, axis=0)
-    seg = np.sqrt(d[:, 0] * d[:, 0] + d[:, 1] * d[:, 1])
-    total = float(seg.sum(dtype=np.float64))
-    if closed:
-        e = p[0] - p[-1]
-        total += float(np.sqrt(e[0] * e[0] + e[1] * e[1]))
-    return total
+    out = F64(0.0)
+    check(_c_arc_length(flat.ctypes.data, n, 1 if flat.dtype == np.float32 else 0,
+                        1 if closed else 0, ctypes.byref(out)), "arcLength")
+    return float(out.value)
 
 
 def pointPolygonTest(contour, pt, measureDist):
-    c, flat = _curve(contour, "pointPolygonTest")
-    p = flat.astype(np.float64)
+    _, flat = _curve(contour, "pointPolygonTest")
+    n = flat.shape[0]
+    if n == 0:
+        return -1.0 if measureDist else -1
     px, py = float(pt[0]), float(pt[1])
     if flat.dtype == np.float32:
         px, py = float(np.float32(px)), float(np.float32(py))
-    n = len(p)
-    if n == 0:
-        return -1.0 if measureDist else -1
-    x0, y0 = p[:, 0], p[:, 1]
-    x1, y1 = np.roll(x0, -1), np.roll(y0, -1)
-    dx, dy = x1 - x0, y1 - y0
-    dx1, dy1 = px - x0, py - y0
-    seg2 = dx * dx + dy * dy
-    with np.errstate(divide="ignore", invalid="ignore"):
-        t = np.where(seg2 > 0, (dx1 * dx + dy1 * dy) / seg2, 0.0)
-    t = np.clip(t, 0.0, 1.0)
-    dist2 = (px - (x0 + t * dx)) ** 2 + (py - (y0 + t * dy)) ** 2
-    min2 = float(dist2.min())
-    if min2 == 0.0:
-        return 0.0 if measureDist else 0
-    # even-odd crossing test
-    cond = ((y0 > py) != (y1 > py))
-    with np.errstate(divide="ignore", invalid="ignore"):
-        xin = np.where(cond, (x1 - x0) * (py - y0) / np.where(cond, (y1 - y0), 1.0) + x0, 0.0)
-    inside = int(np.count_nonzero(cond & (px < xin))) % 2 == 1
-    if measureDist:
-        d = math.sqrt(min2)
-        return d if inside else -d
-    return 1 if inside else -1
+    out = F64(0.0)
+    check(_c_point_polygon_test(flat.ctypes.data, n, 1 if flat.dtype == np.float32 else 0,
+                                px, py, 1 if measureDist else 0, ctypes.byref(out)), "pointPolygonTest")
+    return float(out.value) if measureDist else int(out.value)
 
 
 __all__ = [n for n in _NAMES if n in globals()]

@@ -155,4 +155,38 @@ int32_t sr_jpeg_decode_baseline(const uint8_t *data, size_t len,
                                 int32_t *out_w, int32_t *out_h, int32_t *out_cn,
                                 uint8_t *dst, ptrdiff_t dst_stride, int32_t want_cn);
 
+// ---- Wave 10 Track B1: Connected Components, CoreArith/CoreStruct NEON, Contours ----
+
+int32_t sr_c_connected_components(const uint8_t *src, ptrdiff_t sstep,
+                                  int32_t *lab, ptrdiff_t lstep_bytes,
+                                  int32_t w, int32_t h, int32_t connectivity,
+                                  int32_t *out_n, void **out_handle);
+
+int32_t sr_c_cc_take(void *handle, int32_t *stats, double *centroids);
+
+void sr_c_add_weighted_f32(const float *a, const float *b, float *d, size_t n,
+                           float alpha, float beta, float gamma);
+
+void sr_c_add_weighted_u8(const uint8_t *a, const uint8_t *b, uint8_t *d, size_t n,
+                          float alpha, float beta, float gamma);
+
+// op: 0 = add, 1 = sub, 2 = absdiff
+void sr_c_add_u8(int32_t op, const uint8_t *a, const uint8_t *b, uint8_t *d, size_t n);
+
+// op: 0 = add, 1 = sub, 2 = absdiff; cn in 1..4; sc[0..cn-1] in 0..255
+void sr_c_add_scalar_u8(int32_t op, int32_t swap, const uint8_t *a, uint8_t *d,
+                        size_t n, int32_t cn, const uint8_t *sc);
+
+void sr_c_merge3_u8(const uint8_t *p0, ptrdiff_t s0,
+                    const uint8_t *p1, ptrdiff_t s1,
+                    const uint8_t *p2, ptrdiff_t s2,
+                    uint8_t *dst, ptrdiff_t dstep,
+                    int32_t w, int32_t h);
+
+double sr_c_arc_length_f32(const float *pts, int32_t n, int32_t closed);
+double sr_c_arc_length_s32(const int32_t *pts, int32_t n, int32_t closed);
+
+double sr_c_point_polygon_test_f32(const float *pts, int32_t n, double px, double py, int32_t measure_dist);
+double sr_c_point_polygon_test_s32(const int32_t *pts, int32_t n, double px, double py, int32_t measure_dist);
+
 #endif

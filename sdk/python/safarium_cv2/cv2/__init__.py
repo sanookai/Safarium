@@ -14,6 +14,7 @@ from ._geo import *  # noqa: F401,F403  (phase 4: geometry, contours, Hough, LSD
 from ._photo import *  # noqa: F401,F403  (phase 8: photo, inpaint, NLM, seamlessClone, NPR, HDR, Bayer)
 from ._io import *  # noqa: F401,F403
 from ._videoio import *  # noqa: F401,F403  (phase 6: wins over _io's VideoCapture)
+from ._phases9_16 import *  # noqa: F401,F403  (phases 9-16 + popular contrib: features2d, video, calib3d, objdetect, dnn, 3d, stitcher, flann, ccm, ximgproc, xphoto, tracking)
 from ._gpu import *  # noqa: F401,F403  (opt-in Metal paths; off by default)
 from . import utils  # noqa: F401
 

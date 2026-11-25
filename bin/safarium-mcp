@@ -764,16 +764,32 @@ TOOLS = [
     {
         "name": "transcode_supremacy",
         "description": (
-            "Wave 9 Apple Silicon native hardware transcode: 10-bit HEVC (4:2:0/4:2:2/4:4:4) & 6 ProRes tiers, "
+            "Wave 9/10 Apple Silicon native hardware transcode: 19 one-flag Encoding Scenarios (youtube, "
+            "youtube-4k, shorts, tiktok, reels, web-streaming, web-compat, screen-recording, cinema-master, "
+            "cinema-vfx, transparent-vfx, hdr-dolby-vision, hdr10, spatial-visionos, archival, "
+            "live-low-latency, podcast-video, webp-clip, gif-clip), 10-bit HEVC (4:2:0/4:2:2/4:4:4) & 6 ProRes tiers, "
             "SpatialAQ, LookAhead, ConstantQualityFactor (CQF), True 2-Pass VTMultiPassStorage, Safarium Mini-CAE "
-            "per-shot adaptive + multi-engine parallel encoding, Dolby Vision 8.4/HDR10/HLG/Apple Log, and "
-            "zero-copy VTFrameProcessor temporal denoise / optical-flow retiming."
+            "per-shot adaptive + multi-engine parallel encoding, Dolby Vision 8.4/HDR10/HLG/Apple Log, "
+            "HDR->SDR hardware tone-mapping, and zero-copy VTFrameProcessor temporal denoise / optical-flow retiming."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "input_path": {"type": "string", "description": "Path to source video file."},
-                "output_path": {"type": "string", "description": "Destination .mp4 or .mov path."},
+                "output_path": {"type": "string", "description": "Destination .mp4, .mov, .webp, or .gif path."},
+                "scenario": {
+                    "type": "string",
+                    "enum": [
+                        "youtube", "youtube-4k", "shorts", "tiktok", "reels",
+                        "web-streaming", "web-compat", "screen-recording",
+                        "cinema-master", "cinema-vfx", "transparent-vfx",
+                        "hdr-dolby-vision", "hdr10", "spatial-visionos",
+                        "archival", "live-low-latency", "podcast-video",
+                        "webp-clip", "gif-clip",
+                    ],
+                    "description": "Optional Wave 10 preset scenario (sets optimal codec, mode, bitrate, HDR, audio; explicit params override).",
+                },
+                "tonemap_sdr": {"type": "boolean", "description": "Hardware CoreImage HDR->SDR BT.709 tone-mapping before encode."},
                 "codec": {
                     "type": "string",
                     "enum": [
@@ -790,12 +806,12 @@ TOOLS = [
                         "prores4444",
                         "prores4444xq",
                     ],
-                    "description": "Target native Apple hardware codec. Default 'hevc-10bit'.",
+                    "description": "Target native Apple hardware codec (default 'hevc-10bit' when scenario is omitted).",
                 },
                 "mode": {
                     "type": "string",
                     "enum": ["fast", "balanced", "high-quality", "cqf", "2pass", "mini-cae"],
-                    "description": "Wave 9 encoding mode. Default 'high-quality'.",
+                    "description": "Wave 9 encoding mode (default 'high-quality' when scenario is omitted).",
                 },
                 "bitrate": {"type": "integer", "minimum": 100000, "description": "Target video bitrate in bps."},
                 "cqf": {"type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Constant Quality Factor (0.0..1.0) for CQF mode."},
@@ -823,6 +839,112 @@ TOOLS = [
                     "minimum": MIN_TIMEOUT_SEC,
                     "maximum": MAX_TIMEOUT_SEC,
                     "description": "Maximum timeout in seconds (default 600, max 1800).",
+                },
+            },
+            "required": ["input_path", "output_path"],
+            "additionalProperties": False,
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "list_scenarios",
+        "description": (
+            "List all 19 Wave 10 built-in video encoding scenario presets (youtube, youtube-4k, shorts, "
+            "tiktok, reels, web-streaming, web-compat, screen-recording, cinema-master, cinema-vfx, "
+            "transparent-vfx, hdr-dolby-vision, hdr10, spatial-visionos, archival, live-low-latency, "
+            "podcast-video, webp-clip, gif-clip) or inspect one scenario's full hardware profile (non-blocking FIFO bypass)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "scenario": {
+                    "type": "string",
+                    "description": "Optional scenario name or alias to inspect a single profile.",
+                },
+            },
+            "additionalProperties": False,
+        },
+        "annotations": READONLY_ANNOTATIONS,
+    },
+    {
+        "name": "package_hls",
+        "description": (
+            "Native 0%-FFmpeg Apple Silicon HLS / CMAF ABR ladder packager. Encodes multiple rungs "
+            "(360p/480p/720p/1080p/1440p/2160p) into RFC 8216 v7 fMP4/CMAF (init.mp4 + seg_*.m4s) or "
+            "v3 MPEG-TS segments with master.m3u8 and optional WebVTT subtitles via the SF-VIDEO-1 FIFO queue."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "input_path": {"type": "string", "description": "Path to source video file."},
+                "output_dir": {"type": "string", "description": "Destination directory for master.m3u8 and variant folders."},
+                "format": {
+                    "type": "string",
+                    "enum": ["fmp4", "ts"],
+                    "description": "Segment container format ('fmp4' CMAF default, or 'ts' MPEG-TS).",
+                },
+                "codec": {
+                    "type": "string",
+                    "enum": ["h264", "hevc", "hevc-10bit"],
+                    "description": "Hardware video codec for ABR rungs. Default 'hevc-10bit'.",
+                },
+                "segment_sec": {"type": "number", "exclusiveMinimum": 0.4, "maximum": 30.0, "description": "Target segment duration in seconds (default 4.0)."},
+                "rungs": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["360p", "480p", "720p", "1080p", "1440p", "2160p"]},
+                    "description": "Optional list of ABR rungs (default 360p..2160p filtered to <= source height).",
+                },
+                "fps": {"type": "number", "exclusiveMinimum": 0.0, "maximum": 120.0, "description": "Target frame rate (default 30)."},
+                "subtitles_vtt_path": {"type": "string", "description": "Optional WebVTT (.vtt) subtitle file path."},
+                "subtitle_lang": {"type": "string", "description": "Subtitle BCP-47 language tag (e.g. 'en', 'th'). Default 'en'."},
+                "subtitle_name": {"type": "string", "description": "Human-readable subtitle track name (default 'English')."},
+                "timeout_sec": {
+                    "type": "integer",
+                    "minimum": MIN_TIMEOUT_SEC,
+                    "maximum": MAX_TIMEOUT_SEC,
+                    "description": "Maximum timeout in seconds (default 600, max 1800).",
+                },
+            },
+            "required": ["input_path", "output_dir"],
+            "additionalProperties": False,
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "export_animated_clip",
+        "description": (
+            "Export a video clip directly to Animated WebP (spec-compliant RIFF VP8X+ANIM+ANMF+VP8L), "
+            "Animated GIF, or APNG using 100% native Apple frameworks (0% FFmpeg) via the SF-VIDEO-1 FIFO queue."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "input_path": {"type": "string", "description": "Path to source video file."},
+                "output_path": {"type": "string", "description": "Destination .webp, .gif, or .png file path."},
+                "format": {
+                    "type": "string",
+                    "enum": ["webp", "gif", "apng"],
+                    "description": "Output animated format (inferred from output_path extension if omitted).",
+                },
+                "fps": {"type": "number", "exclusiveMinimum": 0.0, "maximum": 60.0, "description": "Sampled animation frame rate (default 12)."},
+                "max_width": {"type": "integer", "minimum": 16, "maximum": 2048, "description": "Maximum output width in pixels (default 640)."},
+                "max_duration": {"type": "number", "exclusiveMinimum": 0.0, "maximum": 120.0, "description": "Optional duration cap in seconds."},
+                "overwrite": {"type": "boolean", "description": "Allow overwriting existing output_path. Default false."},
+                "timeout_sec": {
+                    "type": "integer",
+                    "minimum": MIN_TIMEOUT_SEC,
+                    "maximum": MAX_TIMEOUT_SEC,
+                    "description": "Maximum timeout in seconds (default 300, max 1800).",
                 },
             },
             "required": ["input_path", "output_path"],
@@ -1217,24 +1339,46 @@ def _handle_tool_call(name, arguments, *, progress_token=None, negotiated_versio
                 arguments.get("output_path"), "output_path", must_not_exist=not overwrite, parent_must_exist=True
             )
             timeout_sec = _validate_timeout(arguments, 600)
+            allowed_scenarios = {
+                "youtube", "youtube-4k", "shorts", "tiktok", "reels",
+                "web-streaming", "web-compat", "screen-recording",
+                "cinema-master", "cinema-vfx", "transparent-vfx",
+                "hdr-dolby-vision", "hdr10", "spatial-visionos",
+                "archival", "live-low-latency", "podcast-video",
+                "webp-clip", "gif-clip",
+            }
             allowed_codecs = {
                 "h264", "hevc", "hevc-alpha", "hevc-10bit", "hevc-422-10", "hevc-444-10",
                 "prores-proxy", "prores-lt", "prores422", "prores422hq", "prores4444", "prores4444xq",
             }
-            codec = _validate_enum(arguments.get("codec", "hevc-10bit"), "codec", allowed_codecs)
-            mode = _validate_enum(
-                arguments.get("mode", "high-quality"),
-                "mode",
-                {"fast", "balanced", "high-quality", "cqf", "2pass", "mini-cae"},
-            )
+            scenario = None
+            if arguments.get("scenario") is not None:
+                scenario = _validate_enum(arguments["scenario"], "scenario", allowed_scenarios)
             argv = [
                 "forge", "transcode", in_path,
                 "--output", out_path,
-                "--codec", codec,
-                "--mode", mode,
                 "--progress", "jsonl",
                 "--json-errors",
             ]
+            if scenario is not None:
+                argv.extend(["--scenario", scenario])
+                if arguments.get("codec") is not None:
+                    argv.extend(["--codec", _validate_enum(arguments["codec"], "codec", allowed_codecs)])
+                if arguments.get("mode") is not None:
+                    argv.extend([
+                        "--mode",
+                        _validate_enum(arguments["mode"], "mode", {"fast", "balanced", "high-quality", "cqf", "2pass", "mini-cae"}),
+                    ])
+            else:
+                codec = _validate_enum(arguments.get("codec", "hevc-10bit"), "codec", allowed_codecs)
+                mode = _validate_enum(
+                    arguments.get("mode", "high-quality"),
+                    "mode",
+                    {"fast", "balanced", "high-quality", "cqf", "2pass", "mini-cae"},
+                )
+                argv.extend(["--codec", codec, "--mode", mode])
+            if _validate_bool(arguments.get("tonemap_sdr", False), "tonemap_sdr"):
+                argv.append("--tonemap-sdr")
             if arguments.get("bitrate") is not None:
                 argv.extend(["--bitrate", str(_validate_int(arguments["bitrate"], "bitrate", lo=100000))])
             if arguments.get("cqf") is not None:
@@ -1269,6 +1413,84 @@ def _handle_tool_call(name, arguments, *, progress_token=None, negotiated_versio
                 argv.append("--overwrite")
             exe = _require_render_bin()
             res = _run_subprocess(exe, argv, timeout_sec=timeout_sec, progress_token=progress_token)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "list_scenarios":
+            exe = _require_render_bin()
+            argv = ["forge", "scenarios", "--json-errors"]
+            if arguments.get("scenario") is not None:
+                sc = arguments["scenario"]
+                if not isinstance(sc, str) or not sc.strip():
+                    raise ValueError("'scenario' must be a non-empty string")
+                argv.extend(["--scenario", sc.strip()])
+            res = _run_subprocess(exe, argv, timeout_sec=15)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "package_hls":
+            in_path = _validate_path(arguments.get("input_path"), "input_path", must_exist=True)
+            out_dir = _validate_path(arguments.get("output_dir"), "output_dir", parent_must_exist=True)
+            timeout_sec = _validate_timeout(arguments, 600)
+            fmt = _validate_enum(arguments.get("format", "fmp4"), "format", {"fmp4", "ts"})
+            codec = _validate_enum(arguments.get("codec", "hevc-10bit"), "codec", {"h264", "hevc", "hevc-10bit"})
+            argv = [
+                "forge", "hls", in_path,
+                "--output", out_dir,
+                "--format", fmt,
+                "--codec", codec,
+                "--json-errors",
+            ]
+            if arguments.get("segment_sec") is not None:
+                argv.extend(["--segment-sec", str(_validate_number(arguments["segment_sec"], "segment_sec", lo=0.5, hi=30.0))])
+            if arguments.get("rungs") is not None:
+                rungs = arguments["rungs"]
+                allowed_rungs = {"360p", "480p", "720p", "1080p", "1440p", "2160p"}
+                if not isinstance(rungs, list) or not rungs:
+                    raise ValueError("'rungs' must be a non-empty list of rung names")
+                cleaned = [_validate_enum(r, "rungs[]", allowed_rungs) for r in rungs]
+                argv.extend(["--rungs", ",".join(cleaned)])
+            if arguments.get("fps") is not None:
+                argv.extend(["--fps", str(_validate_number(arguments["fps"], "fps", exclusive_lo=0.0, hi=120.0))])
+            if arguments.get("subtitles_vtt_path") is not None:
+                vtt = _validate_path(arguments["subtitles_vtt_path"], "subtitles_vtt_path", must_exist=True)
+                argv.extend(["--subtitles", vtt])
+            if arguments.get("subtitle_lang") is not None:
+                slang = arguments["subtitle_lang"]
+                if not isinstance(slang, str) or not slang.strip():
+                    raise ValueError("'subtitle_lang' must be a non-empty string")
+                argv.extend(["--subtitle-lang", slang.strip()])
+            if arguments.get("subtitle_name") is not None:
+                sname = arguments["subtitle_name"]
+                if not isinstance(sname, str) or not sname.strip():
+                    raise ValueError("'subtitle_name' must be a non-empty string")
+                argv.extend(["--subtitle-name", sname.strip()])
+            exe = _require_render_bin()
+            res = _run_subprocess(exe, argv, timeout_sec=timeout_sec)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "export_animated_clip":
+            in_path = _validate_path(arguments.get("input_path"), "input_path", must_exist=True)
+            overwrite = _validate_bool(arguments.get("overwrite", False), "overwrite")
+            out_path = _validate_path(
+                arguments.get("output_path"), "output_path", must_not_exist=not overwrite, parent_must_exist=True
+            )
+            timeout_sec = _validate_timeout(arguments, 300)
+            argv = [
+                "forge", "clip", in_path,
+                "--output", out_path,
+                "--json-errors",
+            ]
+            if arguments.get("format") is not None:
+                argv.extend(["--format", _validate_enum(arguments["format"], "format", {"webp", "gif", "apng"})])
+            if arguments.get("fps") is not None:
+                argv.extend(["--fps", str(_validate_number(arguments["fps"], "fps", exclusive_lo=0.0, hi=60.0))])
+            if arguments.get("max_width") is not None:
+                argv.extend(["--max-width", str(_validate_int(arguments["max_width"], "max_width", lo=16, hi=2048))])
+            if arguments.get("max_duration") is not None:
+                argv.extend(["--max-duration", str(_validate_number(arguments["max_duration"], "max_duration", exclusive_lo=0.0, hi=120.0))])
+            if overwrite:
+                argv.append("--overwrite")
+            exe = _require_render_bin()
+            res = _run_subprocess(exe, argv, timeout_sec=timeout_sec)
             return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
 
         if name == "audio_encode":

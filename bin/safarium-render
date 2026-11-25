@@ -668,7 +668,7 @@ def is_readonly_forge(args):
     if clean in (["--help"], ["-h"], ["help"], ["--version"], ["-v"], ["version"]):
         return True
     sub = clean[0]
-    if sub in ("schema", "validate", "inspect", "probe"):
+    if sub in ("schema", "validate", "inspect", "probe", "scenarios"):
         return True
     if sub == "cache" and len(clean) >= 2 and clean[1] == "stats":
         return True

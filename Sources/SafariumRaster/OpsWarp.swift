@@ -326,8 +326,15 @@ private func dispatch(_ src: SRImage, _ f8: () -> Void, _ f16: () -> Void, _ ff:
     switch src.depth { case .u8: f8(); case .u16: f16(); default: ff() }
 }
 
+@inline(__always)
 private func validBorder(_ b: Int32) -> Bool {
-    [SR_BORDER_CONSTANT, SR_BORDER_REPLICATE, SR_BORDER_REFLECT, SR_BORDER_WRAP, SR_BORDER_REFLECT_101, SR_BORDER_TRANSPARENT].contains(b)
+    switch b {
+    case SR_BORDER_CONSTANT, SR_BORDER_REPLICATE, SR_BORDER_REFLECT,
+         SR_BORDER_WRAP, SR_BORDER_REFLECT_101, SR_BORDER_TRANSPARENT:
+        return true
+    default:
+        return false
+    }
 }
 
 @_silgen_name("sr_c_warp_affine")
@@ -364,21 +371,27 @@ public func sr_warp_affine(_ sd: UnsafeMutableRawPointer?, _ sw: Int32, _ sh: In
     guard src.depth == .u8 || src.depth == .u16 || src.depth == .f32 else {
         return srFail(SRStatus.unsupported, "warpAffine: only u8, u16 and f32 images are supported")
     }
-    var m = (0..<6).map { matrix[$0] }
-    if flags & 16 == 0 {
-        var d = m[0] * m[4] - m[1] * m[3]
-        d = d != 0 ? 1.0 / d : 0
-        let a11 = m[4] * d, a22 = m[0] * d, a12 = -m[1] * d, a21 = -m[3] * d
-        let b1 = -a11 * m[2] - a12 * m[5], b2 = -a21 * m[2] - a22 * m[5]
-        m = [a11, a12, b1, a21, a22, b2]
-    }
     var interp = Int32(flags & 7)
     if interp == 3 { interp = 1 }  // INTER_AREA behaves as linear in warps
     guard interp <= 2 || interp == 4 else { return srFail(SRStatus.unsupported, "warpAffine: interpolation not supported") }
     guard validBorder(borderMode) else { return srFail(SRStatus.unsupported, "warpAffine: unknown border mode") }
-    let rc = m.withUnsafeBufferPointer { mp in
-        sr_c_warp_affine(src.data, src.stride, sw, sh, dst.data, dst.stride, dw, dh,
-                         sc, sdep, mp.baseAddress!, interp, borderMode, borderValue)
+    let rc: Int32
+    if flags & 16 != 0 {
+        rc = sr_c_warp_affine(src.data, src.stride, sw, sh, dst.data, dst.stride, dw, dh,
+                              sc, sdep, matrix, interp, borderMode, borderValue)
+    } else {
+        let m0 = matrix[0], m1 = matrix[1], m2 = matrix[2]
+        let m3 = matrix[3], m4 = matrix[4], m5 = matrix[5]
+        var d = m0 * m4 - m1 * m3
+        d = d != 0 ? 1.0 / d : 0
+        let a11 = m4 * d, a22 = m0 * d, a12 = -m1 * d, a21 = -m3 * d
+        let b1 = -a11 * m2 - a12 * m5, b2 = -a21 * m2 - a22 * m5
+        var inv = (a11, a12, b1, a21, a22, b2)
+        rc = withUnsafeBytes(of: &inv) { raw in
+            sr_c_warp_affine(src.data, src.stride, sw, sh, dst.data, dst.stride, dw, dh,
+                             sc, sdep, raw.baseAddress!.assumingMemoryBound(to: Double.self),
+                             interp, borderMode, borderValue)
+        }
     }
     return rc == 0 ? SRStatus.ok : srFail(SRStatus.internalError, "warpAffine failed")
 }
@@ -458,22 +471,31 @@ public func sr_warp_perspective(_ sd: UnsafeMutableRawPointer?, _ sw: Int32, _ s
     guard src.depth == .u8 || src.depth == .u16 || src.depth == .f32 else {
         return srFail(SRStatus.unsupported, "warpPerspective: only u8, u16 and f32 images are supported")
     }
-    var m = (0..<9).map { matrix[$0] }
-    if flags & 16 == 0 {
-        let c00 = m[4]*m[8] - m[5]*m[7], c01 = m[5]*m[6] - m[3]*m[8], c02 = m[3]*m[7] - m[4]*m[6]
-        let c10 = m[2]*m[7] - m[1]*m[8], c11 = m[0]*m[8] - m[2]*m[6], c12 = m[1]*m[6] - m[0]*m[7]
-        let c20 = m[1]*m[5] - m[2]*m[4], c21 = m[2]*m[3] - m[0]*m[5], c22 = m[0]*m[4] - m[1]*m[3]
-        let det = m[0]*c00 + m[1]*c01 + m[2]*c02
-        let invDet = det != 0.0 ? (1.0 / det) : 0.0
-        m = [c00*invDet, c10*invDet, c20*invDet, c01*invDet, c11*invDet, c21*invDet, c02*invDet, c12*invDet, c22*invDet]
-    }
     var interp = Int32(flags & 7)
     if interp == 3 { interp = 1 }
     guard interp <= 2 || interp == 4 else { return srFail(SRStatus.unsupported, "warpPerspective: interpolation not supported") }
     guard validBorder(borderMode) else { return srFail(SRStatus.unsupported, "warpPerspective: unknown border mode") }
-    let rc = m.withUnsafeBufferPointer { mp in
-        sr_c_warp_perspective(src.data, src.stride, sw, sh, dst.data, dst.stride, dw, dh,
-                              sc, sdep, mp.baseAddress!, interp, borderMode, borderValue)
+    let rc: Int32
+    if flags & 16 != 0 {
+        rc = sr_c_warp_perspective(src.data, src.stride, sw, sh, dst.data, dst.stride, dw, dh,
+                                   sc, sdep, matrix, interp, borderMode, borderValue)
+    } else {
+        let m0 = matrix[0], m1 = matrix[1], m2 = matrix[2]
+        let m3 = matrix[3], m4 = matrix[4], m5 = matrix[5]
+        let m6 = matrix[6], m7 = matrix[7], m8 = matrix[8]
+        let c00 = m4*m8 - m5*m7, c01 = m5*m6 - m3*m8, c02 = m3*m7 - m4*m6
+        let c10 = m2*m7 - m1*m8, c11 = m0*m8 - m2*m6, c12 = m1*m6 - m0*m7
+        let c20 = m1*m5 - m2*m4, c21 = m2*m3 - m0*m5, c22 = m0*m4 - m1*m3
+        let det = m0*c00 + m1*c01 + m2*c02
+        let invDet = det != 0.0 ? (1.0 / det) : 0.0
+        var inv = (c00*invDet, c10*invDet, c20*invDet,
+                   c01*invDet, c11*invDet, c21*invDet,
+                   c02*invDet, c12*invDet, c22*invDet)
+        rc = withUnsafeBytes(of: &inv) { raw in
+            sr_c_warp_perspective(src.data, src.stride, sw, sh, dst.data, dst.stride, dw, dh,
+                                  sc, sdep, raw.baseAddress!.assumingMemoryBound(to: Double.self),
+                                  interp, borderMode, borderValue)
+        }
     }
     return rc == 0 ? SRStatus.ok : srFail(SRStatus.internalError, "warpPerspective failed")
 }

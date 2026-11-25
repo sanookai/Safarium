@@ -363,6 +363,10 @@ def _collect_export_pairs(source: Path) -> tuple[list[tuple[Path, str]], list[st
         source / "bench/experiments/2026-11-25-wave9-supremacy/results.json",
         "bench/experiments/2026-11-25-wave9-supremacy/results.json",
     )
+    add_file(
+        source / "bench/experiments/2026-11-25-wave10-complete/results.json",
+        "bench/experiments/2026-11-25-wave10-complete/results.json",
+    )
 
     return pairs, sorted(set(excluded))
 

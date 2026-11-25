@@ -8,6 +8,25 @@ import SafariumRasterC
 
 public enum CoreArithOp: Int32 { case add = 0, sub = 1, absdiff = 2, mul = 3, div = 4 }
 
+@_silgen_name("sr_c_add_weighted_f32")
+private func sr_c_add_weighted_f32(_ a: UnsafePointer<Float>, _ b: UnsafePointer<Float>,
+                                   _ d: UnsafeMutablePointer<Float>, _ n: Int,
+                                   _ alpha: Float, _ beta: Float, _ gamma: Float)
+
+@_silgen_name("sr_c_add_weighted_u8")
+private func sr_c_add_weighted_u8(_ a: UnsafePointer<UInt8>, _ b: UnsafePointer<UInt8>,
+                                  _ d: UnsafeMutablePointer<UInt8>, _ n: Int,
+                                  _ alpha: Float, _ beta: Float, _ gamma: Float)
+
+@_silgen_name("sr_c_add_u8")
+private func sr_c_add_u8(_ op: Int32, _ a: UnsafePointer<UInt8>, _ b: UnsafePointer<UInt8>,
+                         _ d: UnsafeMutablePointer<UInt8>, _ n: Int)
+
+@_silgen_name("sr_c_add_scalar_u8")
+private func sr_c_add_scalar_u8(_ op: Int32, _ swap: Int32, _ a: UnsafePointer<UInt8>,
+                                _ d: UnsafeMutablePointer<UInt8>, _ n: Int,
+                                _ cn: Int32, _ sc: UnsafePointer<UInt8>)
+
 // MARK: - fast same-type kernels
 
 func fastInt<T: CoreInt>(_ op: CoreArithOp, _ a: UnsafePointer<T>, _ b: UnsafePointer<T>,
@@ -51,10 +70,16 @@ private func arithFast(_ op: CoreArithOp, _ a: CoreMat, _ b: CoreMat, _ dst: Cor
     for y in 0..<rows {
         let pa = a.row(y), pb = b.row(y), pd = dst.row(y)
         switch a.depth {
-        case 0, 1, 2, 3:
+        case 0:
+            if op == .mul {
+                fastInt(op, pa.assumingMemoryBound(to: UInt8.self), pb.assumingMemoryBound(to: UInt8.self), pd.assumingMemoryBound(to: UInt8.self), len, UInt8.self)
+            } else {
+                sr_c_add_u8(Int32(op.rawValue), pa.assumingMemoryBound(to: UInt8.self),
+                            pb.assumingMemoryBound(to: UInt8.self), pd.assumingMemoryBound(to: UInt8.self), len)
+            }
+        case 1, 2, 3:
             if op == .mul {
                 switch a.depth {   // exact integer products, saturated (scale == 1)
-                case 0: fastInt(op, pa.assumingMemoryBound(to: UInt8.self), pb.assumingMemoryBound(to: UInt8.self), pd.assumingMemoryBound(to: UInt8.self), len, UInt8.self)
                 case 1: fastInt(op, pa.assumingMemoryBound(to: Int8.self), pb.assumingMemoryBound(to: Int8.self), pd.assumingMemoryBound(to: Int8.self), len, Int8.self)
                 case 2: fastInt(op, pa.assumingMemoryBound(to: UInt16.self), pb.assumingMemoryBound(to: UInt16.self), pd.assumingMemoryBound(to: UInt16.self), len, UInt16.self)
                 default: fastInt(op, pa.assumingMemoryBound(to: Int16.self), pb.assumingMemoryBound(to: Int16.self), pd.assumingMemoryBound(to: Int16.self), len, Int16.self)
@@ -197,21 +222,31 @@ public func sr_core_arith(_ op: Int32, _ a: MatP?, _ b: MatP?, _ scalar: UnsafeP
     } else if scalar == nil { return srFail(SRStatus.badArgument, "arith: no second operand") }
     if let b = b, mm == nil, arithFast(aop, a, b, dst, scale) { return 0 }
     // absdiff with an integer-valued scalar converts it to the array depth first (saturating cast).
-    var sc = [Double](repeating: 0, count: 4)
+    var sc = (0.0, 0.0, 0.0, 0.0)
     var scale = scale
     if aop == .mul, let s = scalar {   // cv2 folds the scale into the scalar operand: a * (scale * s)
-        for c in 0..<4 { sc[c] = scale * s[c] }
+        sc = (scale * s[0], scale * s[1], scale * s[2], scale * s[3])
         scale = 1.0
     } else if let s = scalar {
-        var allInt = true
-        for c in 0..<4 where !(s[c] == s[c].rounded() && abs(s[c]) < 9e15) { allInt = false }
+        let s0 = s[0], s1 = s[1], s2 = s[2], s3 = s[3]
+        let allInt = (s0 == s0.rounded() && abs(s0) < 9e15) &&
+                     (s1 == s1.rounded() && abs(s1) < 9e15) &&
+                     (s2 == s2.rounded() && abs(s2) < 9e15) &&
+                     (s3 == s3.rounded() && abs(s3) < 9e15)
         let cast = aop == .absdiff && (a.depth >= 5 || allInt)
-        for c in 0..<4 { sc[c] = cast ? castScalar(s[c], a.depth) : s[c] }
+        if cast {
+            sc = (castScalar(s0, a.depth), castScalar(s1, a.depth), castScalar(s2, a.depth), castScalar(s3, a.depth))
+        } else {
+            sc = (s0, s1, s2, s3)
+        }
     }
     let hasScalar = scalar != nil
     if hasScalar, mm == nil, a.depth <= 3, dst.depth == a.depth, aop == .add || aop == .sub || aop == .absdiff,
        arithScalarFast(aop, a, sc, swap != 0, dst) { return 0 }
-    sc.withUnsafeBufferPointer { arithGeneric(aop, a, b, hasScalar ? $0.baseAddress : nil, swap != 0, dst, mm, scale) }
+    withUnsafeBytes(of: &sc) { raw in
+        let ptr = raw.baseAddress!.assumingMemoryBound(to: Double.self)
+        arithGeneric(aop, a, b, hasScalar ? ptr : nil, swap != 0, dst, mm, scale)
+    }
     return 0
 }
 
@@ -244,10 +279,22 @@ public func sr_core_addweighted(_ a: MatP?, _ alpha: Double, _ b: MatP?, _ beta:
     let al = Float(alpha), be = Float(beta), ga = Float(gamma)
     if same && (a.depth == 0 || a.depth == 5) {
         let flat = packed(a) && packed(b) && packed(dst)
-        for y in 0..<(flat ? 1 : dst.rows) {
-            let len = flat ? n * a.rows : n
-            if a.depth == 0 { src_addw_u8(a.row(y), b.row(y), dst.row(y), len, al, be, ga) }
-            else { src_addw_f32(a.row(y).assumingMemoryBound(to: Float.self), b.row(y).assumingMemoryBound(to: Float.self), dst.row(y).assumingMemoryBound(to: Float.self), len, al, be, ga) }
+        let rows = flat ? 1 : dst.rows
+        let len = flat ? n * a.rows : n
+        if a.depth == 0 {
+            for y in 0..<rows {
+                sr_c_add_weighted_u8(a.row(y).assumingMemoryBound(to: UInt8.self),
+                                     b.row(y).assumingMemoryBound(to: UInt8.self),
+                                     dst.row(y).assumingMemoryBound(to: UInt8.self),
+                                     len, al, be, ga)
+            }
+        } else {
+            for y in 0..<rows {
+                sr_c_add_weighted_f32(a.row(y).assumingMemoryBound(to: Float.self),
+                                      b.row(y).assumingMemoryBound(to: Float.self),
+                                      dst.row(y).assumingMemoryBound(to: Float.self),
+                                      len, al, be, ga)
+            }
         }
         return 0
     }
@@ -342,20 +389,43 @@ public func sr_core_convert(_ src: MatP?, _ dst: MatP?, _ alpha: Double, _ beta:
 
 
 /// Integer array +/-/absdiff an integer-valued scalar that fits the element type: one saturating typed pass.
-private func arithScalarFast(_ op: CoreArithOp, _ a: CoreMat, _ sc: [Double], _ swap: Bool, _ dst: CoreMat) -> Bool {
+private func arithScalarFast(_ op: CoreArithOp, _ a: CoreMat, _ sc: (Double, Double, Double, Double), _ swap: Bool, _ dst: CoreMat) -> Bool {
     let lo: Double, hi: Double
     switch a.depth { case 0: (lo, hi) = (0, 255); case 1: (lo, hi) = (-128, 127); case 2: (lo, hi) = (0, 65535); default: (lo, hi) = (-32768, 32767) }
-    for c in 0..<4 where !(sc[c] == sc[c].rounded() && sc[c] >= lo && sc[c] <= hi) { return false }
+    guard sc.0 == sc.0.rounded() && sc.0 >= lo && sc.0 <= hi &&
+          sc.1 == sc.1.rounded() && sc.1 >= lo && sc.1 <= hi &&
+          sc.2 == sc.2.rounded() && sc.2 >= lo && sc.2 <= hi &&
+          sc.3 == sc.3.rounded() && sc.3 >= lo && sc.3 <= hi else { return false }
     let n = a.n, cn = Int(a.cn)
+    if a.depth == 0 && cn <= 4 {
+        var s4 = (UInt8.satD(sc.0), UInt8.satD(sc.1), UInt8.satD(sc.2), UInt8.satD(sc.3))
+        let flat = packed(a) && packed(dst)
+        let rows = flat ? 1 : a.rows
+        let len = flat ? n * a.rows : n
+        let opRaw = Int32(op.rawValue), swRaw: Int32 = swap ? 1 : 0, cn32 = Int32(cn)
+        withUnsafeBytes(of: &s4) { raw in
+            let sp = raw.baseAddress!.assumingMemoryBound(to: UInt8.self)
+            for y in 0..<rows {
+                sr_c_add_scalar_u8(opRaw, swRaw,
+                                   a.row(y).assumingMemoryBound(to: UInt8.self),
+                                   dst.row(y).assumingMemoryBound(to: UInt8.self),
+                                   len, cn32, sp)
+            }
+        }
+        return true
+    }
+    @inline(__always) func scAt(_ c: Int) -> Double {
+        switch c { case 0: return sc.0; case 1: return sc.1; case 2: return sc.2; default: return sc.3 }
+    }
     if cn <= 4 {
         // 48-byte pattern stream (period cn divides it for 1- and 2-byte elements): constants stay in registers
         var pat = [UInt8](repeating: 0, count: 48)
         pat.withUnsafeMutableBytes { raw in
             switch a.depth {
-            case 0: for i in 0..<48 { raw.storeBytes(of: UInt8.satD(sc[i % cn]), toByteOffset: i, as: UInt8.self) }
-            case 1: for i in 0..<48 { raw.storeBytes(of: Int8.satD(sc[i % cn]), toByteOffset: i, as: Int8.self) }
-            case 2: for i in 0..<24 { raw.storeBytes(of: UInt16.satD(sc[i % cn]), toByteOffset: i * 2, as: UInt16.self) }
-            default: for i in 0..<24 { raw.storeBytes(of: Int16.satD(sc[i % cn]), toByteOffset: i * 2, as: Int16.self) }
+            case 0: for i in 0..<48 { raw.storeBytes(of: UInt8.satD(scAt(i % cn)), toByteOffset: i, as: UInt8.self) }
+            case 1: for i in 0..<48 { raw.storeBytes(of: Int8.satD(scAt(i % cn)), toByteOffset: i, as: Int8.self) }
+            case 2: for i in 0..<24 { raw.storeBytes(of: UInt16.satD(scAt(i % cn)), toByteOffset: i * 2, as: UInt16.self) }
+            default: for i in 0..<24 { raw.storeBytes(of: Int16.satD(scAt(i % cn)), toByteOffset: i * 2, as: Int16.self) }
             }
         }
         pat.withUnsafeBufferPointer { pp in
@@ -366,7 +436,7 @@ private func arithScalarFast(_ op: CoreArithOp, _ a: CoreMat, _ sc: [Double], _ 
     func run<T: CoreInt>(_ t: T.Type) {
         let pat = Scratch(n * MemoryLayout<T>.stride)
         let pp = pat.ptr(T.self)
-        for x in 0..<a.cols { for c in 0..<cn { pp[x * cn + c] = T.satD(sc[c]) } }
+        for x in 0..<a.cols { for c in 0..<cn { pp[x * cn + c] = T.satD(scAt(c)) } }
         for y in 0..<a.rows {
             let ap = a.row(y), dp = dst.row(y)
             if swap { src_addsub(a.depth, Int32(op.rawValue), UnsafeRawPointer(pp), ap, dp, n) } else { src_addsub(a.depth, Int32(op.rawValue), ap, UnsafeRawPointer(pp), dp, n) }

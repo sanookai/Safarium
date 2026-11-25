@@ -1,0 +1,143 @@
+{
+  "wave": 10,
+  "date": "2026-11-25",
+  "machine": {
+    "os": "macOS-27.2-arm64-arm-64bit",
+    "arch": "arm64",
+    "chip": "Apple M5",
+    "ncpu": 10
+  },
+  "scenarios": {
+    "youtube": {
+      "elapsed_s": 2.393,
+      "fps": 62.7,
+      "realtime_x": 2.09,
+      "size_bytes": 7143278,
+      "size_mb": 6.81,
+      "video_codec": "hvc1",
+      "video_packets": 150,
+      "audio_codec": "aac ",
+      "sdr_verified": true
+    },
+    "web-compat": {
+      "elapsed_s": 1.977,
+      "fps": 75.9,
+      "realtime_x": 2.53,
+      "size_bytes": 3015093,
+      "size_mb": 2.88,
+      "video_codec": "avc1",
+      "video_packets": 143,
+      "audio_codec": "aac ",
+      "sdr_verified": true
+    },
+    "live-low-latency": {
+      "elapsed_s": 1.345,
+      "fps": 111.5,
+      "realtime_x": 3.72,
+      "size_bytes": 3009565,
+      "size_mb": 2.87,
+      "video_codec": "avc1",
+      "video_packets": 150,
+      "audio_codec": "aac ",
+      "sdr_verified": true
+    },
+    "cinema-master": {
+      "elapsed_s": 1.545,
+      "fps": 97.1,
+      "realtime_x": 3.24,
+      "size_bytes": 124017648,
+      "size_mb": 118.27,
+      "video_codec": "apch",
+      "video_packets": 150,
+      "audio_codec": "lpcm",
+      "sdr_verified": false
+    },
+    "hdr-dolby-vision": {
+      "elapsed_s": 3.174,
+      "fps": 47.3,
+      "realtime_x": 1.58,
+      "size_bytes": 17779347,
+      "size_mb": 16.96,
+      "video_codec": "hvc1",
+      "video_packets": 150,
+      "audio_codec": "aac ",
+      "sdr_verified": false
+    },
+    "podcast-video": {
+      "elapsed_s": 2.247,
+      "fps": 66.8,
+      "realtime_x": 2.23,
+      "size_bytes": 2043824,
+      "size_mb": 1.95,
+      "video_codec": "hvc1",
+      "video_packets": 150,
+      "audio_codec": "aac ",
+      "sdr_verified": true
+    }
+  },
+  "hls": {
+    "fmp4": {
+      "rungs": [
+        "1080p",
+        "720p",
+        "480p"
+      ],
+      "elapsed_s": 2.093,
+      "realtime_x": 2.39,
+      "total_bytes": 4727380,
+      "segment_count": 9,
+      "has_master_m3u8": true,
+      "has_subtitles": true
+    },
+    "ts": {
+      "rungs": [
+        "720p",
+        "480p"
+      ],
+      "elapsed_s": 0.969,
+      "realtime_x": 5.16,
+      "total_bytes": 3007414,
+      "segment_count": 6,
+      "has_master_m3u8": true,
+      "has_subtitles": false
+    }
+  },
+  "animated_clips": {
+    "webp": {
+      "elapsed_s": 0.811,
+      "size_bytes": 11936192,
+      "size_kb": 11656.4
+    },
+    "gif": {
+      "elapsed_s": 0.555,
+      "size_bytes": 582486,
+      "size_kb": 568.8
+    },
+    "apng": {
+      "elapsed_s": 0.661,
+      "size_bytes": 4363305,
+      "size_kb": 4261.0
+    }
+  },
+  "raster_1t_neon": {
+    "cc8_1080p_ms": 0.557,
+    "cc8_withStats_1080p_ms": 0.805,
+    "cc4_withStats_1080p_ms": 0.495,
+    "addWeighted_f32_1080p_ms": 0.727,
+    "addWeighted_u8_1080p_ms": 0.999,
+    "add_u8_1080p_ms": 0.174,
+    "merge_3ch_1080p_ms": 0.124,
+    "gray2bgr_1080p_ms": 0.084,
+    "arcLength_20k_ms": 0.011,
+    "pointPolygonTest_20k_ms": 0.03,
+    "resize_up2x_256_ms": 0.05,
+    "resize_down2x_1080p_ms": 0.091,
+    "warpAffine_rot5_nearest_1080p_ms": 1.175
+  },
+  "raster_phases9_16": {
+    "orb_detect_compute_480p_ms": 8.191,
+    "phaseCorrelate_480p_ms": 6.659,
+    "cornerHarris_480p_ms": 8.069,
+    "guidedFilter_480p_ms": 10.066
+  }
+}

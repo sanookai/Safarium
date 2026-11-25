@@ -47,7 +47,10 @@ Commands:
   pipe-encode   --width W --height H --fps N [--pix-fmt rgb24|bgr24|rgba|bgra] [--vflip] [--codec h264|hevc|hevc-alpha|prores4444] [--bitrate BPS] [--quality Q] -o <primary> [--primary-audio-codec aac|pcm_s16le|copy] [--inline-sheet <png> --sheet-cols C --sheet-rows R --tile-width W] [--secondary <sec> --secondary-codec h264 --secondary-bg '#000000'] [--audio <wav|m4a>] [--subtitles <srt> --lang tha] [--max-frames N] [--no-closed-gop] [--overwrite]
   seq-encode    [--dir <dir> | --glob <pattern> | --list <file>] -o <out.(mp4|mov)> [--fps 24] [--width W --height H] [--codec h264|hevc|hevc-alpha|prores4444] [--bitrate BPS] [--quality Q] [--audio <path>] [--inline-sheet <png> --sheet-cols 6 --sheet-rows 4 --tile-width 320] [--decode-ahead 3] [--overwrite]
   batch-dom     --manifest <manifest.json> [--font-dir <dir>] [--overwrite]
-  transcode     <input> -o <out.(mp4|mov)> [--codec h264|hevc|hevc-10bit|hevc-422-10bit|hevc-444-10bit|hevc-alpha|prores*] [--mode fast|balanced|high-quality|cqf|2pass|mini-cae] [--cqf 0..1] [--bitrate BPS | --max-bytes N | --quality Q] [--vbv-max-bitrate BPS --vbv-buffer-sec 4] [--spatial-aq|--no-spatial-aq] [--lookahead 16] [--two-pass] [--mini-cae] [--engines auto|1|2|4] [--denoise [--denoise-strength 0.5]] [--retime-fps N] [--hdr sdr|hdr10|hlg|dv84|apple-log|apple-log2] [--audio-codec aac|he-aac|he-aac-v2|alac|opus|apac|pcm16|pcm24|pcm32f] [--audio-bitrate 128000] [--width W --height H --fps N] [--overwrite]
+  transcode     <input> -o <out.(mp4|mov|webp|gif)> [--scenario youtube|youtube-4k|shorts|tiktok|reels|web-streaming|web-compat|screen-recording|cinema-master|cinema-vfx|transparent-vfx|hdr-dolby-vision|hdr10|spatial-visionos|archival|live-low-latency|podcast-video|webp-clip|gif-clip] [--codec h264|hevc|hevc-10bit|hevc-422-10bit|hevc-444-10bit|hevc-alpha|prores*] [--mode fast|balanced|high-quality|cqf|2pass|mini-cae] [--cqf 0..1] [--bitrate BPS | --max-bytes N | --quality Q] [--vbv-max-bitrate BPS --vbv-buffer-sec 4] [--spatial-aq|--no-spatial-aq] [--lookahead 16] [--two-pass] [--mini-cae] [--engines auto|1|2|4] [--denoise [--denoise-strength 0.5]] [--retime-fps N] [--hdr sdr|hdr10|hlg|dv84|apple-log|apple-log2] [--tonemap-sdr] [--audio-codec aac|he-aac|he-aac-v2|alac|opus|apac|pcm16|pcm24|pcm32f] [--audio-bitrate 128000] [--width W --height H --fps N] [--overwrite]
+  scenarios     [--scenario <name>] List all 19 built-in Wave 10 video encoding scenario profiles as JSON
+  hls           <input> -o <out-dir> [--format fmp4|ts] [--codec hevc-10bit|hevc|h264] [--segment-sec 4.0] [--rungs 360p,720p,1080p,2160p] [--fps 30] [--subtitles <vtt> --subtitle-lang en --subtitle-name English]
+  clip          <input> -o <out.(webp|gif|png)> [--format webp|gif|apng] [--fps 12] [--max-width 640] [--max-duration S] [--overwrite]
   spatial-encode --left <L.(mp4|mov)> --right <R.(mp4|mov)> -o <out.mov> [--bitrate 12000000] [--10bit] [--hdr sdr|hdr10|hlg|dv84] [--fov 63.4] [--baseline-mm 64] [--disparity 0] [--audio-codec aac|apac] [--overwrite]
   analyze-shots <input> [--cut-mad 26.0] [--cut-hist 0.28] [--min-shot-frames 12]
   prism         <capabilities|sync-ir|preview-stills|render-web|render-blender|composite> [options]
@@ -88,7 +91,10 @@ private let subcommandHelp: [String: String] = [
     "pipe-encode": "Usage: safarium-forge pipe-encode --width W --height H --fps N [--pix-fmt rgb24|bgr24|rgba|bgra] [--vflip] [--codec h264|hevc|hevc-alpha|prores4444] [--bitrate BPS] [--quality Q] -o <primary> [--primary-audio-codec aac|pcm_s16le|copy] [--inline-sheet <png> --sheet-cols 6 --sheet-rows 4 --tile-width 320] [--secondary <sec> --secondary-codec h264 --secondary-bg '#000000' --secondary-bitrate BPS --secondary-quality Q] [--audio <wav|m4a>] [--subtitles <srt> --lang tha] [--max-frames N] [--no-closed-gop] [--overwrite]",
     "seq-encode": "Usage: safarium-forge seq-encode [--dir <dir> | --glob <pattern> | --list <file>] -o <out.(mp4|mov)> [--fps 24] [--width W] [--height H] [--codec h264|hevc|hevc-alpha|prores4444] [--bitrate 8000000] [--quality Q] [--audio <path>] [--inline-sheet <png> --sheet-cols 6 --sheet-rows 4 --tile-width 320] [--decode-ahead 3] [--overwrite]",
     "batch-dom": "Usage: safarium-forge batch-dom --manifest <manifest.json> [--font-dir <dir>] [--overwrite]",
-    "transcode": "Usage: safarium-forge transcode <input> -o <out.(mp4|mov)> [--codec h264|hevc|hevc-10bit|hevc-422-10bit|hevc-444-10bit|hevc-alpha|prores*] [--mode fast|balanced|high-quality|cqf|2pass|mini-cae] [--cqf 0..1] [--max-bytes N | --bitrate BPS | --quality Q] [--vbv-max-bitrate BPS --vbv-buffer-sec 4] [--spatial-aq|--no-spatial-aq] [--lookahead 16] [--two-pass] [--mini-cae] [--engines auto|1|2|4] [--denoise [--denoise-strength 0.5]] [--retime-fps N] [--hdr sdr|hdr10|hlg|dv84|apple-log|apple-log2] [--audio-codec aac|he-aac|he-aac-v2|alac|opus|apac|pcm16|pcm24|pcm32f] [--audio-bitrate 128000] [--width W --height H --fps N] [--overwrite]",
+    "transcode": "Usage: safarium-forge transcode <input> -o <out.(mp4|mov|webp|gif)> [--scenario <name>] [--codec h264|hevc|hevc-10bit|hevc-422-10bit|hevc-444-10bit|hevc-alpha|prores*] [--mode fast|balanced|high-quality|cqf|2pass|mini-cae] [--cqf 0..1] [--max-bytes N | --bitrate BPS | --quality Q] [--vbv-max-bitrate BPS --vbv-buffer-sec 4] [--spatial-aq|--no-spatial-aq] [--lookahead 16] [--two-pass] [--mini-cae] [--engines auto|1|2|4] [--denoise [--denoise-strength 0.5]] [--retime-fps N] [--hdr sdr|hdr10|hlg|dv84|apple-log|apple-log2] [--tonemap-sdr] [--audio-codec aac|he-aac|he-aac-v2|alac|opus|apac|pcm16|pcm24|pcm32f] [--audio-bitrate 128000] [--width W --height H --fps N] [--overwrite]",
+    "scenarios": "Usage: safarium-forge scenarios [--scenario <name>]",
+    "hls": "Usage: safarium-forge hls <input> -o <out-dir> [--format fmp4|ts] [--codec hevc-10bit|hevc|h264] [--segment-sec 4.0] [--rungs 360p,720p,1080p,2160p] [--fps 30] [--subtitles <vtt> --subtitle-lang en --subtitle-name English]",
+    "clip": "Usage: safarium-forge clip <input> -o <out.(webp|gif|png)> [--format webp|gif|apng] [--fps 12] [--max-width 640] [--max-duration S] [--overwrite]",
     "spatial-encode": "Usage: safarium-forge spatial-encode --left <L.(mp4|mov)> --right <R.(mp4|mov)> -o <out.mov> [--bitrate 12000000] [--10bit] [--hdr sdr|hdr10|hlg|dv84] [--fov 63.4] [--baseline-mm 64] [--disparity 0] [--audio-codec aac|apac] [--overwrite]",
     "analyze-shots": "Usage: safarium-forge analyze-shots <input> [--cut-mad 26.0] [--cut-hist 0.28] [--min-shot-frames 12]",
     "prism": """
@@ -3131,16 +3137,20 @@ private func runTranscodeCommand(_ args: [String], progressEmitter: SafariumProg
     var inputPath: String?
     var outputPath: String?
     var codec: VideoCodec = .h264
+    var explicitCodec = false
     var maxBytes: Int64?
     var explicitBitrate: Int?
     var quality: Double?
     var audioBitrate = 128_000
+    var explicitAudioBitrate = false
     var targetWidth: Int?
     var targetHeight: Int?
     var targetFPS: Int?
     var overwrite = false
 
-    // Wave 9 Supremacy options
+    // Wave 9 & 10 Supremacy + Scenario options
+    var scenarioProfile: EncodingScenarioProfile?
+    var toneMapToSDR = false
     var supremacyMode: SupremacyEncodeMode?
     var cqfValue: Double?
     var vbvMaxBitrate: Int?
@@ -3159,7 +3169,18 @@ private func runTranscodeCommand(_ args: [String], progressEmitter: SafariumProg
         let a = args[i]
         switch a {
         case "-o", "--output", "--out": outputPath = try nextValue(args, index: &i, flag: a)
-        case "--codec": codec = try parseCodec(try nextValue(args, index: &i, flag: a))
+        case "--scenario":
+            let raw = try nextValue(args, index: &i, flag: a)
+            guard let sc = EncodingScenario.parse(raw) else {
+                let valid = EncodingScenario.allCases.map(\.rawValue).joined(separator: "|")
+                throw CLIUsageError("unsupported --scenario '\(raw)' (expected \(valid))")
+            }
+            scenarioProfile = sc.profile
+        case "--tonemap-sdr":
+            toneMapToSDR = true
+        case "--codec":
+            codec = try parseCodec(try nextValue(args, index: &i, flag: a))
+            explicitCodec = true
         case "--mode":
             let raw = try nextValue(args, index: &i, flag: a)
             guard let m = SupremacyEncodeMode.parseCLI(raw) else {
@@ -3213,7 +3234,9 @@ private func runTranscodeCommand(_ args: [String], progressEmitter: SafariumProg
             maxBytes = v
         case "--bitrate": explicitBitrate = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
         case "--quality": quality = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
-        case "--audio-bitrate": audioBitrate = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--audio-bitrate":
+            audioBitrate = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+            explicitAudioBitrate = true
         case "--width": targetWidth = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
         case "--height": targetHeight = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
         case "--fps": targetFPS = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
@@ -3231,6 +3254,42 @@ private func runTranscodeCommand(_ args: [String], progressEmitter: SafariumProg
     let outURL = URL(fileURLWithPath: outputPath)
     try SafeFilePublisher.assertRegularReadableFile(inURL)
 
+    // Wave 10 Scenario preset resolution (explicit CLI flags override scenario defaults)
+    if let profile = scenarioProfile {
+        if profile.scenario == .webpClip || profile.scenario == .gifClip {
+            if !overwrite && FileManager.default.fileExists(atPath: outURL.path) {
+                throw SafariumError.encode("output already exists (pass --overwrite): \(outURL.path)")
+            }
+            let clipFPS = Double(targetFPS ?? profile.targetFPS ?? 12)
+            let clipMaxW = targetWidth ?? profile.targetWidth ?? 640
+            return try await withPlayableVideoURL(inputURL: inURL) { playableURL in
+                let res: AnimatedClipResult
+                if profile.scenario == .gifClip || outURL.pathExtension.lowercased() == "gif" {
+                    res = try await AnimatedClipExporter.exportGIF(inputURL: playableURL, outputURL: outURL, fps: clipFPS, maxWidth: clipMaxW)
+                } else {
+                    res = try await AnimatedClipExporter.exportAnimatedWebP(inputURL: playableURL, outputURL: outURL, fps: clipFPS, maxWidth: clipMaxW)
+                }
+                return try encodeJSON(res)
+            }
+        }
+        if !explicitCodec { codec = profile.codec }
+        if explicitBitrate == nil && profile.targetVideoBitrate > 0 { explicitBitrate = profile.targetVideoBitrate }
+        if !explicitAudioBitrate && profile.audioBitrate > 0 { audioBitrate = profile.audioBitrate }
+        if proAudioCodec == nil { proAudioCodec = profile.audioCodec }
+        if hdrMastering == nil { hdrMastering = profile.hdrMode }
+        if spatialAQ == nil { spatialAQ = profile.spatialAQ.isEnabled }
+        if lookAheadFrames == nil { lookAheadFrames = profile.lookAheadFrames }
+        if cqfValue == nil { cqfValue = profile.cqf }
+        if supremacyMode == nil {
+            if profile.useMiniCAE { supremacyMode = .miniCAE }
+            else if profile.useTwoPass { supremacyMode = .twoPass }
+            else if profile.cqf != nil { supremacyMode = .cqf }
+            else if !profile.allowBFrames && profile.lookAheadFrames == 0 { supremacyMode = .fast }
+            else { supremacyMode = .highQuality }
+        }
+        if profile.toneMapHDRToSDR { toneMapToSDR = true }
+    }
+
     // Wave 9 Optical-Flow Retiming fast path (VTFrameRateConversionConfiguration)
     if let rFPS = retimeFPS, supremacyMode == nil, !enableDenoise {
         return try await withPlayableVideoURL(inputURL: inURL) { playableURL in
@@ -3246,8 +3305,10 @@ private func runTranscodeCommand(_ args: [String], progressEmitter: SafariumProg
         }
     }
 
-    // Wave 9 Apple Silicon Supremacy path (CQF, Constrained VBR+VBV, True 2-Pass, Mini-CAE, Multi-Engine, Temporal Denoise, HDR/DV8.4, 10-bit HEVC, Pro Audio)
+    // Wave 9/10 Apple Silicon Supremacy path (CQF, Constrained VBR+VBV, True 2-Pass, Mini-CAE, Multi-Engine, Temporal Denoise, HDR/DV8.4, HDR->SDR ToneMap, 10-bit HEVC, Pro Audio)
     let wantSupremacy = (
+        scenarioProfile != nil ||
+        toneMapToSDR ||
         supremacyMode != nil ||
         cqfValue != nil ||
         vbvMaxBitrate != nil ||
@@ -3316,9 +3377,28 @@ private func runTranscodeCommand(_ args: [String], progressEmitter: SafariumProg
             }
             defer { denoiseSession?.end() }
 
-            let preproc: ((CVPixelBuffer, CMTime, Bool) throws -> CVPixelBuffer)? = denoiseSession.map { ds in
-                { pb, pts, isCut in try ds.process(pb, pts: pts, isSceneCut: isCut) }
-            }
+            let doToneMap = toneMapToSDR
+            let preproc: ((CVPixelBuffer, CMTime, Bool) throws -> CVPixelBuffer)? = (denoiseSession != nil || doToneMap) ? { pb, pts, isCut in
+                var current = pb
+                if doToneMap && HardwareToneMapper.isHDRPixelBuffer(current) {
+                    let w = CVPixelBufferGetWidth(current)
+                    let h = CVPixelBufferGetHeight(current)
+                    var sdrOut: CVPixelBuffer?
+                    let attrs: [CFString: Any] = [
+                        kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+                        kCVPixelBufferMetalCompatibilityKey: true,
+                    ]
+                    if CVPixelBufferCreate(kCFAllocatorDefault, w, h, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &sdrOut) == kCVReturnSuccess,
+                       let dst = sdrOut {
+                        try HardwareToneMapper.toneMapPixelBuffer(current, into: dst, targetHeadroom: 1.0)
+                        current = dst
+                    }
+                }
+                if let ds = denoiseSession {
+                    current = try ds.process(current, pts: pts, isSceneCut: isCut)
+                }
+                return current
+            } : nil
             let report = try await VTMultiPassEncoder.encode(
                 inputURL: encodeSourceURL,
                 outputURL: outURL,
@@ -3554,6 +3634,201 @@ private func runSpatialEncodeCommand(_ args: [String]) async throws -> Data {
     return try encodeJSON(rep)
 }
 
+private struct ScenariosListPayload: Codable {
+    let count: Int
+    let scenarios: [EncodingScenarioProfile]
+}
+
+private func runScenariosCommand(_ args: [String]) throws -> Data {
+    try checkSubcommandHelp(args, command: "scenarios")
+    var filterName: String?
+    var i = 0
+    while i < args.count {
+        let a = args[i]
+        switch a {
+        case "--scenario", "-s":
+            filterName = try nextValue(args, index: &i, flag: a)
+        default:
+            if a.hasPrefix("-") { throw CLIUsageError("unknown option for scenarios: \(a)") }
+            if filterName == nil { filterName = a } else { throw CLIUsageError("unexpected arg: \(a)") }
+        }
+        i += 1
+    }
+    if let raw = filterName {
+        guard let sc = EncodingScenario.parse(raw) else {
+            let valid = EncodingScenario.allCases.map(\.rawValue).joined(separator: "|")
+            throw CLIUsageError("unsupported scenario '\(raw)' (expected \(valid))")
+        }
+        return try encodeJSON(sc.profile)
+    }
+    let profiles = EncodingScenario.allProfiles()
+    return try encodeJSON(ScenariosListPayload(count: profiles.count, scenarios: profiles))
+}
+
+private func parseHLSRungSpec(_ raw: String, codec: VideoCodec, fps: Double) throws -> [HLSRung] {
+    let tokens = raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.filter { !$0.isEmpty }
+    guard !tokens.isEmpty else {
+        throw CLIUsageError("--rungs must be a non-empty comma-separated list (e.g. 360p,720p,1080p,2160p)")
+    }
+    var out: [HLSRung] = []
+    for tok in tokens {
+        switch tok {
+        case "360p":
+            out.append(HLSRung(name: "360p", width: 640, height: 360, bitrate: 900_000, fps: fps, codec: codec, audioBitrate: 96_000))
+        case "480p":
+            out.append(HLSRung(name: "480p", width: 854, height: 480, bitrate: 1_600_000, fps: fps, codec: codec, audioBitrate: 96_000))
+        case "720p":
+            out.append(HLSRung(name: "720p", width: 1280, height: 720, bitrate: 3_000_000, fps: fps, codec: codec, audioBitrate: 128_000))
+        case "1080p":
+            out.append(HLSRung(name: "1080p", width: 1920, height: 1080, bitrate: 6_000_000, fps: fps, codec: codec, audioBitrate: 160_000))
+        case "1440p":
+            out.append(HLSRung(name: "1440p", width: 2560, height: 1440, bitrate: 10_000_000, fps: fps, codec: codec, audioBitrate: 160_000))
+        case "2160p", "4k":
+            out.append(HLSRung(name: "2160p", width: 3840, height: 2160, bitrate: 18_000_000, fps: fps, codec: codec, audioBitrate: 192_000))
+        default:
+            throw CLIUsageError("unsupported HLS rung '\(tok)' (expected 360p|480p|720p|1080p|1440p|2160p)")
+        }
+    }
+    return out
+}
+
+private func runHLSCommand(_ args: [String]) async throws -> Data {
+    try checkSubcommandHelp(args, command: "hls")
+    var inputPath: String?
+    var outputDirPath: String?
+    var format: HLSFormat = .fmp4CMAF
+    var codec: VideoCodec = .hevc10
+    var segmentSec: Double = 4.0
+    var fps: Double = 30.0
+    var rungsSpec: String?
+    var subtitlesPath: String?
+    var subtitleLang = "en"
+    var subtitleName = "English"
+
+    var i = 0
+    while i < args.count {
+        let a = args[i]
+        switch a {
+        case "-o", "--output", "--out", "--out-dir":
+            outputDirPath = try nextValue(args, index: &i, flag: a)
+        case "--format":
+            let raw = try nextValue(args, index: &i, flag: a).lowercased()
+            switch raw {
+            case "fmp4", "cmaf", "fmp4-cmaf": format = .fmp4CMAF
+            case "ts", "mpeg-ts", "mpegts": format = .mpegTS
+            default: throw CLIUsageError("unsupported --format '\(raw)' (expected fmp4|ts)")
+            }
+        case "--codec":
+            codec = try parseCodec(try nextValue(args, index: &i, flag: a))
+        case "--segment-sec":
+            segmentSec = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--fps":
+            fps = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--rungs":
+            rungsSpec = try nextValue(args, index: &i, flag: a)
+        case "--subtitles":
+            subtitlesPath = try nextValue(args, index: &i, flag: a)
+        case "--subtitle-lang", "--lang":
+            subtitleLang = try nextValue(args, index: &i, flag: a)
+        case "--subtitle-name":
+            subtitleName = try nextValue(args, index: &i, flag: a)
+        default:
+            if a.hasPrefix("-") { throw CLIUsageError("unknown option for hls: \(a)") }
+            if inputPath == nil { inputPath = a } else { throw CLIUsageError("unexpected arg for hls: \(a)") }
+        }
+        i += 1
+    }
+    guard let inputPath, let outputDirPath else {
+        throw CLIUsageError("hls requires <input> and -o <out-dir>")
+    }
+    let rungs: [HLSRung]
+    if let spec = rungsSpec {
+        rungs = try parseHLSRungSpec(spec, codec: codec, fps: fps)
+    } else {
+        rungs = HLSRung.defaultLadder(codec: codec, fps: fps)
+    }
+    let opts = HLSPackageOptions(
+        rungs: rungs,
+        segmentDurationSeconds: segmentSec,
+        format: format,
+        codec: codec,
+        subtitleVTTPath: subtitlesPath.map { URL(fileURLWithPath: $0) },
+        subtitleLanguage: subtitleLang,
+        subtitleName: subtitleName
+    )
+    let result = try await withPlayableVideoURL(inputURL: URL(fileURLWithPath: inputPath)) { playable in
+        try await HLSPackager.package(
+            inputURL: playable,
+            outputDirectory: URL(fileURLWithPath: outputDirPath, isDirectory: true),
+            options: opts
+        )
+    }
+    return try encodeJSON(result)
+}
+
+private func runClipCommand(_ args: [String]) async throws -> Data {
+    try checkSubcommandHelp(args, command: "clip")
+    var inputPath: String?
+    var outputPath: String?
+    var format: String?
+    var fps: Double = 12.0
+    var maxWidth = 640
+    var maxDuration: Double?
+    var overwrite = false
+
+    var i = 0
+    while i < args.count {
+        let a = args[i]
+        switch a {
+        case "-o", "--output", "--out":
+            outputPath = try nextValue(args, index: &i, flag: a)
+        case "--format":
+            format = try nextValue(args, index: &i, flag: a).lowercased()
+        case "--fps":
+            fps = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--max-width":
+            maxWidth = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--max-duration":
+            maxDuration = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--overwrite":
+            overwrite = true
+        default:
+            if a.hasPrefix("-") { throw CLIUsageError("unknown option for clip: \(a)") }
+            if inputPath == nil { inputPath = a } else { throw CLIUsageError("unexpected arg for clip: \(a)") }
+        }
+        i += 1
+    }
+    guard let inputPath, let outputPath else {
+        throw CLIUsageError("clip requires <input> and -o <out.(webp|gif|png)>")
+    }
+    let inURL = URL(fileURLWithPath: inputPath)
+    let outURL = URL(fileURLWithPath: outputPath)
+    if !overwrite && FileManager.default.fileExists(atPath: outURL.path) {
+        throw SafariumError.encode("output already exists (pass --overwrite): \(outURL.path)")
+    }
+    let resolvedFmt = format ?? {
+        switch outURL.pathExtension.lowercased() {
+        case "gif": return "gif"
+        case "png", "apng": return "apng"
+        default: return "webp"
+        }
+    }()
+    return try await withPlayableVideoURL(inputURL: inURL) { playable in
+        let res: AnimatedClipResult
+        switch resolvedFmt {
+        case "gif":
+            res = try await AnimatedClipExporter.exportGIF(inputURL: playable, outputURL: outURL, fps: fps, maxWidth: maxWidth, maxDurationSeconds: maxDuration)
+        case "apng", "png":
+            res = try await AnimatedClipExporter.exportAPNG(inputURL: playable, outputURL: outURL, fps: fps, maxWidth: maxWidth, maxDurationSeconds: maxDuration)
+        case "webp":
+            res = try await AnimatedClipExporter.exportAnimatedWebP(inputURL: playable, outputURL: outURL, fps: fps, maxWidth: maxWidth, maxDurationSeconds: maxDuration)
+        default:
+            throw CLIUsageError("unsupported --format '\(resolvedFmt)' (expected webp|gif|apng)")
+        }
+        return try encodeJSON(res)
+    }
+}
+
 private func runAnalyzeShotsCommand(_ args: [String]) async throws -> Data {
     try checkSubcommandHelp(args, command: "analyze-shots")
     var inputPath: String?
@@ -3735,6 +4010,15 @@ private struct SafariumForgeCLI {
                 FileHandle.standardOutput.write(out)
             case "transcode":
                 let out = try await runTranscodeCommand(rest, progressEmitter: progressEmitter)
+                FileHandle.standardOutput.write(out)
+            case "scenarios":
+                let out = try runScenariosCommand(rest)
+                FileHandle.standardOutput.write(out)
+            case "hls":
+                let out = try await runHLSCommand(rest)
+                FileHandle.standardOutput.write(out)
+            case "clip":
+                let out = try await runClipCommand(rest)
                 FileHandle.standardOutput.write(out)
             case "spatial-encode":
                 let out = try await runSpatialEncodeCommand(rest)

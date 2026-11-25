@@ -837,33 +837,63 @@ private func muxCompressedVideoAndAudio(
     let startPTS = videoSamples.map { CMSampleBufferGetPresentationTimeStamp($0) }.min() ?? .zero
     writer.startSession(atSourceTime: startPTS)
 
-    for sb in videoSamples {
-        while !videoInput.isReadyForMoreMediaData {
-            if writer.status != .writing {
-                throw SafariumError.encode("video mux stopped: \(writer.error?.localizedDescription ?? "?")")
+    // Start audio reader upfront and interleave video + audio pumps so AVAssetWriter never deadlocks
+    // on cross-track interleave backpressure for multi-second clips.
+    var audioDone = (audioInput == nil || audioOutput == nil || audioReader == nil)
+    if let audioReader, !audioDone {
+        if !audioReader.startReading() {
+            audioInput?.markAsFinished()
+            audioDone = true
+        }
+    }
+    var videoIdx = 0
+    var videoDone = videoSamples.isEmpty
+    if videoDone { videoInput.markAsFinished() }
+    var pendingAudio: CMSampleBuffer? = nil
+
+    while !videoDone || !audioDone {
+        if writer.status != .writing {
+            throw SafariumError.encode("A/V mux stopped: \(writer.error?.localizedDescription ?? "?")")
+        }
+        var progressed = false
+
+        if !videoDone && videoInput.isReadyForMoreMediaData {
+            guard videoInput.append(videoSamples[videoIdx]) else {
+                throw SafariumError.encode("video passthrough append failed: \(writer.error?.localizedDescription ?? "?")")
             }
+            videoIdx += 1
+            progressed = true
+            if videoIdx >= videoSamples.count {
+                videoInput.markAsFinished()
+                videoDone = true
+            }
+        }
+
+        if !audioDone, let ai = audioInput, let ao = audioOutput, ai.isReadyForMoreMediaData {
+            let asb: CMSampleBuffer?
+            if let cached = pendingAudio {
+                asb = cached
+                pendingAudio = nil
+            } else {
+                asb = autoreleasepool(invoking: { ao.copyNextSampleBuffer() })
+            }
+            if let asb {
+                if !ai.append(asb) {
+                    throw SafariumError.encode("audio mux append failed: \(writer.error?.localizedDescription ?? "?")")
+                }
+                progressed = true
+            } else {
+                ai.markAsFinished()
+                audioDone = true
+                progressed = true
+            }
+        }
+
+        if !progressed {
             try await Task.sleep(nanoseconds: 500_000)
         }
-        guard videoInput.append(sb) else {
-            throw SafariumError.encode("video passthrough append failed: \(writer.error?.localizedDescription ?? "?")")
-        }
     }
-    videoInput.markAsFinished()
-
-    if let audioReader, let audioOutput, let audioInput {
-        if audioReader.startReading() {
-            while let asb = autoreleasepool(invoking: { audioOutput.copyNextSampleBuffer() }) {
-                while !audioInput.isReadyForMoreMediaData {
-                    if writer.status != .writing {
-                        throw SafariumError.encode("audio mux stopped: \(writer.error?.localizedDescription ?? "?")")
-                    }
-                    try await Task.sleep(nanoseconds: 500_000)
-                }
-                _ = audioInput.append(asb)
-            }
-        }
-        audioInput.markAsFinished()
-    }
+    audioReader?.cancelReading()
 
     await writer.finishWriting()
     guard writer.status == .completed else {

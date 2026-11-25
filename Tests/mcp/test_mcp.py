@@ -81,6 +81,15 @@ if args[:2] == ["forge", "transcode"]:
     sys.stderr.flush()
     print(json.dumps({"ok": True, "mode": "mini-cae", "argv": args}))
     sys.exit(0)
+if args[:2] == ["forge", "scenarios"]:
+    print(json.dumps({"count": 19, "scenarios": [], "argv": args}))
+    sys.exit(0)
+if args[:2] == ["forge", "hls"]:
+    print(json.dumps({"masterPlaylistPath": "/tmp/master.m3u8", "variants": [], "argv": args}))
+    sys.exit(0)
+if args[:2] == ["forge", "clip"]:
+    print(json.dumps({"format": "webp", "frameCount": 12, "argv": args}))
+    sys.exit(0)
 if args[:3] == ["forge", "audio", "encode"]:
     print(json.dumps({"ok": True, "codec": "alac", "argv": args}))
     sys.exit(0)
@@ -178,6 +187,9 @@ print(json.dumps({"present": True, "appleOnly": True, "abi": {"version": 1, "sym
                 "html_render",
                 "analyze_shots",
                 "transcode_supremacy",
+                "list_scenarios",
+                "package_hls",
+                "export_animated_clip",
                 "audio_encode",
                 "verify_media",
                 "qa_inspect",
@@ -192,6 +204,9 @@ print(json.dumps({"present": True, "appleOnly": True, "abi": {"version": 1, "sym
         out_mp4 = str(self.tmp / "out.mp4")
         out_sup = str(self.tmp / "out-sup.mp4")
         out_m4a = str(self.tmp / "out.m4a")
+        out_hls = str(self.tmp / "hls-out")
+        out_webp = str(self.tmp / "clip.webp")
+        out_sc = str(self.tmp / "out-scenario.mp4")
         resps = self._rpc_session([
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
             {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "doctor", "arguments": {}}},
@@ -292,6 +307,55 @@ print(json.dumps({"present": True, "appleOnly": True, "abi": {"version": 1, "sym
                     },
                 },
             },
+            {
+                "jsonrpc": "2.0",
+                "id": 17,
+                "method": "tools/call",
+                "params": {"name": "list_scenarios", "arguments": {"scenario": "youtube-4k"}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 18,
+                "method": "tools/call",
+                "params": {
+                    "name": "package_hls",
+                    "arguments": {
+                        "input_path": str(self.media_file),
+                        "output_dir": out_hls,
+                        "format": "fmp4",
+                        "rungs": ["360p", "720p"],
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 19,
+                "method": "tools/call",
+                "params": {
+                    "name": "export_animated_clip",
+                    "arguments": {
+                        "input_path": str(self.media_file),
+                        "output_path": out_webp,
+                        "format": "webp",
+                        "fps": 12,
+                        "max_width": 480,
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 20,
+                "method": "tools/call",
+                "params": {
+                    "name": "transcode_supremacy",
+                    "arguments": {
+                        "input_path": str(self.media_file),
+                        "output_path": out_sc,
+                        "scenario": "youtube-4k",
+                        "tonemap_sdr": True,
+                    },
+                },
+            },
         ])
 
         by_id = {r["id"]: r for r in resps if "id" in r}
@@ -318,6 +382,19 @@ print(json.dumps({"present": True, "appleOnly": True, "abi": {"version": 1, "sym
         self.assertFalse(by_id[15]["result"]["isError"])
         self.assertIn("--engines", by_id[15]["result"]["structuredContent"]["argv"])
         self.assertIn("--denoise", by_id[15]["result"]["structuredContent"]["argv"])
+        # Wave 10 Scenarios / HLS / Animated Clip MCP tools
+        self.assertFalse(by_id[17]["result"]["isError"])
+        self.assertEqual(by_id[17]["result"]["structuredContent"]["count"], 19)
+        self.assertIn("--scenario", by_id[17]["result"]["structuredContent"]["argv"])
+        self.assertFalse(by_id[18]["result"]["isError"])
+        self.assertIn("--rungs", by_id[18]["result"]["structuredContent"]["argv"])
+        self.assertIn("360p,720p", by_id[18]["result"]["structuredContent"]["argv"])
+        self.assertFalse(by_id[19]["result"]["isError"])
+        self.assertIn("--max-width", by_id[19]["result"]["structuredContent"]["argv"])
+        self.assertFalse(by_id[20]["result"]["isError"])
+        self.assertIn("--scenario", by_id[20]["result"]["structuredContent"]["argv"])
+        self.assertIn("youtube-4k", by_id[20]["result"]["structuredContent"]["argv"])
+        self.assertIn("--tonemap-sdr", by_id[20]["result"]["structuredContent"]["argv"])
         self.assertFalse(by_id[16]["result"]["isError"])
         self.assertIn("alac", by_id[16]["result"]["structuredContent"]["argv"])
 

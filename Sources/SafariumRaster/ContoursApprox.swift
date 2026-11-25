@@ -166,3 +166,56 @@ public func sr_approx_poly_dp(_ pts: UnsafeRawPointer?, _ n: Int32, _ isFloat: I
     }
     return SRStatus.ok
 }
+
+@_silgen_name("sr_c_arc_length_f32")
+private func sr_c_arc_length_f32(_ pts: UnsafePointer<Float>, _ n: Int32, _ closed: Int32) -> Double
+
+@_silgen_name("sr_c_arc_length_s32")
+private func sr_c_arc_length_s32(_ pts: UnsafePointer<Int32>, _ n: Int32, _ closed: Int32) -> Double
+
+@_silgen_name("sr_c_point_polygon_test_f32")
+private func sr_c_point_polygon_test_f32(_ pts: UnsafePointer<Float>, _ n: Int32,
+                                         _ px: Double, _ py: Double, _ measureDist: Int32) -> Double
+
+@_silgen_name("sr_c_point_polygon_test_s32")
+private func sr_c_point_polygon_test_s32(_ pts: UnsafePointer<Int32>, _ n: Int32,
+                                         _ px: Double, _ py: Double, _ measureDist: Int32) -> Double
+
+/// Fast NEON arcLength: isFloat = 0 (int32) or 1 (float32).
+@_cdecl("sr_arc_length")
+public func sr_arc_length(_ pts: UnsafeRawPointer?, _ n: Int32, _ isFloat: Int32, _ closed: Int32,
+                          _ outLen: UnsafeMutablePointer<Double>?) -> Int32 {
+    guard let outLen, n >= 0, (n == 0 || pts != nil) else {
+        return srFail(SRStatus.badArgument, "arcLength: bad arguments")
+    }
+    if n <= 1 {
+        outLen.pointee = 0.0
+        return SRStatus.ok
+    }
+    if isFloat != 0 {
+        outLen.pointee = sr_c_arc_length_f32(pts!.assumingMemoryBound(to: Float.self), n, closed)
+    } else {
+        outLen.pointee = sr_c_arc_length_s32(pts!.assumingMemoryBound(to: Int32.self), n, closed)
+    }
+    return SRStatus.ok
+}
+
+/// Fast NEON pointPolygonTest: isFloat = 0 (int32) or 1 (float32).
+@_cdecl("sr_point_polygon_test")
+public func sr_point_polygon_test(_ pts: UnsafeRawPointer?, _ n: Int32, _ isFloat: Int32,
+                                  _ px: Double, _ py: Double, _ measureDist: Int32,
+                                  _ outVal: UnsafeMutablePointer<Double>?) -> Int32 {
+    guard let outVal, n >= 0, (n == 0 || pts != nil) else {
+        return srFail(SRStatus.badArgument, "pointPolygonTest: bad arguments")
+    }
+    if n == 0 {
+        outVal.pointee = -1.0
+        return SRStatus.ok
+    }
+    if isFloat != 0 {
+        outVal.pointee = sr_c_point_polygon_test_f32(pts!.assumingMemoryBound(to: Float.self), n, px, py, measureDist)
+    } else {
+        outVal.pointee = sr_c_point_polygon_test_s32(pts!.assumingMemoryBound(to: Int32.self), n, px, py, measureDist)
+    }
+    return SRStatus.ok
+}

@@ -19,6 +19,19 @@ private func copyPlane<E>(_ s: UnsafeRawPointer, _ scn: Int, _ sc: Int, _ d: Uns
     else { for x in 0..<cols { dp[x * dcn] = sp[x * scn] } }
 }
 
+@_silgen_name("sr_c_merge3_u8")
+private func sr_c_merge3_u8(_ p0: UnsafePointer<UInt8>, _ s0: Int,
+                            _ p1: UnsafePointer<UInt8>, _ s1: Int,
+                            _ p2: UnsafePointer<UInt8>, _ s2: Int,
+                            _ dst: UnsafeMutablePointer<UInt8>, _ dstep: Int,
+                            _ w: Int32, _ h: Int32)
+
+@inline(__always) private func rangesDisjoint(_ a: UnsafeRawPointer, _ aBytes: Int,
+                                              _ b: UnsafeRawPointer, _ bBytes: Int) -> Bool {
+    let a0 = Int(bitPattern: a), b0 = Int(bitPattern: b)
+    return a0 + aBytes <= b0 || b0 + bBytes <= a0
+}
+
 /// srcs / dsts: contiguous arrays of CoreMat (40-byte structs). fromTo: npairs (srcChannel, dstChannel) pairs counted
 /// across the concatenated channel lists; a negative source channel fills the destination channel with zeros.
 @_cdecl("sr_core_mixchannels")
@@ -30,14 +43,35 @@ public func sr_core_mixchannels(_ nsrc: Int32, _ srcs: UnsafeRawPointer?, _ ndst
     for i in 0..<Int(ndst) { D.append(matAt(dsts, i)) }
     if let r = coreCheck(S + D, name: "mixChannels") { return r }
     let rows = S[0].rows, cols = S[0].cols
-    // identity split / merge of 8-bit 3/4-channel images -> vImage
+    // identity split / merge of 8-bit 3/4-channel images -> NEON / vImage
     var identity = Int(npairs) > 0
     for p in 0..<Int(npairs) where !(fromTo[2 * p] == fromTo[2 * p + 1]) { identity = false }
     if identity {
         if S.count == 1, D.count == Int(S[0].cn), Int(npairs) == D.count, D.allSatisfy({ $0.cn == 1 && $0.depth == 0 && $0.rows == rows && $0.cols == cols }),
            perfSplitU8(S[0], D) { return 0 }
-        if D.count == 1, S.count == Int(D[0].cn), Int(npairs) == S.count, S.allSatisfy({ $0.cn == 1 && $0.depth == 0 && $0.rows == rows && $0.cols == cols }),
-           perfMergeU8(S, D[0]) { return 0 }
+        if D.count == 1, S.count == Int(D[0].cn), Int(npairs) == S.count, S.allSatisfy({ $0.cn == 1 && $0.depth == 0 && $0.rows == rows && $0.cols == cols }) {
+            let dm = D[0]
+            if dm.depth == 0 && S.count == 3 && dm.rows == rows && dm.cols == cols {
+                if rows == 0 || cols == 0 { return 0 }
+                if let dd = dm.data, let p0 = S[0].data, let p1 = S[1].data, let p2 = S[2].data {
+                    let dSpan = (rows - 1) * dm.step + cols * 3
+                    let s0Span = (rows - 1) * S[0].step + cols
+                    let s1Span = (rows - 1) * S[1].step + cols
+                    let s2Span = (rows - 1) * S[2].step + cols
+                    if rangesDisjoint(dd, dSpan, p0, s0Span) &&
+                       rangesDisjoint(dd, dSpan, p1, s1Span) &&
+                       rangesDisjoint(dd, dSpan, p2, s2Span) {
+                        sr_c_merge3_u8(p0.assumingMemoryBound(to: UInt8.self), S[0].step,
+                                       p1.assumingMemoryBound(to: UInt8.self), S[1].step,
+                                       p2.assumingMemoryBound(to: UInt8.self), S[2].step,
+                                       dd.assumingMemoryBound(to: UInt8.self), dm.step,
+                                       Int32(cols), Int32(rows))
+                        return 0
+                    }
+                }
+            }
+            if perfMergeU8(S, dm) { return 0 }
+        }
     }
     for m in S + D where m.rows != rows || m.cols != cols { return srFail(SRStatus.badArgument, "mixChannels: size mismatch") }
     func locate(_ list: [CoreMat], _ ch: Int) -> (Int, Int)? {
