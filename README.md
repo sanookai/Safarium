@@ -169,7 +169,7 @@ All measurements below were collected on Apple Silicon (macOS, Apple M5) using `
 | **Native HLS MPEG-TS (`ts`)** | 2-rung ABR (`720p, 480p`), 6 `.ts` | **0.969 s** | **5.16× RT** | 3.01 MB | ✅ RFC 8216 `master.m3u8` |
 | **Direct Video → Animated WebP / GIF / APNG** | `480px @ 12fps` (`2.5s`) | **0.811 s / 0.555 s / 0.661 s** | **3.1×–4.5× RT** | 11.4 MB / 569 KB / 4.2 MB | ✅ `ImageIO` multi-frame |
 
-> **All 19 built-in scenarios (`safarium forge scenarios --json` / MCP `list_scenarios`):** `youtube`, `youtube-4k`, `shorts`, `tiktok`, `reels`, `web-streaming`, `web-compat`, `screen-recording`, `cinema-master`, `cinema-vfx`, `transparent-vfx`, `hdr-dolby-vision`, `hdr10`, `spatial-visionos`, `archival`, `live-low-latency`, `podcast-video`, `webp-clip`, `gif-clip` — plus `--tonemap-sdr` hardware CoreImage HDR→SDR tone-mapping.
+> **All 19 built-in scenarios (`safarium forge scenarios` / MCP `list_scenarios`):** `youtube`, `youtube-4k`, `shorts`, `tiktok`, `reels`, `web-streaming`, `web-compat`, `screen-recording`, `cinema-master`, `cinema-vfx`, `transparent-vfx`, `hdr-dolby-vision`, `hdr10`, `spatial-visionos`, `archival`, `live-low-latency`, `podcast-video`, `webp-clip`, `gif-clip` — plus `--tonemap-sdr` hardware CoreImage HDR→SDR tone-mapping.
 >
 > **Wave 10 `SafariumRaster` 1T NEON & Phases 9–16 Timings (Apple M5):** `connectedComponents` 8-conn 1080p: **`0.557 ms`** (BBDT C99, bit-exact OpenCV label order), `cc8_withStats`: **`0.805 ms`**, `addWeighted` f32/u8: **`0.727 ms` / `0.999 ms`**, `add` u8: **`0.174 ms`**, `merge` 3ch: **`0.124 ms`**, `gray2bgr`: **`0.084 ms`**, `arcLength` (20k pts): **`0.011 ms`**, `pointPolygonTest` (20k pts): **`0.030 ms`**, `resize` 1080p→540p: **`0.091 ms`**, `warpAffine` rot5 nearest 1080p: **`1.175 ms`**, `ORB` 480p: **`8.191 ms`**, `phaseCorrelate` (`vDSP` 2D FFT) 480p: **`6.659 ms`**, `ximgproc.guidedFilter` 480p: **`10.066 ms`**.
 
@@ -318,7 +318,7 @@ python3 Tools/install-render.py --check
 
 # 4. Verify environment, Wave 10 capabilities, 19 scenarios, and 418-symbol C ABI
 "$HOME/.local/bin/safarium" doctor --json
-"$HOME/.local/bin/safarium" forge scenarios --json
+"$HOME/.local/bin/safarium" forge scenarios
 "$HOME/.local/bin/safarium" raster info
 ```
 
