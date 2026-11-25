@@ -13,7 +13,7 @@ private func _isFRCSupported() -> Bool {
     #if compiler(>=6.2)
     return VTFrameRateConversionConfiguration.isSupported
     #else
-    return VTFrameRateConversionConfiguration.processorSupported != 0
+    return VTFrameRateConversionConfiguration.processorSupported
     #endif
 }
 
@@ -22,7 +22,7 @@ private func _isOpticalFlowSupported() -> Bool {
     #if compiler(>=6.2)
     return VTOpticalFlowConfiguration.isSupported
     #else
-    return VTOpticalFlowConfiguration.processorSupported != 0
+    return VTOpticalFlowConfiguration.processorSupported
     #endif
 }
 
@@ -31,7 +31,7 @@ private func _isMotionBlurSupported() -> Bool {
     #if compiler(>=6.2)
     return VTMotionBlurConfiguration.isSupported
     #else
-    return VTMotionBlurConfiguration.processorSupported != 0
+    return VTMotionBlurConfiguration.processorSupported
     #endif
 }
 #endif
