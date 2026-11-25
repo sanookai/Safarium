@@ -7,6 +7,35 @@ import VideoToolbox
 
 // MARK: - Pillar 4: Zero-Copy VTFrameProcessor Pre-Encode Suite (macOS 15.4–27)
 
+#if compiler(>=6.1)
+@available(macOS 15.4, *)
+private func _isFRCSupported() -> Bool {
+    #if compiler(>=6.2)
+    return VTFrameRateConversionConfiguration.isSupported
+    #else
+    return VTFrameRateConversionConfiguration.processorSupported != 0
+    #endif
+}
+
+@available(macOS 15.4, *)
+private func _isOpticalFlowSupported() -> Bool {
+    #if compiler(>=6.2)
+    return VTOpticalFlowConfiguration.isSupported
+    #else
+    return VTOpticalFlowConfiguration.processorSupported != 0
+    #endif
+}
+
+@available(macOS 15.4, *)
+private func _isMotionBlurSupported() -> Bool {
+    #if compiler(>=6.2)
+    return VTMotionBlurConfiguration.isSupported
+    #else
+    return VTMotionBlurConfiguration.processorSupported != 0
+    #endif
+}
+#endif
+
 public struct ForgeVTProcessorCapabilities: Codable, Sendable, Equatable {
     public let temporalNoiseFilter: Bool
     public let frameRateConversion: Bool
@@ -25,9 +54,9 @@ public struct ForgeVTProcessorCapabilities: Codable, Sendable, Equatable {
 
         #if compiler(>=6.1)
         if #available(macOS 15.4, *) {
-            frc = VTFrameRateConversionConfiguration.isSupported
-            optFlow = VTOpticalFlowConfiguration.isSupported
-            mblur = VTMotionBlurConfiguration.isSupported
+            frc = _isFRCSupported()
+            optFlow = _isOpticalFlowSupported()
+            mblur = _isMotionBlurSupported()
         }
         #endif
 
@@ -427,7 +456,7 @@ public enum OpticalFlowRetimer {
         var frcProc: AnyObject?
         var frcDstPool: CVPixelBufferPool?
         var frcEnd: (() -> Void)?
-        if #available(macOS 15.4, *), VTFrameRateConversionConfiguration.isSupported {
+        if #available(macOS 15.4, *), _isFRCSupported() {
             if let cfg = VTFrameRateConversionConfiguration(
                 frameWidth: width,
                 frameHeight: height,
@@ -574,7 +603,7 @@ public final class MotionBlurSession {
         self.strength = max(1, min(100, strength))
 
         #if compiler(>=6.1)
-        if #available(macOS 15.4, *), VTMotionBlurConfiguration.isSupported {
+        if #available(macOS 15.4, *), _isMotionBlurSupported() {
             if let state = try? MBState(width: width, height: height) {
                 self.impl = state
                 self.endClosure = { [weak state] in state?.end() }
