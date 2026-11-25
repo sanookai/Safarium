@@ -36,6 +36,7 @@ EXCLUDED_DOCS = {
 EXPORTED_BIN_FILES = (
     "bin/safarium",
     "bin/safarium-render",
+    "bin/safarium-mcp",
     "bin/safarium-hf",
     "bin/safarium-soundtrack",
 )

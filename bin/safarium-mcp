@@ -1,0 +1,1423 @@
+#!/usr/bin/python3 -ISB
+"""Zero-dependency Model Context Protocol (MCP) stdio JSON-RPC 2.0 server for Safarium.
+
+Exposes Safarium's native macOS Apple Silicon rendering, media DAG, QA, verification,
+and 2D raster capabilities to any MCP-compatible AI agent (Claude Code, Claude Desktop,
+Cursor, Gemini CLI, Codex CLI, etc.) while strictly honoring the SF-VIDEO-1 single-slot
+FIFO queue and Apple-only system-framework invariants.
+"""
+
+from collections import deque
+import json
+import os
+import select
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+
+SERVER_NAME = "safarium-mcp"
+SERVER_VERSION = "1.0.0"
+SUPPORTED_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
+DEFAULT_NEGOTIATED_VERSION = "2025-03-26"
+
+MAX_STDOUT_BYTES = 4 * 1024 * 1024
+MAX_STDERR_LINES = 60
+MAX_TIMEOUT_SEC = 1800
+MIN_TIMEOUT_SEC = 5
+MAX_DIM = 8192
+MAX_PIXELS = 33_554_432
+
+SERVER_INSTRUCTIONS = (
+    "Safarium is a native macOS Apple Silicon HTML, 3D, 2D Raster, and Media Rendering Engine "
+    "(0% external video/browser/CV binaries). Read-only inspection tools (doctor, status, "
+    "capabilities, raster_info, forge_schema, forge_validate, probe_media, cache_stats) bypass "
+    "the queue and return immediately. Heavy render/verify/QA tools automatically serialize "
+    "through the per-user SF-VIDEO-1 FIFO queue. Always run doctor and forge_validate before "
+    "heavy renders, and verify outputs with verify_media or qa_inspect."
+)
+
+# Active child subprocess reference for clean signal shutdown.
+_ACTIVE_PROC = None
+
+
+def _debug(msg):
+    if os.environ.get("SAFARIUM_MCP_DEBUG"):
+        try:
+            sys.stderr.write(f"[safarium-mcp] {msg}\n")
+            sys.stderr.flush()
+        except OSError:
+            pass
+
+
+def _bin_dirs():
+    dirs = []
+    for raw in (os.path.realpath(__file__), os.path.abspath(__file__)):
+        d = os.path.dirname(raw)
+        if d and d not in dirs:
+            dirs.append(d)
+    return dirs
+
+
+def _trusted_sibling(name):
+    uid = os.getuid()
+    for d in _bin_dirs():
+        candidate = os.path.join(d, name)
+        try:
+            st = os.lstat(candidate)
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode) and st.st_uid in (0, uid) and not (st.st_mode & 0o022):
+            if os.access(candidate, os.X_OK):
+                return candidate
+    return None
+
+
+def _share_doc_path(filename):
+    for d in _bin_dirs():
+        share = os.path.normpath(os.path.join(d, "..", "share", "safarium", filename))
+        if os.path.isfile(share) and not os.path.islink(share):
+            return share
+        repo_doc = os.path.normpath(os.path.join(d, "..", "docs", filename))
+        if os.path.isfile(repo_doc) and not os.path.islink(repo_doc):
+            return repo_doc
+    return None
+
+
+def _validate_path(raw, field_name, *, must_exist=False, must_be_dir=False, must_not_exist=False, parent_must_exist=False):
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"'{field_name}' must be a non-empty string path")
+    if "\x00" in raw or "\n" in raw or "\r" in raw:
+        raise ValueError(f"'{field_name}' contains invalid control characters")
+    path = os.path.abspath(os.path.expanduser(raw))
+    if os.path.basename(path).startswith("._"):
+        raise ValueError(f"'{field_name}' must not target AppleDouble sidecar file: {path}")
+    if must_exist:
+        if must_be_dir:
+            if not os.path.isdir(path):
+                raise ValueError(f"'{field_name}' directory does not exist: {path}")
+        else:
+            if not os.path.isfile(path):
+                raise ValueError(f"'{field_name}' file does not exist: {path}")
+    if must_not_exist and os.path.lexists(path):
+        raise ValueError(f"'{field_name}' already exists (refusing overwrite): {path}")
+    if parent_must_exist:
+        parent = os.path.dirname(path)
+        if not parent or not os.path.isdir(parent):
+            raise ValueError(f"parent directory for '{field_name}' does not exist: {parent}")
+    return path
+
+
+def _validate_int(val, field_name, *, lo=None, hi=None, even=False):
+    if isinstance(val, bool) or not isinstance(val, int):
+        raise ValueError(f"'{field_name}' must be an integer")
+    if lo is not None and val < lo:
+        raise ValueError(f"'{field_name}' must be >= {lo}")
+    if hi is not None and val > hi:
+        raise ValueError(f"'{field_name}' must be <= {hi}")
+    if even and (val % 2 != 0):
+        raise ValueError(f"'{field_name}' must be an even integer")
+    return val
+
+
+def _validate_number(val, field_name, *, lo=None, hi=None, exclusive_lo=None):
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        raise ValueError(f"'{field_name}' must be a number")
+    f = float(val)
+    if lo is not None and f < lo:
+        raise ValueError(f"'{field_name}' must be >= {lo}")
+    if exclusive_lo is not None and f <= exclusive_lo:
+        raise ValueError(f"'{field_name}' must be > {exclusive_lo}")
+    if hi is not None and f > hi:
+        raise ValueError(f"'{field_name}' must be <= {hi}")
+    return f
+
+
+def _validate_bool(val, field_name):
+    if not isinstance(val, bool):
+        raise ValueError(f"'{field_name}' must be a boolean")
+    return val
+
+
+def _validate_enum(val, field_name, allowed):
+    if not isinstance(val, str) or val not in allowed:
+        raise ValueError(f"'{field_name}' must be one of {sorted(allowed)}")
+    return val
+
+
+def _validate_timeout(args, default_sec):
+    if "timeout_sec" not in args or args["timeout_sec"] is None:
+        return default_sec
+    return _validate_int(args["timeout_sec"], "timeout_sec", lo=MIN_TIMEOUT_SEC, hi=MAX_TIMEOUT_SEC)
+
+
+def _try_parse_json(text):
+    s = text.strip()
+    if not s:
+        return None
+    try:
+        return json.loads(s)
+    except (ValueError, TypeError):
+        pass
+    # Fallback: scan last non-empty line in case of trailing summary JSON.
+    lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
+    for ln in reversed(lines):
+        if ln.startswith("{") and ln.endswith("}"):
+            try:
+                return json.loads(ln)
+            except (ValueError, TypeError):
+                continue
+    return None
+
+
+def _extract_error_envelope(stderr_lines):
+    for ln in reversed(stderr_lines):
+        s = ln.strip()
+        if s.startswith("{") and s.endswith("}"):
+            try:
+                obj = json.loads(s)
+                if isinstance(obj, dict) and obj.get("ok") is False and isinstance(obj.get("error"), dict):
+                    return obj
+            except (ValueError, TypeError):
+                continue
+    return None
+
+
+def _write_jsonrpc(obj):
+    line = json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n"
+    sys.stdout.buffer.write(line.encode("utf-8"))
+    sys.stdout.buffer.flush()
+
+
+def _emit_progress(progress_token, event):
+    if progress_token is None or not isinstance(event, dict):
+        return
+    progress = event.get("frame", event.get("progress", event.get("completed")))
+    total = event.get("totalFrames", event.get("total"))
+    if not isinstance(progress, (int, float)):
+        return
+    params = {
+        "progressToken": progress_token,
+        "progress": progress,
+    }
+    if isinstance(total, (int, float)) and total > 0:
+        params["total"] = total
+    stage = event.get("stage") or event.get("event") or event.get("phase")
+    if isinstance(stage, str) and stage:
+        params["message"] = stage
+    _write_jsonrpc({
+        "jsonrpc": "2.0",
+        "method": "notifications/progress",
+        "params": params,
+    })
+
+
+def _terminate_proc(proc):
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+    except OSError:
+        return
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            return
+        time.sleep(0.05)
+    try:
+        proc.kill()
+        proc.wait(timeout=2.0)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _run_subprocess(
+    exe,
+    argv,
+    *,
+    timeout_sec,
+    stdin_bytes=None,
+    progress_token=None,
+):
+    global _ACTIVE_PROC
+    env = dict(os.environ)
+    env["SAFARIUM_JSON_ERRORS"] = "1"
+
+    stdin_mode = subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL
+    proc = subprocess.Popen(
+        [exe, *argv],
+        stdin=stdin_mode,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        shell=False,
+    )
+    _ACTIVE_PROC = proc
+
+    stdout_chunks = []
+    stdout_size = 0
+    stdout_truncated = False
+    stderr_lines = deque(maxlen=MAX_STDERR_LINES)
+    stderr_buf = b""
+    last_progress = None
+    timed_out = False
+
+    try:
+        if stdin_bytes is not None and proc.stdin is not None:
+            try:
+                proc.stdin.write(stdin_bytes)
+                proc.stdin.flush()
+            except BrokenPipeError:
+                pass
+            finally:
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
+
+        assert proc.stdout is not None and proc.stderr is not None
+        os.set_blocking(proc.stdout.fileno(), False)
+        os.set_blocking(proc.stderr.fileno(), False)
+
+        open_fds = {proc.stdout.fileno(): "stdout", proc.stderr.fileno(): "stderr"}
+        deadline = time.monotonic() + timeout_sec
+
+        while open_fds:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                _terminate_proc(proc)
+                break
+            rlist, _, _ = select.select(list(open_fds.keys()), [], [], min(0.25, remaining))
+            for fd in rlist:
+                kind = open_fds[fd]
+                try:
+                    chunk = os.read(fd, 65536)
+                except BlockingIOError:
+                    continue
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    del open_fds[fd]
+                    continue
+                if kind == "stdout":
+                    if stdout_size < MAX_STDOUT_BYTES:
+                        take = min(len(chunk), MAX_STDOUT_BYTES - stdout_size)
+                        stdout_chunks.append(chunk[:take])
+                        stdout_size += take
+                        if take < len(chunk):
+                            stdout_truncated = True
+                    else:
+                        stdout_truncated = True
+                else:
+                    stderr_buf += chunk
+                    while b"\n" in stderr_buf:
+                        line_b, stderr_buf = stderr_buf.split(b"\n", 1)
+                        line_s = line_b.decode("utf-8", errors="replace")
+                        stderr_lines.append(line_s)
+                        s = line_s.strip()
+                        if s.startswith("{") and s.endswith("}"):
+                            try:
+                                ev = json.loads(s)
+                                if isinstance(ev, dict) and (
+                                    "progress" in ev or "frame" in ev or ev.get("event") == "progress"
+                                ):
+                                    last_progress = ev
+                                    _emit_progress(progress_token, ev)
+                            except (ValueError, TypeError):
+                                pass
+
+        if stderr_buf:
+            stderr_lines.append(stderr_buf.decode("utf-8", errors="replace"))
+
+        if not timed_out:
+            rem = max(0.5, deadline - time.monotonic())
+            try:
+                proc.wait(timeout=rem)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                _terminate_proc(proc)
+    finally:
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        _ACTIVE_PROC = None
+
+    stdout_text = b"".join(stdout_chunks).decode("utf-8", errors="replace")
+    return {
+        "returncode": proc.returncode,
+        "stdout": stdout_text,
+        "stdout_truncated": stdout_truncated,
+        "stderr_lines": list(stderr_lines),
+        "last_progress": last_progress,
+        "timed_out": timed_out,
+    }
+
+
+def _tool_error_result(tool_name, code, message, *, hint=None, details=None, negotiated_version=DEFAULT_NEGOTIATED_VERSION):
+    payload = {
+        "ok": False,
+        "tool": tool_name,
+        "error": {
+            "code": code,
+            "message": message,
+        },
+    }
+    if hint:
+        payload["error"]["hint"] = hint
+    if details is not None:
+        payload["details"] = details
+    result = {
+        "content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False, indent=2)}],
+        "isError": True,
+    }
+    if negotiated_version >= "2025-06-18":
+        result["structuredContent"] = payload
+    return result
+
+
+def _tool_ok_result(payload, *, negotiated_version=DEFAULT_NEGOTIATED_VERSION):
+    if isinstance(payload, dict):
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
+        structured = payload
+    else:
+        text = json.dumps({"result": payload}, ensure_ascii=False, indent=2)
+        structured = {"result": payload}
+    result = {
+        "content": [{"type": "text", "text": text}],
+        "isError": False,
+    }
+    if negotiated_version >= "2025-06-18":
+        result["structuredContent"] = structured
+    return result
+
+
+def _format_subprocess_result(tool_name, res, *, ok_exit_codes=(0,), negotiated_version=DEFAULT_NEGOTIATED_VERSION):
+    if res["timed_out"]:
+        return _tool_error_result(
+            tool_name,
+            "E_TIMEOUT",
+            f"Safarium tool '{tool_name}' exceeded its timeout and was terminated cleanly.",
+            hint="Increase timeout_sec (up to 1800) or inspect queue wait via status.",
+            details={
+                "last_progress": res["last_progress"],
+                "stderr_tail": res["stderr_lines"][-10:],
+            },
+            negotiated_version=negotiated_version,
+        )
+
+    parsed = _try_parse_json(res["stdout"])
+    if res["returncode"] in ok_exit_codes:
+        if isinstance(parsed, dict):
+            if res["stdout_truncated"]:
+                parsed["_truncated"] = True
+            return _tool_ok_result(parsed, negotiated_version=negotiated_version)
+        return _tool_ok_result(
+            {
+                "ok": True,
+                "returncode": res["returncode"],
+                "output": res["stdout"].strip(),
+                "truncated": res["stdout_truncated"],
+            },
+            negotiated_version=negotiated_version,
+        )
+
+    env_err = _extract_error_envelope(res["stderr_lines"])
+    if env_err is not None:
+        result = {
+            "content": [{"type": "text", "text": json.dumps(env_err, ensure_ascii=False, indent=2)}],
+            "isError": True,
+        }
+        if negotiated_version >= "2025-06-18":
+            result["structuredContent"] = env_err
+        return result
+
+    return _tool_error_result(
+        tool_name,
+        "E_WORKER_FAILED",
+        f"Safarium command exited with code {res['returncode']}.",
+        details={
+            "returncode": res["returncode"],
+            "stdout_parsed": parsed,
+            "stdout_tail": res["stdout"][-2000:] if parsed is None else None,
+            "stderr_tail": res["stderr_lines"][-20:],
+            "last_progress": res["last_progress"],
+        },
+        negotiated_version=negotiated_version,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool Catalog & Handlers
+# ---------------------------------------------------------------------------
+
+READONLY_ANNOTATIONS = {
+    "readOnlyHint": True,
+    "destructiveHint": False,
+    "idempotentHint": True,
+    "openWorldHint": False,
+}
+
+TOOLS = [
+    {
+        "name": "doctor",
+        "description": (
+            "Run non-blocking Safarium environment, worker, Apple-only linkage, and queue health "
+            "audit (bypasses FIFO queue). Run this before heavy renders."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+        "annotations": READONLY_ANNOTATIONS,
+    },
+    {
+        "name": "status",
+        "description": (
+            "Check live SF-VIDEO-1 single-slot FIFO render queue status, active job, waiting tickets, "
+            "and host thermal state (instant, non-blocking)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "detail": {
+                    "type": "boolean",
+                    "description": "Include detailed queue diagnostics (--json-detail). Default true.",
+                },
+            },
+            "additionalProperties": False,
+        },
+        "annotations": READONLY_ANNOTATIONS,
+    },
+    {
+        "name": "capabilities",
+        "description": (
+            "Report native Apple Silicon macOS capabilities: Metal GPU, Neural Engine (ANE), "
+            "VideoToolbox codecs, AudioToolbox, APFS clonefile, and explicit OS codec walls (non-blocking)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "fast": {
+                    "type": "boolean",
+                    "description": "Use fast capability probe (forge capabilities --fast). Default false.",
+                },
+            },
+            "additionalProperties": False,
+        },
+        "annotations": READONLY_ANNOTATIONS,
+    },
+    {
+        "name": "raster_info",
+        "description": (
+            "Inspect libSafariumRaster.dylib (native macOS cv2 replacement): binary path, Apple-only "
+            "otool -L linkage, ABI version, and exported C-ABI symbol count (non-blocking)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+        "annotations": READONLY_ANNOTATIONS,
+    },
+    {
+        "name": "forge_schema",
+        "description": (
+            "Return SafariumForge machine-readable JSON schemas for recipes, subcommands, and "
+            "structured error codes (non-blocking)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {
+                    "type": "string",
+                    "enum": ["all", "recipe", "subcommands", "errors"],
+                    "description": "Schema subset to return. Default 'all'.",
+                },
+            },
+            "additionalProperties": False,
+        },
+        "annotations": READONLY_ANNOTATIONS,
+    },
+    {
+        "name": "forge_validate",
+        "description": (
+            "Validate a SafariumForge JSON recipe file or inline recipe object without running "
+            "any encoder (non-blocking FIFO bypass). Optionally perform a dry-run execution plan."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "recipe_path": {
+                    "type": "string",
+                    "description": "Absolute or ~/ path to a SafariumForge recipe JSON file.",
+                },
+                "recipe": {
+                    "type": "object",
+                    "description": "Inline SafariumForge recipe JSON object (mutually exclusive with recipe_path).",
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "Run 'forge run --dry-run' plan check instead of schema-only validate. Default false.",
+                },
+            },
+            "additionalProperties": False,
+        },
+        "annotations": READONLY_ANNOTATIONS,
+    },
+    {
+        "name": "probe_media",
+        "description": (
+            "Inspect a media file (video/audio/subtitles tracks, codec, resolution, fps, duration, "
+            "colorimetry) using native AVFoundation without FFmpeg (non-blocking FIFO bypass)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to media file to inspect.",
+                },
+                "include_audio_packets": {
+                    "type": "boolean",
+                    "description": "Include audio packet statistics. Default false.",
+                },
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+        "annotations": READONLY_ANNOTATIONS,
+    },
+    {
+        "name": "cache_stats",
+        "description": (
+            "Inspect APFS copy-on-write incremental scene/shot cache usage and hit statistics "
+            "(non-blocking FIFO bypass)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "root": {
+                    "type": "string",
+                    "description": "Optional cache root directory path.",
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["auto", "scene", "shot"],
+                    "description": "Cache kind filter. Default 'auto'.",
+                },
+            },
+            "additionalProperties": False,
+        },
+        "annotations": READONLY_ANNOTATIONS,
+    },
+    {
+        "name": "forge_run",
+        "description": (
+            "Execute a declarative SafariumForge JSON DAG recipe (Metal filters, overlays, audio "
+            "mastering, WebKit scenes, hardware encode) via the SF-VIDEO-1 FIFO queue. Streams "
+            "progress notifications when progressToken is provided."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "recipe_path": {
+                    "type": "string",
+                    "description": "Path to the SafariumForge recipe JSON file.",
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "Plan and validate only without writing output.",
+                },
+                "validate_only": {
+                    "type": "boolean",
+                    "description": "Validate recipe only without executing.",
+                },
+                "timeout_sec": {
+                    "type": "integer",
+                    "minimum": MIN_TIMEOUT_SEC,
+                    "maximum": MAX_TIMEOUT_SEC,
+                    "description": "Maximum wall-clock timeout in seconds (default 600, max 1800).",
+                },
+            },
+            "required": ["recipe_path"],
+            "additionalProperties": False,
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "html_render",
+        "description": (
+            "Deterministically render an HTML/CSS/SVG/WebGL2 page to MP4/MOV using windowless "
+            "WKWebView + VirtualClock + Apple VideoToolbox via the SF-VIDEO-1 FIFO queue. "
+            "Refuses to overwrite existing output files."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "input_html": {"type": "string", "description": "Path to input HTML file."},
+                "output_path": {"type": "string", "description": "Destination .mp4 or .mov path (must not exist)."},
+                "width": {"type": "integer", "minimum": 2, "maximum": MAX_DIM, "description": "Even video width in pixels."},
+                "height": {"type": "integer", "minimum": 2, "maximum": MAX_DIM, "description": "Even video height in pixels."},
+                "fps": {"type": "integer", "minimum": 1, "maximum": 240, "description": "Frames per second."},
+                "frames": {"type": "integer", "minimum": 1, "description": "Total frame count to render."},
+                "start": {"type": "number", "minimum": 0, "description": "Virtual clock start time in seconds."},
+                "codec": {
+                    "type": "string",
+                    "enum": ["h264", "hevc", "hevc-alpha", "prores4444"],
+                    "description": "Hardware codec (hevc-alpha and prores4444 require .mov output).",
+                },
+                "bitrate": {"type": "integer", "minimum": 100000, "description": "Target video bitrate in bps (mutually exclusive with quality)."},
+                "quality": {"type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Quality factor 0.0..1.0 (mutually exclusive with bitrate)."},
+                "transparent": {"type": "boolean", "description": "Render with transparent background (requires alpha codec)."},
+                "pixel_format": {
+                    "type": "string",
+                    "enum": ["bgra", "nv12-vimage", "nv12-left"],
+                    "description": "Pixel format pipeline.",
+                },
+                "snapshot_quality": {
+                    "type": "string",
+                    "enum": ["fast", "sharp"],
+                    "description": "WebKit snapshot quality mode ('fast' 1x default, 'sharp' 2x Lanczos).",
+                },
+                "video_only": {"type": "boolean", "description": "Render video-only stream (mutually exclusive with audio_path)."},
+                "audio_path": {"type": "string", "description": "Audio file to interleave/mux (mutually exclusive with video_only)."},
+                "audio_start": {"type": "number", "minimum": 0, "description": "Audio offset start in seconds."},
+                "subtitles_path": {"type": "string", "description": "Optional SRT subtitle file to mux as tx3g."},
+                "subtitle_lang": {"type": "string", "description": "3-letter ISO-639-2 subtitle language code (e.g. 'tha', 'eng', 'pol')."},
+                "hash_frames": {"type": "boolean", "description": "Emit per-frame SHA-256 hashes for determinism checks."},
+                "low_ram": {"type": "boolean", "description": "Enable low-RAM closed-GOP mode."},
+                "timeout_sec": {
+                    "type": "integer",
+                    "minimum": MIN_TIMEOUT_SEC,
+                    "maximum": MAX_TIMEOUT_SEC,
+                    "description": "Maximum wall-clock timeout in seconds (default 600, max 1800).",
+                },
+            },
+            "required": ["input_html", "output_path", "width", "height", "fps", "frames"],
+            "additionalProperties": False,
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "verify_media",
+        "description": (
+            "Inspect a rendered video/audio/subtitle file or compare a candidate against a reference "
+            "using native AVFoundation (zero FFmpeg) through the SF-VIDEO-1 FIFO queue."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "reference_path": {"type": "string", "description": "Primary or reference media file path."},
+                "candidate_path": {"type": "string", "description": "Optional candidate media file path to compare against reference_path."},
+                "timeout_sec": {
+                    "type": "integer",
+                    "minimum": MIN_TIMEOUT_SEC,
+                    "maximum": MAX_TIMEOUT_SEC,
+                    "description": "Maximum timeout in seconds (default 300, max 1800).",
+                },
+            },
+            "required": ["reference_path"],
+            "additionalProperties": False,
+        },
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "qa_inspect",
+        "description": (
+            "Run SafariumForge QA inspection (scene cuts, freeze/silence detection, optional "
+            "perceptual MS-SSIM/CIEDE2000 comparison against reference, Vision Thai OCR, and "
+            "contact sheet generation) via the SF-VIDEO-1 FIFO queue."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "input_path": {"type": "string", "description": "Media file path to inspect."},
+                "ref_path": {"type": "string", "description": "Optional reference media file for MS-SSIM/CIEDE2000 comparison."},
+                "contact_sheet_path": {"type": "string", "description": "Optional output image path for a contact sheet."},
+                "cols": {"type": "integer", "minimum": 1, "maximum": 24, "description": "Contact sheet columns."},
+                "rows": {"type": "integer", "minimum": 1, "maximum": 24, "description": "Contact sheet rows."},
+                "tile_width": {"type": "integer", "minimum": 64, "maximum": 2048, "description": "Contact sheet tile width in pixels."},
+                "scene_threshold": {"type": "number", "exclusiveMinimum": 0.0, "maximum": 1.0, "description": "Scene-cut sensitivity threshold (0, 1]."},
+                "silence_threshold_db": {"type": "number", "minimum": -120.0, "maximum": 0.0, "description": "Silence threshold in dBFS [-120, 0]."},
+                "thai_ocr": {"type": "boolean", "description": "Run Apple Vision Thai OCR verification."},
+                "min_score": {"type": "number", "minimum": 0.0, "maximum": 100.0, "description": "Minimum SafariumPQ score gate."},
+                "max_de00_p95": {"type": "number", "minimum": 0.0, "maximum": 100.0, "description": "Maximum allowed CIEDE2000 p95 color error."},
+                "strict": {"type": "boolean", "description": "Return non-zero exit if QA gates fail."},
+                "overwrite": {"type": "boolean", "description": "Allow overwriting existing contact_sheet_path."},
+                "timeout_sec": {
+                    "type": "integer",
+                    "minimum": MIN_TIMEOUT_SEC,
+                    "maximum": MAX_TIMEOUT_SEC,
+                    "description": "Maximum timeout in seconds (default 300, max 1800).",
+                },
+            },
+            "required": ["input_path"],
+            "additionalProperties": False,
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
+    },
+]
+
+TOOL_NAMES = {t["name"] for t in TOOLS}
+
+
+def _require_render_bin():
+    exe = _trusted_sibling("safarium-render")
+    if exe is None:
+        raise RuntimeError(
+            f"missing or untrusted sibling 'safarium-render' beside {os.path.dirname(os.path.abspath(__file__))}"
+        )
+    return exe
+
+
+def _require_safarium_bin():
+    exe = _trusted_sibling("safarium")
+    if exe is None:
+        raise RuntimeError(
+            f"missing or untrusted sibling 'safarium' beside {os.path.dirname(os.path.abspath(__file__))}"
+        )
+    return exe
+
+
+def _handle_tool_call(name, arguments, *, progress_token=None, negotiated_version=DEFAULT_NEGOTIATED_VERSION):
+    if arguments is None:
+        arguments = {}
+    if not isinstance(arguments, dict):
+        return _tool_error_result(
+            name, "E_USAGE", "Tool arguments must be a JSON object.", negotiated_version=negotiated_version
+        )
+
+    try:
+        if name == "doctor":
+            exe = _require_render_bin()
+            res = _run_subprocess(exe, ["doctor", "--json"], timeout_sec=20)
+            return _format_subprocess_result(
+                name, res, ok_exit_codes=(0, 1), negotiated_version=negotiated_version
+            )
+
+        if name == "status":
+            detail = _validate_bool(arguments.get("detail", True), "detail")
+            exe = _require_render_bin()
+            argv = ["status", "--json-detail"] if detail else ["status"]
+            res = _run_subprocess(exe, argv, timeout_sec=10)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "capabilities":
+            fast = _validate_bool(arguments.get("fast", False), "fast")
+            exe = _require_render_bin()
+            argv = ["forge", "capabilities", "--fast"] if fast else ["capabilities"]
+            res = _run_subprocess(exe, argv, timeout_sec=15)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "raster_info":
+            exe = _require_safarium_bin()
+            res = _run_subprocess(exe, ["raster", "info", "--json"], timeout_sec=15)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "forge_schema":
+            target = _validate_enum(
+                arguments.get("target", "all"), "target", {"all", "recipe", "subcommands", "errors"}
+            )
+            exe = _require_render_bin()
+            res = _run_subprocess(exe, ["schema", target], timeout_sec=15)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "forge_validate":
+            has_path = "recipe_path" in arguments and arguments["recipe_path"] is not None
+            has_obj = "recipe" in arguments and arguments["recipe"] is not None
+            if has_path == has_obj:
+                raise ValueError("provide exactly one of 'recipe_path' or 'recipe'")
+            dry_run = _validate_bool(arguments.get("dry_run", False), "dry_run")
+            exe = _require_render_bin()
+
+            if has_path:
+                rpath = _validate_path(arguments["recipe_path"], "recipe_path", must_exist=True)
+                argv = (
+                    ["forge", "run", "--recipe", rpath, "--dry-run", "--json-errors"]
+                    if dry_run
+                    else ["forge", "validate", "--recipe", rpath, "--json-errors"]
+                )
+                res = _run_subprocess(exe, argv, timeout_sec=20)
+                return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+            recipe_obj = arguments["recipe"]
+            if not isinstance(recipe_obj, dict):
+                raise ValueError("'recipe' must be a JSON object")
+            recipe_bytes = json.dumps(recipe_obj, ensure_ascii=False).encode("utf-8")
+            if dry_run:
+                tmp_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        prefix="safarium-mcp-recipe-", suffix=".json", delete=False
+                    ) as tf:
+                        tf.write(recipe_bytes)
+                        tmp_path = tf.name
+                    res = _run_subprocess(
+                        exe, ["forge", "run", "--recipe", tmp_path, "--dry-run", "--json-errors"], timeout_sec=20
+                    )
+                    return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+                finally:
+                    if tmp_path:
+                        try:
+                            os.unlink(tmp_path)
+                        except OSError:
+                            pass
+            res = _run_subprocess(
+                exe,
+                ["forge", "validate", "--recipe", "-", "--json-errors"],
+                timeout_sec=20,
+                stdin_bytes=recipe_bytes,
+            )
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "probe_media":
+            mpath = _validate_path(arguments.get("path"), "path", must_exist=True)
+            include_pkts = _validate_bool(arguments.get("include_audio_packets", False), "include_audio_packets")
+            exe = _require_render_bin()
+            argv = ["forge", "inspect", mpath]
+            if include_pkts:
+                argv.append("--include-audio-packets")
+            res = _run_subprocess(exe, argv, timeout_sec=30)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "cache_stats":
+            kind = _validate_enum(arguments.get("kind", "auto"), "kind", {"auto", "scene", "shot"})
+            exe = _require_render_bin()
+            argv = ["forge", "cache", "stats", "--kind", kind]
+            if arguments.get("root") is not None:
+                root_dir = _validate_path(arguments["root"], "root", must_exist=True, must_be_dir=True)
+                argv.extend(["--root", root_dir])
+            res = _run_subprocess(exe, argv, timeout_sec=15)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "forge_run":
+            rpath = _validate_path(arguments.get("recipe_path"), "recipe_path", must_exist=True)
+            dry_run = _validate_bool(arguments.get("dry_run", False), "dry_run")
+            validate_only = _validate_bool(arguments.get("validate_only", False), "validate_only")
+            timeout_sec = _validate_timeout(arguments, 600)
+            exe = _require_render_bin()
+            argv = ["forge", "run", "--recipe", rpath, "--progress", "jsonl", "--json-errors"]
+            if dry_run:
+                argv.append("--dry-run")
+            if validate_only:
+                argv.append("--validate-only")
+            res = _run_subprocess(exe, argv, timeout_sec=timeout_sec, progress_token=progress_token)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "html_render":
+            input_html = _validate_path(arguments.get("input_html"), "input_html", must_exist=True)
+            output_path = _validate_path(
+                arguments.get("output_path"), "output_path", must_not_exist=True, parent_must_exist=True
+            )
+            width = _validate_int(arguments.get("width"), "width", lo=2, hi=MAX_DIM, even=True)
+            height = _validate_int(arguments.get("height"), "height", lo=2, hi=MAX_DIM, even=True)
+            if width * height > MAX_PIXELS:
+                raise ValueError(f"width*height ({width * height}) exceeds pixel budget {MAX_PIXELS}")
+            fps = _validate_int(arguments.get("fps"), "fps", lo=1, hi=240)
+            frames = _validate_int(arguments.get("frames"), "frames", lo=1)
+            timeout_sec = _validate_timeout(arguments, 600)
+
+            video_only = _validate_bool(arguments.get("video_only", False), "video_only")
+            has_audio = arguments.get("audio_path") is not None
+            if video_only == has_audio:
+                raise ValueError("specify exactly one of 'video_only: true' or 'audio_path'")
+
+            if arguments.get("bitrate") is not None and arguments.get("quality") is not None:
+                raise ValueError("'bitrate' and 'quality' are mutually exclusive")
+
+            codec = None
+            if arguments.get("codec") is not None:
+                codec = _validate_enum(arguments["codec"], "codec", {"h264", "hevc", "hevc-alpha", "prores4444"})
+                ext = os.path.splitext(output_path)[1].lower()
+                if codec in ("hevc-alpha", "prores4444") and ext != ".mov":
+                    raise ValueError(f"codec '{codec}' requires a '.mov' output_path")
+
+            argv = [
+                "html",
+                input_html,
+                "--output",
+                output_path,
+                "--width",
+                str(width),
+                "--height",
+                str(height),
+                "--fps",
+                str(fps),
+                "--frames",
+                str(frames),
+                "--json",
+                "--progress",
+                "jsonl",
+                "--json-errors",
+            ]
+            if arguments.get("start") is not None:
+                argv.extend(["--start", str(_validate_number(arguments["start"], "start", lo=0.0))])
+            if codec is not None:
+                argv.extend(["--codec", codec])
+            if arguments.get("bitrate") is not None:
+                argv.extend(["--bitrate", str(_validate_int(arguments["bitrate"], "bitrate", lo=100000))])
+            if arguments.get("quality") is not None:
+                argv.extend(["--quality", str(_validate_number(arguments["quality"], "quality", lo=0.0, hi=1.0))])
+            if _validate_bool(arguments.get("transparent", False), "transparent"):
+                argv.append("--transparent")
+            if arguments.get("pixel_format") is not None:
+                pf = _validate_enum(arguments["pixel_format"], "pixel_format", {"bgra", "nv12-vimage", "nv12-left"})
+                argv.extend(["--pixel-format", pf])
+            if arguments.get("snapshot_quality") is not None:
+                sq = _validate_enum(arguments["snapshot_quality"], "snapshot_quality", {"fast", "sharp"})
+                argv.extend(["--snapshot-quality", sq])
+            if video_only:
+                argv.append("--video-only")
+            else:
+                apath = _validate_path(arguments["audio_path"], "audio_path", must_exist=True)
+                argv.extend(["--audio", apath])
+                if arguments.get("audio_start") is not None:
+                    argv.extend(["--audio-start", str(_validate_number(arguments["audio_start"], "audio_start", lo=0.0))])
+            if arguments.get("subtitles_path") is not None:
+                spath = _validate_path(arguments["subtitles_path"], "subtitles_path", must_exist=True)
+                argv.extend(["--subtitles", spath])
+                if arguments.get("subtitle_lang") is not None:
+                    slang = arguments["subtitle_lang"]
+                    if not isinstance(slang, str) or not (2 <= len(slang) <= 3) or not slang.isalpha():
+                        raise ValueError("'subtitle_lang' must be a 2-3 letter ISO language code")
+                    argv.extend(["--subtitle-lang", slang.lower()])
+            if _validate_bool(arguments.get("hash_frames", False), "hash_frames"):
+                argv.append("--hash")
+            if _validate_bool(arguments.get("low_ram", False), "low_ram"):
+                argv.append("--low-ram")
+
+            exe = _require_render_bin()
+            res = _run_subprocess(exe, argv, timeout_sec=timeout_sec, progress_token=progress_token)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "verify_media":
+            ref_path = _validate_path(arguments.get("reference_path"), "reference_path", must_exist=True)
+            timeout_sec = _validate_timeout(arguments, 300)
+            argv = ["verify", ref_path]
+            if arguments.get("candidate_path") is not None:
+                cand_path = _validate_path(arguments["candidate_path"], "candidate_path", must_exist=True)
+                argv.append(cand_path)
+            exe = _require_render_bin()
+            res = _run_subprocess(exe, argv, timeout_sec=timeout_sec)
+            # verify exit 2 means readable comparison diff JSON (exactMatch: false)
+            return _format_subprocess_result(
+                name, res, ok_exit_codes=(0, 2), negotiated_version=negotiated_version
+            )
+
+        if name == "qa_inspect":
+            in_path = _validate_path(arguments.get("input_path"), "input_path", must_exist=True)
+            timeout_sec = _validate_timeout(arguments, 300)
+            overwrite = _validate_bool(arguments.get("overwrite", False), "overwrite")
+            argv = ["forge", "qa", in_path, "--json-errors"]
+            if arguments.get("ref_path") is not None:
+                rpath = _validate_path(arguments["ref_path"], "ref_path", must_exist=True)
+                argv.extend(["--ref", rpath])
+            if arguments.get("contact_sheet_path") is not None:
+                cpath = _validate_path(
+                    arguments["contact_sheet_path"],
+                    "contact_sheet_path",
+                    must_not_exist=not overwrite,
+                    parent_must_exist=True,
+                )
+                argv.extend(["--contact-sheet", cpath])
+            if arguments.get("cols") is not None:
+                argv.extend(["--cols", str(_validate_int(arguments["cols"], "cols", lo=1, hi=24))])
+            if arguments.get("rows") is not None:
+                argv.extend(["--rows", str(_validate_int(arguments["rows"], "rows", lo=1, hi=24))])
+            if arguments.get("tile_width") is not None:
+                argv.extend(["--tile-width", str(_validate_int(arguments["tile_width"], "tile_width", lo=64, hi=2048))])
+            if arguments.get("scene_threshold") is not None:
+                argv.extend([
+                    "--scene-threshold",
+                    str(_validate_number(arguments["scene_threshold"], "scene_threshold", exclusive_lo=0.0, hi=1.0)),
+                ])
+            if arguments.get("silence_threshold_db") is not None:
+                argv.extend([
+                    "--silence-threshold-db",
+                    str(_validate_number(arguments["silence_threshold_db"], "silence_threshold_db", lo=-120.0, hi=0.0)),
+                ])
+            if _validate_bool(arguments.get("thai_ocr", False), "thai_ocr"):
+                argv.append("--thai-ocr")
+            if arguments.get("min_score") is not None:
+                argv.extend(["--min-score", str(_validate_number(arguments["min_score"], "min_score", lo=0.0, hi=100.0))])
+            if arguments.get("max_de00_p95") is not None:
+                argv.extend([
+                    "--max-de00-p95",
+                    str(_validate_number(arguments["max_de00_p95"], "max_de00_p95", lo=0.0, hi=100.0)),
+                ])
+            if _validate_bool(arguments.get("strict", False), "strict"):
+                argv.append("--strict")
+            if overwrite:
+                argv.append("--overwrite")
+            exe = _require_render_bin()
+            res = _run_subprocess(exe, argv, timeout_sec=timeout_sec)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+    except (ValueError, RuntimeError) as exc:
+        return _tool_error_result(name, "E_USAGE", str(exc), negotiated_version=negotiated_version)
+    except OSError as exc:
+        return _tool_error_result(name, "E_IO", str(exc), negotiated_version=negotiated_version)
+
+    return _tool_error_result(name, "E_UNKNOWN_TOOL", f"Unknown tool: {name}", negotiated_version=negotiated_version)
+
+
+# ---------------------------------------------------------------------------
+# Resources & Prompts
+# ---------------------------------------------------------------------------
+
+RESOURCES = [
+    {
+        "uri": "safarium://docs/render-standard",
+        "name": "SF-VIDEO-1 Render Standard",
+        "description": "Apple Silicon macOS render standard, single-slot FIFO queue rules, and quality gates.",
+        "mimeType": "text/markdown",
+    },
+    {
+        "uri": "safarium://docs/project-video-rule",
+        "name": "Portable Project Video Rule",
+        "description": "Compact SF-VIDEO-1 rule card for AI agents working on video projects.",
+        "mimeType": "text/markdown",
+    },
+    {
+        "uri": "safarium://docs/ai-control-protocol",
+        "name": "Safarium AI Control Protocol",
+        "description": "Machine-readable CLI/JSONL/error-code specification for AI automation.",
+        "mimeType": "text/markdown",
+    },
+    {
+        "uri": "safarium://schema/all",
+        "name": "SafariumForge Full JSON Schema",
+        "description": "Live JSON schema for Forge recipes, subcommands, and E_* error codes.",
+        "mimeType": "application/json",
+    },
+    {
+        "uri": "safarium://status/live",
+        "name": "Live SF-VIDEO-1 Queue Status",
+        "description": "Current active render slot, waiting queue, and host thermal state.",
+        "mimeType": "application/json",
+    },
+]
+
+
+def _read_resource(uri):
+    if uri == "safarium://docs/render-standard":
+        p = _share_doc_path("render-standard.md")
+        if p:
+            return [{"uri": uri, "mimeType": "text/markdown", "text": open(p, encoding="utf-8").read()}]
+        return [{"uri": uri, "mimeType": "text/markdown", "text": SERVER_INSTRUCTIONS}]
+    if uri == "safarium://docs/project-video-rule":
+        p = _share_doc_path("project-video-rule.md")
+        if p:
+            return [{"uri": uri, "mimeType": "text/markdown", "text": open(p, encoding="utf-8").read()}]
+        return [{"uri": uri, "mimeType": "text/markdown", "text": SERVER_INSTRUCTIONS}]
+    if uri == "safarium://docs/ai-control-protocol":
+        p = _share_doc_path("ai-control-protocol.md")
+        if p:
+            return [{"uri": uri, "mimeType": "text/markdown", "text": open(p, encoding="utf-8").read()}]
+        return [{"uri": uri, "mimeType": "text/markdown", "text": SERVER_INSTRUCTIONS}]
+    if uri == "safarium://schema/all":
+        exe = _require_render_bin()
+        res = _run_subprocess(exe, ["schema", "all"], timeout_sec=15)
+        return [{"uri": uri, "mimeType": "application/json", "text": res["stdout"].strip() or "{}"}]
+    if uri == "safarium://status/live":
+        exe = _require_render_bin()
+        res = _run_subprocess(exe, ["status", "--json-detail"], timeout_sec=10)
+        return [{"uri": uri, "mimeType": "application/json", "text": res["stdout"].strip() or "{}"}]
+    return None
+
+
+PROMPTS = [
+    {
+        "name": "preflight_check",
+        "description": "Inspect Safarium environment health, hardware capabilities, and FIFO queue before rendering.",
+        "arguments": [],
+    },
+    {
+        "name": "render_and_verify",
+        "description": "Step-by-step SF-VIDEO-1 render and zero-FFmpeg verification workflow.",
+        "arguments": [
+            {"name": "input_path", "description": "Input HTML or Forge recipe JSON path.", "required": True},
+            {"name": "output_path", "description": "Destination MP4/MOV output path.", "required": True},
+            {"name": "reference_path", "description": "Optional reference video path for parity verification.", "required": False},
+        ],
+    },
+    {
+        "name": "diagnose_render_failure",
+        "description": "Diagnose a Safarium E_* error code and recommend concrete macOS Apple Silicon fixes.",
+        "arguments": [
+            {"name": "error_code", "description": "Safarium E_* error code (e.g. E_UNSUPPORTED_CODEC).", "required": True},
+            {"name": "media_path", "description": "Optional failing input media path to probe.", "required": False},
+        ],
+    },
+]
+
+
+def _get_prompt(name, args):
+    args = args or {}
+    if name == "preflight_check":
+        return {
+            "description": "Preflight health & queue audit for Safarium.",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": {
+                        "type": "text",
+                        "text": (
+                            "Run `doctor`, `status`, and `capabilities` tools. Confirm `healthy: true`, "
+                            "zero orphan workers, Apple-only linkage, and check whether the SF-VIDEO-1 "
+                            "queue is idle before scheduling any heavy render."
+                        ),
+                    },
+                }
+            ],
+        }
+    if name == "render_and_verify":
+        inp = args.get("input_path", "<input_path>")
+        out = args.get("output_path", "<output_path>")
+        ref = args.get("reference_path")
+        ref_step = (
+            f"Then run `verify_media` comparing `reference_path={ref}` against `candidate_path={out}`, "
+            f"and `qa_inspect` with `ref_path={ref}`."
+            if ref
+            else f"Then run `verify_media` on `{out}` and `qa_inspect` on `{out}`."
+        )
+        return {
+            "description": "Safe SF-VIDEO-1 render + verify workflow.",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": {
+                        "type": "text",
+                        "text": (
+                            f"1. Call `doctor` and `status`.\n"
+                            f"2. If `{inp}` is a Forge recipe JSON, validate it with `forge_validate` first, then run `forge_run`.\n"
+                            f"   If `{inp}` is HTML, render it via `html_render` to `{out}`.\n"
+                            f"3. {ref_step}\n"
+                            f"4. Report Peak RAM / duration / verification result honestly."
+                        ),
+                    },
+                }
+            ],
+        }
+    if name == "diagnose_render_failure":
+        code = args.get("error_code", "E_UNKNOWN")
+        media = args.get("media_path")
+        probe_hint = f" Also run `probe_media` on `{media}`." if media else ""
+        return {
+            "description": "Diagnose Safarium structured error.",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": {
+                        "type": "text",
+                        "text": (
+                            f"Diagnose Safarium error `{code}`: call `forge_schema(target='errors')`, "
+                            f"`doctor`, and `capabilities`.{probe_hint} Explain the root cause and "
+                            f"exact fix without introducing FFmpeg, Chrome, or OpenCV."
+                        ),
+                    },
+                }
+            ],
+        }
+    return None
+
+
+# ---------------------------------------------------------------------------
+# JSON-RPC 2.0 Dispatcher
+# ---------------------------------------------------------------------------
+
+class MCPServer:
+    def __init__(self):
+        self.initialized = False
+        self.negotiated_version = DEFAULT_NEGOTIATED_VERSION
+
+    def _error(self, req_id, code, message, data=None):
+        err = {"code": code, "message": message}
+        if data is not None:
+            err["data"] = data
+        return {"jsonrpc": "2.0", "id": req_id, "error": err}
+
+    def _result(self, req_id, result):
+        return {"jsonrpc": "2.0", "id": req_id, "result": result}
+
+    def handle_message(self, msg, *, in_batch=False):
+        if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
+            return self._error(None, -32600, "Invalid Request: expected JSON-RPC 2.0 object")
+        method = msg.get("method")
+        if not isinstance(method, str):
+            return self._error(msg.get("id"), -32600, "Invalid Request: missing string 'method'")
+
+        is_notification = "id" not in msg
+        req_id = msg.get("id")
+        params = msg.get("params")
+
+        if method == "initialize":
+            if in_batch:
+                return self._error(req_id, -32600, "Invalid Request: 'initialize' cannot be batched")
+            req_ver = params.get("protocolVersion") if isinstance(params, dict) else None
+            if isinstance(req_ver, str) and req_ver in SUPPORTED_VERSIONS:
+                self.negotiated_version = req_ver
+            else:
+                self.negotiated_version = DEFAULT_NEGOTIATED_VERSION
+            return self._result(
+                req_id,
+                {
+                    "protocolVersion": self.negotiated_version,
+                    "capabilities": {
+                        "tools": {"listChanged": False},
+                        "resources": {"subscribe": False, "listChanged": False},
+                        "prompts": {"listChanged": False},
+                    },
+                    "serverInfo": {
+                        "name": SERVER_NAME,
+                        "version": SERVER_VERSION,
+                    },
+                    "instructions": SERVER_INSTRUCTIONS,
+                },
+            )
+
+        if method in ("notifications/initialized", "initialized"):
+            self.initialized = True
+            return None
+
+        if method == "notifications/cancelled":
+            return None
+
+        if method == "ping":
+            return None if is_notification else self._result(req_id, {})
+
+        if method == "tools/list":
+            return None if is_notification else self._result(req_id, {"tools": TOOLS})
+
+        if method == "tools/call":
+            if not isinstance(params, dict) or not isinstance(params.get("name"), str):
+                return None if is_notification else self._error(req_id, -32602, "Invalid params: missing tool 'name'")
+            tool_name = params["name"]
+            if tool_name not in TOOL_NAMES:
+                return None if is_notification else self._error(req_id, -32602, f"Unknown tool: {tool_name}")
+            meta = params.get("_meta")
+            progress_token = meta.get("progressToken") if isinstance(meta, dict) else None
+            res = _handle_tool_call(
+                tool_name,
+                params.get("arguments"),
+                progress_token=progress_token,
+                negotiated_version=self.negotiated_version,
+            )
+            return None if is_notification else self._result(req_id, res)
+
+        if method == "resources/list":
+            return None if is_notification else self._result(req_id, {"resources": RESOURCES})
+
+        if method == "resources/templates/list":
+            return None if is_notification else self._result(req_id, {"resourceTemplates": []})
+
+        if method == "resources/read":
+            if not isinstance(params, dict) or not isinstance(params.get("uri"), str):
+                return None if is_notification else self._error(req_id, -32602, "Invalid params: missing resource 'uri'")
+            uri = params["uri"]
+            try:
+                contents = _read_resource(uri)
+            except (RuntimeError, OSError) as exc:
+                return None if is_notification else self._error(req_id, -32603, f"Resource read failed: {exc}")
+            if contents is None:
+                return None if is_notification else self._error(req_id, -32002, f"Resource not found: {uri}", {"uri": uri})
+            return None if is_notification else self._result(req_id, {"contents": contents})
+
+        if method == "prompts/list":
+            return None if is_notification else self._result(req_id, {"prompts": PROMPTS})
+
+        if method == "prompts/get":
+            if not isinstance(params, dict) or not isinstance(params.get("name"), str):
+                return None if is_notification else self._error(req_id, -32602, "Invalid params: missing prompt 'name'")
+            prompt = _get_prompt(params["name"], params.get("arguments"))
+            if prompt is None:
+                return None if is_notification else self._error(req_id, -32602, f"Unknown prompt: {params['name']}")
+            return None if is_notification else self._result(req_id, prompt)
+
+        if is_notification:
+            return None
+        return self._error(req_id, -32601, f"Method not found: {method}")
+
+    def serve_stdio(self):
+        for raw_line in sys.stdin.buffer:
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except ValueError as exc:
+                _write_jsonrpc(self._error(None, -32700, f"Parse error: {exc}"))
+                continue
+
+            if isinstance(payload, list):
+                if not payload:
+                    _write_jsonrpc(self._error(None, -32600, "Invalid Request: empty batch"))
+                    continue
+                responses = []
+                for item in payload:
+                    resp = self.handle_message(item, in_batch=True)
+                    if resp is not None:
+                        responses.append(resp)
+                if responses:
+                    _write_jsonrpc(responses)
+                continue
+
+            resp = self.handle_message(payload, in_batch=False)
+            if resp is not None:
+                _write_jsonrpc(resp)
+
+
+def _handle_signal(signum, _frame):
+    _debug(f"received signal {signum}, shutting down")
+    _terminate_proc(_ACTIVE_PROC)
+    sys.exit(0)
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+        sys.stderr.write(
+            "Usage: safarium-mcp\n\n"
+            "Starts the Safarium Model Context Protocol (MCP) stdio JSON-RPC 2.0 server.\n"
+            "Configure in Claude Code, Claude Desktop, Cursor, Gemini CLI, or Codex CLI.\n"
+        )
+        return 0
+    if len(sys.argv) > 1 and sys.argv[1] == "--version":
+        sys.stdout.write(f"{SERVER_NAME} {SERVER_VERSION}\n")
+        return 0
+
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
+    MCPServer().serve_stdio()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

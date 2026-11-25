@@ -56,7 +56,7 @@ public struct SafariumPlatformCapabilitySnapshot: Codable, Sendable, Equatable {
     }
 }
 
-/// Platform capability discovery contract isolating OS-specific probes from core pipelines.
+/// Runtime capability discovery contract for macOS / Apple Silicon hardware probes (including cloud VM fallback checks).
 public protocol SafariumPlatformCapabilities: Sendable {
     var osName: String { get }
     var osVersion: String { get }
@@ -72,13 +72,13 @@ public protocol SafariumPlatformCapabilities: Sendable {
     func capabilitySnapshot(probePath: URL?) -> SafariumPlatformCapabilitySnapshot
 }
 
-/// OS-agnostic web-to-raster frame rendering backend (implemented on macOS via windowless `WKWebView`).
+/// Native macOS web-to-raster frame rendering backend backed by windowless `WKWebView`.
 public protocol WebFrameRendererBackend: Sendable {
     @MainActor func makeWebPage(config: PageConfig) async throws -> Page
     @MainActor func renderWebFrame(source: PageSource, config: PageConfig, seekSeconds: Double?) async throws -> Snapshot
 }
 
-/// OS-agnostic video encoding sink factory (implemented on macOS via `AVAssetWriter` / VideoToolbox).
+/// Native macOS hardware video encoding sink factory backed by `AVAssetWriter` / VideoToolbox.
 public protocol VideoEncoderBackend: Sendable {
     func supportsCodec(_ codec: VideoCodec) -> Bool
     func makeFrameSink(
@@ -94,14 +94,14 @@ public protocol VideoEncoderBackend: Sendable {
     ) throws -> AVAssetWriterSink
 }
 
-/// OS-agnostic copy-on-write clone / fallback stream-copy filesystem backend.
+/// Native macOS APFS copy-on-write clone / fallback stream-copy filesystem backend.
 public protocol FilesystemCloneBackend: Sendable {
     func supportsClonefile(at url: URL) -> Bool
     @discardableResult
     func cloneOrCopy(from src: URL, to dst: URL, overwrite: Bool) throws -> Bool
 }
 
-/// Default macOS native backend backed by WebKit, Metal, VideoToolbox, AudioToolbox, Accelerate, and APFS `clonefile(2)`.
+/// Native macOS Apple Silicon backend backed by WebKit, Metal, VideoToolbox, AudioToolbox, Accelerate, and APFS `clonefile(2)`.
 public struct AppleMacOSBackend:
     SafariumPlatformCapabilities,
     WebFrameRendererBackend,

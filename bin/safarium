@@ -66,6 +66,7 @@ Non-Blocking Inspection & Ecosystem Commands:
   safarium version                          Safarium version & installed release SHA
   safarium hf {check|render} PROJECT ...    Run HyperFrames via Safarium WebKit CDP shim
   safarium raster info                      Report libSafariumRaster.dylib path, presence & ABI
+  safarium mcp                              Start Model Context Protocol (MCP) stdio server for AI agents
 """
 
 MEDIA_HELP = """Usage:
@@ -253,6 +254,9 @@ def main(argv):
 
     if cmd == "hf":
         return _exec_sibling("safarium-hf", rest)
+
+    if cmd == "mcp":
+        return _exec_sibling("safarium-mcp", rest)
 
     if cmd == "raster":
         if rest in (["-h"], ["--help"], ["help"]):

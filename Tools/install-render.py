@@ -19,6 +19,7 @@ ROOT=Path(__file__).resolve().parents[1]
 FORMAT="safarium.personal-render-release/1"
 LINKS={"bin/safarium":"../share/safarium/current/bin/safarium",
        "bin/safarium-render":"../share/safarium/current/bin/safarium-render",
+       "bin/safarium-mcp":"../share/safarium/current/bin/safarium-mcp",
        "libexec/safarium":"../share/safarium/current/libexec/safarium",
        "share/safarium/render-standard.md":"current/share/safarium/render-standard.md",
        "share/safarium/project-video-rule.md":"current/share/safarium/project-video-rule.md"}
@@ -48,11 +49,11 @@ def current_release(base,allow_legacy=False):
     target=os.readlink(cur)
     if not re.fullmatch(r"releases/[0-9a-f]{64}",target):
         raise ValueError(f"unrecognized current release link: {cur}")
-    p=base/target;verify(p,require_media=not allow_legacy,require_unified=not allow_legacy)
+    p=base/target;verify(p,require_media=not allow_legacy,require_unified=not allow_legacy,require_mcp=not allow_legacy)
     return p
 
 
-def verify(dest,require_media=True,require_unified=True):
+def verify(dest,require_media=True,require_unified=True,require_mcp=True):
     own_dir(dest)
     dest_real=dest.resolve()
     receipt=dest/"manifest.json"
@@ -64,6 +65,8 @@ def verify(dest,require_media=True,require_unified=True):
         "share/safarium/render-standard.md"}
     if require_unified:
         required.add("bin/safarium")
+    if require_mcp:
+        required.add("bin/safarium-mcp")
     if require_media:
         required.add("libexec/safarium/safarium-media")
         required.add("libexec/safarium/safarium-forge")
@@ -89,6 +92,7 @@ def verify(dest,require_media=True,require_unified=True):
 def payload(release,verifier):
     mapping={"bin/safarium":(ROOT/"bin/safarium",0o700),
              "bin/safarium-render":(ROOT/"bin/safarium-render",0o700),
+             "bin/safarium-mcp":(ROOT/"bin/safarium-mcp",0o700),
              "libexec/safarium/safarium-html":(release/"safarium-html",0o700),
              "libexec/safarium/safarium-media":(release/"safarium-media",0o700),
              "libexec/safarium/safarium-forge":(release/"safarium-forge",0o700),

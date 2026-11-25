@@ -223,6 +223,7 @@ jobs:
 
           REAL_SCRATCH="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' /tmp/safarium-ci-scratch)"
           /usr/bin/python3 -ISB Tests/queue/test_queue.py --scratch "$REAL_SCRATCH" -v
+          /usr/bin/python3 -ISB Tests/mcp/test_mcp.py -v
           python3 Tests/queue-integration/rule-sync.py --scratch "$REAL_SCRATCH"
 
       - name: SafariumRaster zero-OpenCV ctypes smoke, accuracy & WebP 14-bit policy tests
