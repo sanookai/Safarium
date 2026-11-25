@@ -344,7 +344,10 @@ jobs:
                 DESELECT+=("not test_run_case_end_to_end_on_a_cheap_case_gives_the_expected_verdicts")
               fi
               if [ "${#DESELECT[@]}" -gt 0 ]; then
-                EXPR="$(IFS=" and "; echo "${DESELECT[*]}")"
+                EXPR=""
+                for tok in "${DESELECT[@]}"; do
+                  EXPR="${EXPR:+$EXPR and }$tok"
+                done
                 EXTRA_ARGS=(-k "$EXPR")
               fi
             fi
