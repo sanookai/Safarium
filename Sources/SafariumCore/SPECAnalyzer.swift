@@ -546,8 +546,12 @@ public final class SPECAnalyzer: @unchecked Sendable {
                 let crU = gridCr[rowPrev + gx]
                 let crD = gridCr[rowNext + gx]
 
-                let chromaGrad = Double(abs(cbR - cbL) + abs(cbD - cbU) + abs(crR - crL) + abs(crD - crU))
-                let sat = Double(abs(gridCb[idx]) + abs(gridCr[idx]))
+                let dCbX: Float = abs(cbR - cbL)
+                let dCbY: Float = abs(cbD - cbU)
+                let dCrX: Float = abs(crR - crL)
+                let dCrY: Float = abs(crD - crU)
+                let chromaGrad = Double(dCbX + dCbY) + Double(dCrX + dCrY)
+                let sat = Double(abs(gridCb[idx])) + Double(abs(gridCr[idx]))
                 if (gradY > 18.0 && chromaGrad > 24.0 && sat > 22.0) || (chromaGrad > 48.0 && gradY > 10.0) {
                     chromaEdgeHits += 1
                 }
@@ -561,9 +565,10 @@ public final class SPECAnalyzer: @unchecked Sendable {
                 let yUR = gridY[rowPrev + gx + 1]
                 let yDL = gridY[rowNext + gx - 1]
                 let yDR = gridY[rowNext + gx + 1]
-                let lapRaw = (yUL - 2.0 * yU + yUR)
-                    + (-2.0 * yL + 4.0 * yC - 2.0 * yR)
-                    + (yDL - 2.0 * yD + yDR)
+                let lapTop: Float = yUL - 2.0 * yU + yUR
+                let lapMid: Float = 4.0 * yC - 2.0 * yL - 2.0 * yR
+                let lapBot: Float = yDL - 2.0 * yD + yDR
+                let lapRaw: Float = lapTop + lapMid + lapBot
                 let lapAbs = Double(abs(lapRaw))
                 let lapBin = min(255, Int((lapAbs * 0.5).rounded()))
                 lapHist[lapBin] += 1
@@ -576,8 +581,10 @@ public final class SPECAnalyzer: @unchecked Sendable {
                     lapCountShadow += 1
                 }
 
-                let cbLap = abs(cbL + cbR + cbU + cbD - 4.0 * gridCb[idx])
-                let crLap = abs(crL + crR + crU + crD - 4.0 * gridCr[idx])
+                let cbNeighbors: Float = cbL + cbR + cbU + cbD
+                let crNeighbors: Float = crL + crR + crU + crD
+                let cbLap: Float = abs(cbNeighbors - 4.0 * gridCb[idx])
+                let crLap: Float = abs(crNeighbors - 4.0 * gridCr[idx])
                 chromaLapSum += Double(cbLap + crLap) * 0.5
 
                 interiorCount += 1
