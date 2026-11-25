@@ -330,6 +330,26 @@ private func validBorder(_ b: Int32) -> Bool {
     [SR_BORDER_CONSTANT, SR_BORDER_REPLICATE, SR_BORDER_REFLECT, SR_BORDER_WRAP, SR_BORDER_REFLECT_101, SR_BORDER_TRANSPARENT].contains(b)
 }
 
+@_silgen_name("sr_c_warp_affine")
+private func sr_c_warp_affine(_ src: UnsafeRawPointer, _ sstep: Int, _ sw: Int32, _ sh: Int32,
+                              _ dst: UnsafeMutableRawPointer, _ dstep: Int, _ dw: Int32, _ dh: Int32,
+                              _ cn: Int32, _ depth: Int32, _ m6: UnsafePointer<Double>,
+                              _ interp: Int32, _ border: Int32, _ bval: UnsafePointer<Double>) -> Int32
+
+@_silgen_name("sr_c_warp_perspective")
+private func sr_c_warp_perspective(_ src: UnsafeRawPointer, _ sstep: Int, _ sw: Int32, _ sh: Int32,
+                                   _ dst: UnsafeMutableRawPointer, _ dstep: Int, _ dw: Int32, _ dh: Int32,
+                                   _ cn: Int32, _ depth: Int32, _ m9: UnsafePointer<Double>,
+                                   _ interp: Int32, _ border: Int32, _ bval: UnsafePointer<Double>) -> Int32
+
+@_silgen_name("sr_c_remap")
+private func sr_c_remap(_ src: UnsafeRawPointer, _ sstep: Int, _ sw: Int32, _ sh: Int32,
+                        _ dst: UnsafeMutableRawPointer, _ dstep: Int, _ dw: Int32, _ dh: Int32,
+                        _ cn: Int32, _ depth: Int32,
+                        _ m1: UnsafePointer<Float>, _ m1step: Int, _ m1cn: Int32,
+                        _ m2: UnsafePointer<Float>?, _ m2step: Int,
+                        _ interp: Int32, _ border: Int32, _ bval: UnsafePointer<Double>) -> Int32
+
 /// m: 6 doubles (2x3, row-major). If WARP_INVERSE_MAP (16) is not set the matrix is the forward map and gets inverted.
 @_cdecl("sr_warp_affine")
 public func sr_warp_affine(_ sd: UnsafeMutableRawPointer?, _ sw: Int32, _ sh: Int32, _ ss: Int32, _ sc: Int32, _ sdep: Int32,
@@ -352,15 +372,15 @@ public func sr_warp_affine(_ sd: UnsafeMutableRawPointer?, _ sw: Int32, _ sh: In
         let b1 = -a11 * m[2] - a12 * m[5], b2 = -a21 * m[2] - a22 * m[5]
         m = [a11, a12, b1, a21, a22, b2]
     }
-    var interp = Int(flags & 7)
+    var interp = Int32(flags & 7)
     if interp == 3 { interp = 1 }  // INTER_AREA behaves as linear in warps
     guard interp <= 2 || interp == 4 else { return srFail(SRStatus.unsupported, "warpAffine: interpolation not supported") }
     guard validBorder(borderMode) else { return srFail(SRStatus.unsupported, "warpAffine: unknown border mode") }
-    let bv = (0..<4).map { borderValue[$0] }
-    dispatch(src, { warpImpl(src, dst, m, interp, borderMode, bv, UInt8.self) },
-             { warpImpl(src, dst, m, interp, borderMode, bv, UInt16.self) },
-             { warpImpl(src, dst, m, interp, borderMode, bv, Float.self) })
-    return SRStatus.ok
+    let rc = m.withUnsafeBufferPointer { mp in
+        sr_c_warp_affine(src.data, src.stride, sw, sh, dst.data, dst.stride, dw, dh,
+                         sc, sdep, mp.baseAddress!, interp, borderMode, borderValue)
+    }
+    return rc == 0 ? SRStatus.ok : srFail(SRStatus.internalError, "warpAffine failed")
 }
 
 /// Maps: either map1 = f32 2-channel (x,y) and map2 data NULL, or map1/map2 = f32 1-channel (x, y). Same size as dst.
@@ -389,15 +409,15 @@ public func sr_remap(_ sd: UnsafeMutableRawPointer?, _ sw: Int32, _ sh: Int32, _
     guard src.depth == .u8 || src.depth == .u16 || src.depth == .f32 else {
         return srFail(SRStatus.unsupported, "remap: only u8, u16 and f32 images are supported")
     }
-    var mode = Int(interp & 7)
+    var mode = interp & 7
     if mode == 3 { mode = 1 }
     guard mode <= 2 || mode == 4 else { return srFail(SRStatus.unsupported, "remap: interpolation not supported") }
     guard validBorder(borderMode) else { return srFail(SRStatus.unsupported, "remap: unknown border mode") }
-    let bv = (0..<4).map { borderValue[$0] }
-    dispatch(src, { remapImpl(src, dst, map1, map2, mode, borderMode, bv, UInt8.self) },
-             { remapImpl(src, dst, map1, map2, mode, borderMode, bv, UInt16.self) },
-             { remapImpl(src, dst, map1, map2, mode, borderMode, bv, Float.self) })
-    return SRStatus.ok
+    let rc = sr_c_remap(src.data, src.stride, sw, sh, dst.data, dst.stride, dw, dh, sc, sdep,
+                        map1.data.assumingMemoryBound(to: Float.self), map1.stride, m1c,
+                        map2?.data.assumingMemoryBound(to: Float.self), map2?.stride ?? 0,
+                        mode, borderMode, borderValue)
+    return rc == 0 ? SRStatus.ok : srFail(SRStatus.internalError, "remap failed")
 }
 
 private func warpPerspectiveImpl<T: SRPix>(_ src: SRImage, _ dst: SRImage, _ m: [Double], _ interp: Int, _ border: Int32,
@@ -447,15 +467,15 @@ public func sr_warp_perspective(_ sd: UnsafeMutableRawPointer?, _ sw: Int32, _ s
         let invDet = det != 0.0 ? (1.0 / det) : 0.0
         m = [c00*invDet, c10*invDet, c20*invDet, c01*invDet, c11*invDet, c21*invDet, c02*invDet, c12*invDet, c22*invDet]
     }
-    var interp = Int(flags & 7)
+    var interp = Int32(flags & 7)
     if interp == 3 { interp = 1 }
     guard interp <= 2 || interp == 4 else { return srFail(SRStatus.unsupported, "warpPerspective: interpolation not supported") }
     guard validBorder(borderMode) else { return srFail(SRStatus.unsupported, "warpPerspective: unknown border mode") }
-    let bv = (0..<4).map { borderValue[$0] }
-    dispatch(src, { warpPerspectiveImpl(src, dst, m, interp, borderMode, bv, UInt8.self) },
-             { warpPerspectiveImpl(src, dst, m, interp, borderMode, bv, UInt16.self) },
-             { warpPerspectiveImpl(src, dst, m, interp, borderMode, bv, Float.self) })
-    return SRStatus.ok
+    let rc = m.withUnsafeBufferPointer { mp in
+        sr_c_warp_perspective(src.data, src.stride, sw, sh, dst.data, dst.stride, dw, dh,
+                              sc, sdep, mp.baseAddress!, interp, borderMode, borderValue)
+    }
+    return rc == 0 ? SRStatus.ok : srFail(SRStatus.internalError, "warpPerspective failed")
 }
 
 @_cdecl("sr_get_perspective")

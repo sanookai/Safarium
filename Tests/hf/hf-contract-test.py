@@ -75,14 +75,22 @@ def verify_mp4_zero_ffmpeg(
     queue_bin: Path, mp4_path: Path, expected_w: int, expected_h: int, work_dir: Path, queue_timeout: int = 600
 ) -> dict:
     # 1. Apple-only packet inspection via `safarium-render forge inspect` (no FIFO block, Apple AVAsset/MediaToolbox)
-    probe = sp.run([str(queue_bin), "forge", "inspect", str(mp4_path)], capture_output=True, text=True, timeout=30)
+    probe = sp.run(
+        [str(queue_bin), "forge", "inspect", str(mp4_path), "--include-audio-packets"],
+        capture_output=True, text=True, timeout=30,
+    )
     if probe.returncode != 0:
         return {"pass": False, "error": f"forge inspect failed: {probe.stderr}"}
     info = json.loads(probe.stdout)
-    tracks = info.get("tracks", [])
+    media = info.get("media") if isinstance(info.get("media"), dict) else info
+    tracks = media.get("tracks", [])
+    playable = media.get("playable")
     v_track = next((t for t in tracks if t.get("mediaType") == "vide"), None)
     a_track = next((t for t in tracks if t.get("mediaType") == "soun"), None)
-    if not v_track or v_track.get("width") != expected_w or v_track.get("height") != expected_h:
+    v_fmt = (v_track.get("formats") or [{}])[0] if v_track else {}
+    v_w = v_track.get("width", v_fmt.get("width")) if v_track else None
+    v_h = v_track.get("height", v_fmt.get("height")) if v_track else None
+    if not v_track or v_w != expected_w or v_h != expected_h:
         return {"pass": False, "error": f"unexpected video geometry: {v_track}"}
 
     # 2. Decode sample frames via `safarium-render extract-frames` (AVFoundation)
@@ -100,9 +108,10 @@ def verify_mp4_zero_ffmpeg(
 
     # Check non-uniform pixel content on macOS `sips` / PNG raw check via AppKit or Pillow if installed
     non_empty = all(p.stat().st_size > 300 for p in extracted)
+    audio_ok = a_track is not None and (a_track.get("packetCount") or 0) > 0
     return {
-        "pass": bool(info.get("playable") and v_track is not None and a_track is not None and non_empty),
-        "playable": info.get("playable"),
+        "pass": bool(playable) and v_track is not None and v_w == expected_w and v_h == expected_h and audio_ok and non_empty,
+        "playable": playable,
         "video": v_track,
         "audio": a_track,
         "extractedFrames": len(extracted),

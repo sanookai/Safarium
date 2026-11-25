@@ -424,18 +424,19 @@ public final class AVAssetWriterSink: FrameSink {
 
     /// - bitrate: average bits/s (H.264/HEVC); ignored for ProRes.
     /// - quality: 0...1 constant quality (HEVC/HEVC-alpha); used instead of bitrate when set.
-    /// - pixelFormat: `.bgra`, `.nv12vImage`, or `.nv12Left` (Fix A 1-1-1 + Left siting).
+    /// - pixelFormat: `.bgra`, `.nv12vImage`, or `.nv12Left`; defaults to `.bgra` when `codec.hasAlpha` else `.nv12Left` (Fix A 1-1-1 + Left siting).
     /// - profile: encoder & pool backpressure settings (`.baseline` or `.lowRamClosedGOP`).
     public init(url: URL, width: Int, height: Int, fps: Int, codec: VideoCodec,
                 bitrate: Int? = nil, quality: Double? = nil,
-                pixelFormat: SinkPixelFormat = .bgra,
+                pixelFormat: SinkPixelFormat? = nil,
                 profile: EncoderProfile = .baseline,
                 encoderSpecification: [String: Any]? = nil) throws {
+        let resolvedPixelFormat = pixelFormat ?? (codec.hasAlpha ? .bgra : .nv12Left)
         guard width > 0, height > 0, width <= 8192, height <= 8192, width * height <= 33_554_432 else {
             throw SafariumError.encode("dimensions must be <= 8192 per side and 33554432 pixels, got \(width)x\(height)")
         }
-        if (pixelFormat == .nv12vImage || pixelFormat == .nv12Left) && (width % 2 != 0 || height % 2 != 0) {
-            throw SafariumError.encode("\(pixelFormat.rawValue) requires even dimensions, got \(width)x\(height)")
+        if (resolvedPixelFormat == .nv12vImage || resolvedPixelFormat == .nv12Left) && (width % 2 != 0 || height % 2 != 0) {
+            throw SafariumError.encode("\(resolvedPixelFormat.rawValue) requires even dimensions, got \(width)x\(height)")
         }
         if let b = bitrate, b <= 0 {
             throw SafariumError.encode("bitrate must be > 0")
@@ -444,14 +445,14 @@ public final class AVAssetWriterSink: FrameSink {
             throw SafariumError.encode("quality must be finite in (0, 1]")
         }
         guard let rate = Int32(exactly: fps), rate > 0 else { throw SafariumError.encode("fps must be a positive Int32") }
-        if (pixelFormat == .nv12vImage || pixelFormat == .nv12Left) && codec.hasAlpha {
-            throw SafariumError.invalidState("\(pixelFormat.rawValue) pixel format does not support alpha codec \(codec)")
+        if (resolvedPixelFormat == .nv12vImage || resolvedPixelFormat == .nv12Left) && codec.hasAlpha {
+            throw SafariumError.invalidState("\(resolvedPixelFormat.rawValue) pixel format does not support alpha codec \(codec)")
         }
         self.width = width; self.height = height; self.fps = rate
-        self.pixelFormat = pixelFormat
+        self.pixelFormat = resolvedPixelFormat
         self.profile = profile
-        self.nv12Info = (pixelFormat == .nv12vImage) ? try Self.makeNV12Info() : nil
-        self.scratchBandContext = (pixelFormat == .nv12Left) ? Self.makeScratchBandContext(width: width) : nil
+        self.nv12Info = (resolvedPixelFormat == .nv12vImage) ? try Self.makeNV12Info() : nil
+        self.scratchBandContext = (resolvedPixelFormat == .nv12Left) ? Self.makeScratchBandContext(width: width) : nil
 
         try? FileManager.default.removeItem(at: url)
         writer = try AVAssetWriter(url: url, fileType: codec.fileType)
@@ -475,7 +476,7 @@ public final class AVAssetWriterSink: FrameSink {
         adaptor = AVAssetWriterInputPixelBufferAdaptor(
             assetWriterInput: input,
             sourcePixelBufferAttributes: Self.pixelBufferAttributes(
-                width: width, height: height, pixelFormat: pixelFormat,
+                width: width, height: height, pixelFormat: resolvedPixelFormat,
                 allocationThreshold: profile.poolAllocationThreshold
             )
         )

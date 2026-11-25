@@ -101,9 +101,9 @@ private let subcommandHelp: [String: String] = [
     Usage: safarium-forge cache <hash|store|lookup|stats|prune> [options]
       hash   --namespace <ns> [--params '<json>'] [--inputs path1,path2]
       store  --input <file> [--key <hex>] [--namespace <ns>] [--params '<json>'] [--root <dir>]
-      lookup --key <hex> [-o <dest>] [--root <dir>] [--overwrite]
-      stats  [--root <dir>]
-      prune  --max-bytes <N> [--root <dir>]
+      lookup --key <hex> [-o <dest>] [--root <dir>] [--kind auto|scene|shot] [--overwrite]
+      stats  [--root <dir>] [--kind auto|scene|shot]
+      prune  --max-bytes <N> [--root <dir>] [--kind auto|scene|shot]
     """,
     "ab-gallery": "Usage: safarium-forge ab-gallery --manifest <manifest.json> -o <gallery.html> [--overwrite]",
     "capabilities": "Usage: safarium-forge capabilities",
@@ -2583,6 +2583,47 @@ private func runRingEncodeCommand(_ args: [String]) async throws -> Data {
     return try encodeJSON(report)
 }
 
+private enum CacheKindOption: String {
+    case auto
+    case scene
+    case shot
+}
+
+private struct UnifiedCacheLookupReport: Codable {
+    let key: String
+    let hit: Bool
+    let kind: String
+    let cachedPath: String?
+    let materializedPath: String?
+    let usedClonefile: Bool
+    let bytes: Int64
+    let sha256: String?
+    let wallMs: Double
+}
+
+private struct UnifiedCacheStatsReport: Codable {
+    let cacheRoot: String
+    let kind: String
+    let entryCount: Int
+    let totalBytes: Int64
+    let shotEntryCount: Int
+    let shotTotalBytes: Int64
+    let sceneEntryCount: Int
+    let sceneTotalBytes: Int64
+}
+
+private struct UnifiedCachePruneReport: Codable {
+    let cacheRoot: String
+    let kind: String
+    let maxBytes: Int64
+    let removedEntries: Int
+    let freedBytes: Int64
+    let remainingEntries: Int
+    let remainingBytes: Int64
+    let removedShotEntries: Int
+    let removedSceneEntries: Int
+}
+
 private func runCacheCommand(_ args: [String]) throws -> Data {
     try checkSubcommandHelp(args, command: "cache")
     guard let sub = args.first else {
@@ -2598,6 +2639,7 @@ private func runCacheCommand(_ args: [String]) throws -> Data {
     var cacheRootPath: String?
     var maxBytes: Int64?
     var overwrite = false
+    var cacheKind: CacheKindOption = .auto
     var i = 0
     while i < rest.count {
         let a = rest[i]
@@ -2609,6 +2651,12 @@ private func runCacheCommand(_ args: [String]) throws -> Data {
         case "--key": key = try nextValue(rest, index: &i, flag: a)
         case "-o", "--output", "--out": destPath = try nextValue(rest, index: &i, flag: a)
         case "--root": cacheRootPath = try nextValue(rest, index: &i, flag: a)
+        case "--kind":
+            let raw = try nextValue(rest, index: &i, flag: a).lowercased()
+            guard let parsed = CacheKindOption(rawValue: raw) else {
+                throw CLIUsageError("invalid --kind '\(raw)'; expected auto, scene, or shot")
+            }
+            cacheKind = parsed
         case "--max-bytes":
             let raw = try nextValue(rest, index: &i, flag: a)
             guard let v = Int64(raw) else { throw CLIUsageError("invalid integer for --max-bytes: \(raw)") }
@@ -2652,26 +2700,142 @@ private func runCacheCommand(_ args: [String]) throws -> Data {
         guard let key else {
             throw CLIUsageError("cache lookup requires --key <hex>")
         }
-        let cache = try ForgeShotCache(rootURL: rootURL)
-        let report = try cache.lookup(
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        let destURL = destPath.map { URL(fileURLWithPath: $0) }
+        if cacheKind == .shot || cacheKind == .auto {
+            let shotRoot = rootURL ?? ForgeShotCache.defaultRootURL()
+            if cacheKind == .shot || FileManager.default.fileExists(atPath: shotRoot.path) {
+                let cache = try ForgeShotCache(rootURL: rootURL)
+                let report = try cache.lookup(key: key, destinationURL: destURL, overwrite: overwrite)
+                if report.hit || cacheKind == .shot {
+                    return try encodeJSON(UnifiedCacheLookupReport(
+                        key: report.key,
+                        hit: report.hit,
+                        kind: report.hit ? "shot" : CacheKindOption.shot.rawValue,
+                        cachedPath: report.hit ? shotRoot.appendingPathComponent("\(report.key).bin").path : nil,
+                        materializedPath: report.materializedPath,
+                        usedClonefile: report.usedClonefile,
+                        bytes: report.bytes,
+                        sha256: nil,
+                        wallMs: report.wallMs
+                    ))
+                }
+            }
+        }
+        if cacheKind == .scene || cacheKind == .auto {
+            let sceneRoot = rootURL ?? ForgeIncrementalCache.defaultCacheRootURL()
+            if cacheKind == .scene || rootURL != nil || FileManager.default.fileExists(atPath: sceneRoot.path) {
+                let sceneReport = try ForgeIncrementalCache.lookupScene(
+                    key: key,
+                    destinationURL: destURL,
+                    cacheRoot: rootURL,
+                    overwrite: overwrite,
+                    rejectCorrupt: true
+                )
+                return try encodeJSON(UnifiedCacheLookupReport(
+                    key: sceneReport.key,
+                    hit: sceneReport.hit,
+                    kind: sceneReport.hit ? "scene" : cacheKind.rawValue,
+                    cachedPath: sceneReport.cachedPath,
+                    materializedPath: sceneReport.materializedPath,
+                    usedClonefile: sceneReport.usedClonefile,
+                    bytes: sceneReport.bytes,
+                    sha256: sceneReport.sha256,
+                    wallMs: sceneReport.wallMs
+                ))
+            }
+        }
+        return try encodeJSON(UnifiedCacheLookupReport(
             key: key,
-            destinationURL: destPath.map { URL(fileURLWithPath: $0) },
-            overwrite: overwrite
-        )
-        return try encodeJSON(report)
+            hit: false,
+            kind: cacheKind.rawValue,
+            cachedPath: nil,
+            materializedPath: nil,
+            usedClonefile: false,
+            bytes: 0,
+            sha256: nil,
+            wallMs: Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
+        ))
 
     case "stats":
-        let cache = try ForgeShotCache(rootURL: rootURL)
-        let report = try cache.stats()
-        return try encodeJSON(report)
+        let shotRoot = rootURL ?? ForgeShotCache.defaultRootURL()
+        let sceneRoot = rootURL ?? ForgeIncrementalCache.defaultCacheRootURL()
+        let includeShot = (cacheKind == .auto || cacheKind == .shot)
+        let includeScene = (cacheKind == .auto || cacheKind == .scene)
+        let shotEntries = includeShot ? try ForgeShotCache.scanShotEntries(at: shotRoot) : []
+        let sceneEntries = includeScene ? try ForgeIncrementalCache.scanSceneEntries(at: sceneRoot) : []
+        let shotBytes = shotEntries.reduce(Int64(0)) { $0 + $1.bytes }
+        let sceneBytes = sceneEntries.reduce(Int64(0)) { $0 + $1.bytes }
+        let displayRoot = rootURL?.path ?? (cacheKind == .scene ? sceneRoot.path : shotRoot.path)
+        return try encodeJSON(UnifiedCacheStatsReport(
+            cacheRoot: displayRoot,
+            kind: cacheKind.rawValue,
+            entryCount: shotEntries.count + sceneEntries.count,
+            totalBytes: shotBytes + sceneBytes,
+            shotEntryCount: shotEntries.count,
+            shotTotalBytes: shotBytes,
+            sceneEntryCount: sceneEntries.count,
+            sceneTotalBytes: sceneBytes
+        ))
 
     case "prune":
         guard let maxBytes else {
             throw CLIUsageError("cache prune requires --max-bytes <N>")
         }
-        let cache = try ForgeShotCache(rootURL: rootURL)
-        let report = try cache.prune(maxBytes: maxBytes)
-        return try encodeJSON(report)
+        let targetMax = max(0, maxBytes)
+        let shotRoot = rootURL ?? ForgeShotCache.defaultRootURL()
+        let sceneRoot = rootURL ?? ForgeIncrementalCache.defaultCacheRootURL()
+        let includeShot = (cacheKind == .auto || cacheKind == .shot)
+        let includeScene = (cacheKind == .auto || cacheKind == .scene)
+
+        struct UnifiedVictim {
+            let isShot: Bool
+            let dataURL: URL
+            let metaURL: URL
+            let bytes: Int64
+            let lastAccess: TimeInterval
+        }
+
+        var items: [UnifiedVictim] = []
+        if includeShot {
+            for e in try ForgeShotCache.scanShotEntries(at: shotRoot) {
+                items.append(UnifiedVictim(isShot: true, dataURL: e.binURL, metaURL: e.metaURL, bytes: e.bytes, lastAccess: e.lastAccess))
+            }
+        }
+        if includeScene {
+            for e in try ForgeIncrementalCache.scanSceneEntries(at: sceneRoot) {
+                items.append(UnifiedVictim(isShot: false, dataURL: e.segURL, metaURL: e.metaURL, bytes: e.bytes, lastAccess: e.lastAccess))
+            }
+        }
+        items.sort { $0.lastAccess < $1.lastAccess }
+        var total = items.reduce(Int64(0)) { $0 + $1.bytes }
+        var removedShot = 0
+        var removedScene = 0
+        var freed: Int64 = 0
+        while total > targetMax, !items.isEmpty {
+            let victim = items.removeFirst()
+            try? FileManager.default.removeItem(at: victim.dataURL)
+            try? FileManager.default.removeItem(at: victim.metaURL)
+            total -= victim.bytes
+            freed += victim.bytes
+            if victim.isShot {
+                removedShot += 1
+            } else {
+                removedScene += 1
+            }
+        }
+        let displayRoot = rootURL?.path ?? (cacheKind == .scene ? sceneRoot.path : shotRoot.path)
+        return try encodeJSON(UnifiedCachePruneReport(
+            cacheRoot: displayRoot,
+            kind: cacheKind.rawValue,
+            maxBytes: targetMax,
+            removedEntries: removedShot + removedScene,
+            freedBytes: freed,
+            remainingEntries: items.count,
+            remainingBytes: max(0, total),
+            removedShotEntries: removedShot,
+            removedSceneEntries: removedScene
+        ))
 
     default:
         throw CLIUsageError("unknown cache subcommand '\(sub)'")

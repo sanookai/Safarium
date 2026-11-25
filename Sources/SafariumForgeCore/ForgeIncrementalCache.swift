@@ -146,7 +146,7 @@ public enum ForgeIncrementalCache {
         let filePath: String
     }
 
-    private static func isExistingDirectory(path: String) -> Bool {
+    public static func isExistingDirectory(path: String) -> Bool {
         var st = stat()
         return stat(path, &st) == 0 && (st.st_mode & S_IFMT) == S_IFDIR
     }
@@ -176,7 +176,8 @@ public enum ForgeIncrementalCache {
         return fileHasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func hashDirectoryInput(at dirURL: URL, into hasher: inout SHA256) throws {
+    /// Hashes a directory tree deterministically (ignoring `._*` and rejecting symlinks escaping root).
+    public static func hashDirectoryInput(at dirURL: URL, into hasher: inout SHA256) throws {
         var rootStat = stat()
         guard Darwin.lstat(dirURL.path, &rootStat) == 0,
               (rootStat.st_mode & S_IFMT) == S_IFDIR else {
@@ -565,13 +566,22 @@ public enum ForgeIncrementalCache {
         )
     }
 
-    private static func scanEntries(root: URL) throws -> [(key: String, segURL: URL, metaURL: URL, bytes: Int64, lastAccess: TimeInterval)] {
+    public struct SceneCacheScannedEntry: Sendable {
+        public let key: String
+        public let segURL: URL
+        public let metaURL: URL
+        public let bytes: Int64
+        public let lastAccess: TimeInterval
+    }
+
+    public static func scanSceneEntries(at root: URL) throws -> [SceneCacheScannedEntry] {
+        guard FileManager.default.fileExists(atPath: root.path) else { return [] }
         let items = try FileManager.default.contentsOfDirectory(
             at: root,
             includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey],
             options: [.skipsHiddenFiles]
         )
-        var out: [(String, URL, URL, Int64, TimeInterval)] = []
+        var out: [SceneCacheScannedEntry] = []
         for url in items {
             let name = url.lastPathComponent
             if name.hasPrefix("._") || name.hasPrefix(".") || !name.hasSuffix(".mp4") { continue }
@@ -585,9 +595,13 @@ public enum ForgeIncrementalCache {
                 size = max(size, meta.byteSize)
                 access = meta.lastAccessedUnix
             }
-            out.append((key, url, mURL, size, access))
+            out.append(SceneCacheScannedEntry(key: key, segURL: url, metaURL: mURL, bytes: size, lastAccess: access))
         }
         return out
+    }
+
+    private static func scanEntries(root: URL) throws -> [(key: String, segURL: URL, metaURL: URL, bytes: Int64, lastAccess: TimeInterval)] {
+        try scanSceneEntries(at: root).map { ($0.key, $0.segURL, $0.metaURL, $0.bytes, $0.lastAccess) }
     }
 
     public static func cacheStats(cacheRoot: URL? = nil) throws -> ForgeSceneCacheStatsReport {

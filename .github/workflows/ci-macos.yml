@@ -322,6 +322,8 @@ jobs:
             sdk/python/tests/test_parity_io.py
             sdk/python/tests/test_parity_linalg.py
             sdk/python/tests/test_parity_imgproc.py
+            sdk/python/tests/test_parity_phase4.py
+            sdk/python/tests/test_parity_phase8.py
             sdk/python/tests/test_gpu.py
             sdk/python/tests/test_bench_raster.py
           )

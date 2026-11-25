@@ -185,6 +185,10 @@ private func writeChF32(_ row: UnsafeMutableRawPointer, _ idx: Int, _ v: Double)
     row.assumingMemoryBound(to: Float.self)[idx] = Float(v)
 }
 
+@_silgen_name("sr_c_bgr2lab_u8")
+private func sr_c_bgr2lab_u8(_ src: UnsafePointer<UInt8>, _ sstep: Int, _ dst: UnsafeMutablePointer<UInt8>, _ dstep: Int,
+                             _ w: Int32, _ h: Int32, _ scn: Int32, _ dcn: Int32, _ isBGR: Int32, _ linearIn: Int32) -> Int32
+
 @_cdecl("sr_cvt_color")
 public func sr_cvt_color(_ srcP: MatP?, _ dstP: MatP?, _ code: Int32) -> Int32 {
     guard let s = mat(srcP), let d = mat(dstP) else { return srFail(SRStatus.badArgument, "cvtColor: null") }
@@ -196,6 +200,15 @@ public func sr_cvt_color(_ srcP: MatP?, _ dstP: MatP?, _ code: Int32) -> Int32 {
     if w == 0 || h == 0 { return SRStatus.ok }
     let sc = Int(s.cn), dc = Int(d.cn)
     guard sc >= 3, dc == 3 || dc == 4 else { return srFail(SRStatus.badArgument, "cvtColor: requires 3/4 channels") }
+    if s.depth == 0 && (code == 44 || code == 45 || code == 74 || code == 75), let sp = s.data, let dp = d.data {
+        let isBgr: Int32 = (code == 44 || code == 74) ? 1 : 0
+        let lin: Int32 = (code == 74 || code == 75) ? 1 : 0
+        if sr_c_bgr2lab_u8(sp.assumingMemoryBound(to: UInt8.self), s.step,
+                           dp.assumingMemoryBound(to: UInt8.self), d.step,
+                           Int32(w), Int32(h), Int32(sc), Int32(dc), isBgr, lin) == 0 {
+            return SRStatus.ok
+        }
+    }
     let isF32 = s.depth == 5
     let maxVal: Double = s.depth == 0 ? 255.0 : (s.depth == 2 ? 65535.0 : 1.0)
     let halfVal: Double = s.depth == 0 ? 128.0 : (s.depth == 2 ? 32768.0 : 0.5)

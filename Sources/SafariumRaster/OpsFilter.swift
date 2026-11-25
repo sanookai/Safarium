@@ -108,6 +108,41 @@ private func sepFilterImpl<S: SRPix, D: SRPix>(_ src: SRImage, _ dst: SRImage, _
     }}
 }
 
+@_silgen_name("sr_c_sep_filter")
+private func sr_c_sep_filter(_ src: UnsafeRawPointer, _ sstep: Int, _ sdepth: Int32,
+                             _ dst: UnsafeMutableRawPointer, _ dstep: Int, _ ddepth: Int32,
+                             _ w: Int32, _ h: Int32, _ cn: Int32,
+                             _ kx: UnsafePointer<Double>, _ kw: Int32,
+                             _ ky: UnsafePointer<Double>, _ kh: Int32,
+                             _ ax: Int32, _ ay: Int32, _ delta: Double, _ border: Int32,
+                             _ bval: UnsafePointer<Double>?, _ useF32: Int32) -> Int32
+
+@_silgen_name("sr_c_box_filter")
+private func sr_c_box_filter(_ src: UnsafeRawPointer, _ sstep: Int, _ sdepth: Int32,
+                             _ dst: UnsafeMutableRawPointer, _ dstep: Int, _ ddepth: Int32,
+                             _ w: Int32, _ h: Int32, _ cn: Int32,
+                             _ kw: Int32, _ kh: Int32, _ ax: Int32, _ ay: Int32,
+                             _ normalize: Int32, _ border: Int32) -> Int32
+
+@_silgen_name("sr_c_filter2d")
+private func sr_c_filter2d(_ src: UnsafeRawPointer, _ sstep: Int, _ sdepth: Int32,
+                           _ dst: UnsafeMutableRawPointer, _ dstep: Int, _ ddepth: Int32,
+                           _ w: Int32, _ h: Int32, _ cn: Int32,
+                           _ kernel: UnsafePointer<Double>, _ kw: Int32, _ kh: Int32,
+                           _ ax: Int32, _ ay: Int32, _ delta: Double, _ border: Int32) -> Int32
+
+@_silgen_name("sr_c_pyr_down")
+private func sr_c_pyr_down(_ src: UnsafeRawPointer, _ sstep: Int, _ depth: Int32,
+                           _ dst: UnsafeMutableRawPointer, _ dstep: Int,
+                           _ sw: Int32, _ sh: Int32, _ dw: Int32, _ dh: Int32,
+                           _ cn: Int32, _ border: Int32) -> Int32
+
+@_silgen_name("sr_c_laplacian")
+private func sr_c_laplacian(_ src: UnsafeRawPointer, _ sstep: Int, _ sdepth: Int32,
+                            _ dst: UnsafeMutableRawPointer, _ dstep: Int, _ ddepth: Int32,
+                            _ w: Int32, _ h: Int32, _ cn: Int32,
+                            _ ksize: Int32, _ scale: Double, _ delta: Double, _ border: Int32) -> Int32
+
 @_cdecl("sr_sep_filter")
 public func sr_sep_filter(_ sd: UnsafeMutableRawPointer?, _ sw: Int32, _ sh: Int32, _ ss: Int32, _ sc: Int32, _ sdep: Int32,
                           _ dd: UnsafeMutableRawPointer?, _ dw: Int32, _ dh: Int32, _ ds: Int32, _ dc: Int32, _ ddep: Int32,
@@ -126,25 +161,18 @@ public func sr_sep_filter(_ sd: UnsafeMutableRawPointer?, _ sw: Int32, _ sh: Int
     guard [SR_BORDER_CONSTANT, SR_BORDER_REPLICATE, SR_BORDER_REFLECT, SR_BORDER_WRAP, SR_BORDER_REFLECT_101].contains(border) else {
         return srFail(SRStatus.unsupported, "sepFilter2D: unsupported border type")
     }
-    let ax = anchorX < 0 ? Int(nkx) / 2 : Int(anchorX), ay = anchorY < 0 ? Int(nky) / 2 : Int(anchorY)
-    guard ax < Int(nkx), ay < Int(nky) else { return srFail(SRStatus.badArgument, "sepFilter2D: anchor outside kernel") }
-    let kxa = Array(UnsafeBufferPointer(start: kx, count: Int(nkx)))
-    let kya = Array(UnsafeBufferPointer(start: ky, count: Int(nky)))
-    let bv = borderValue.map { Array(UnsafeBufferPointer(start: $0, count: 4)) } ?? [0, 0, 0, 0]
-    let df = Float(delta)
-    @inline(__always) func run<S: SRPix>(_ st: S.Type) {
-        switch dst.depth {
-        case .u8: sepFilterImpl(src, dst, kxa, kya, ax, ay, df, border, bv, st, UInt8.self)
-        case .u16: sepFilterImpl(src, dst, kxa, kya, ax, ay, df, border, bv, st, UInt16.self)
-        default: sepFilterImpl(src, dst, kxa, kya, ax, ay, df, border, bv, st, Float.self)
+    let ax = anchorX < 0 ? nkx / 2 : anchorX, ay = anchorY < 0 ? nky / 2 : anchorY
+    guard ax < nkx, ay < nky else { return srFail(SRStatus.badArgument, "sepFilter2D: anchor outside kernel") }
+    let kxd = (0..<Int(nkx)).map { Double(kx[$0]) }
+    let kyd = (0..<Int(nky)).map { Double(ky[$0]) }
+    let rc = kxd.withUnsafeBufferPointer { kxp in
+        kyd.withUnsafeBufferPointer { kyp in
+            sr_c_sep_filter(src.data, src.stride, sdep, dst.data, dst.stride, ddep,
+                            sw, sh, sc, kxp.baseAddress!, nkx, kyp.baseAddress!, nky,
+                            ax, ay, delta, border, borderValue, 1)
         }
     }
-    switch src.depth {
-    case .u8: run(UInt8.self)
-    case .u16: run(UInt16.self)
-    default: run(Float.self)
-    }
-    return SRStatus.ok
+    return rc == 0 ? SRStatus.ok : srFail(SRStatus.internalError, "sepFilter2D failed")
 }
 
 // MARK: - pyrDown
@@ -226,12 +254,8 @@ public func sr_pyr_down(_ sd: UnsafeMutableRawPointer?, _ sw: Int32, _ sh: Int32
     guard src.depth == .u8 || src.depth == .u16 || src.depth == .f32 else {
         return srFail(SRStatus.unsupported, "pyrDown: only u8, u16 and f32 images are supported")
     }
-    switch src.depth {
-    case .u8: pyrDownImpl(src, dst, border, UInt8.self)
-    case .u16: pyrDownImpl(src, dst, border, UInt16.self)
-    default: pyrDownImpl(src, dst, border, Float.self)
-    }
-    return SRStatus.ok
+    let rc = sr_c_pyr_down(src.data, src.stride, sdep, dst.data, dst.stride, sw, sh, dw, dh, sc, border)
+    return rc == 0 ? SRStatus.ok : srFail(SRStatus.internalError, "pyrDown failed")
 }
 
 // MARK: - Phase 3: Full-depth Filters, Sobel/Scharr/Laplacian, Box, Canny, Bilateral, Median, Integral, pyrUp, CLAHE, ColorMap
@@ -264,46 +288,14 @@ private func fWriteD(_ row: UnsafeMutableRawPointer, _ idx: Int, _ depth: Int32,
 
 private func sepFilter2Core(_ s: CoreMat, _ d: CoreMat, _ kx: [Double], _ ky: [Double],
                             _ ax0: Int32, _ ay0: Int32, _ delta: Double, _ border: Int32) {
-    let w = s.cols, h = s.rows, c = Int(s.cn)
-    if w == 0 || h == 0 { return }
-    let kw = kx.count, kh = ky.count
-    let ax = ax0 < 0 ? kw / 2 : Int(ax0)
-    let ay = ay0 < 0 ? kh / 2 : Int(ay0)
-    let n = w * c
-    let tmp = UnsafeMutablePointer<Double>.allocate(capacity: h * n)
-    defer { tmp.deallocate() }
-    let rowD = UnsafeMutablePointer<Double>.allocate(capacity: n)
-    defer { rowD.deallocate() }
-
-    for y in 0..<h {
-        let sRow = UnsafeRawPointer(s.row(y))
-        for i in 0..<n { rowD[i] = fReadD(sRow, i, s.depth) }
-        let tRow = tmp + y * n
-        for x in 0..<w {
-            for ch in 0..<c {
-                var acc = 0.0
-                for k in 0..<kw {
-                    let rx = srBorderInterp(x + k - ax, w, border)
-                    let sv = rx < 0 ? 0.0 : rowD[rx * c + ch]
-                    acc += kx[k] * sv
-                }
-                tRow[x * c + ch] = acc
-            }
+    guard s.cols > 0 && s.rows > 0, let sp = s.data, let dp = d.data else { return }
+    _ = kx.withUnsafeBufferPointer { kxp in
+        ky.withUnsafeBufferPointer { kyp in
+            sr_c_sep_filter(sp, s.step, s.depth, dp, d.step, d.depth,
+                            Int32(s.cols), Int32(s.rows), s.cn,
+                            kxp.baseAddress!, Int32(kx.count), kyp.baseAddress!, Int32(ky.count),
+                            ax0, ay0, delta, border, nil, 0)
         }
-    }
-
-    for y in 0..<h {
-        let dRow = d.row(y)
-        for i in 0..<n { rowD[i] = delta }
-        for k in 0..<kh {
-            let ry = srBorderInterp(y + k - ay, h, border)
-            if ry >= 0 {
-                let wk = ky[k]
-                let tr = tmp + ry * n
-                for i in 0..<n { rowD[i] += wk * tr[i] }
-            }
-        }
-        for i in 0..<n { fWriteD(dRow, i, d.depth, rowD[i]) }
     }
 }
 
@@ -317,9 +309,12 @@ public func sr_sep_filter2(_ srcP: MatP?, _ dstP: MatP?, _ kxP: UnsafePointer<Do
     guard s.rows == d.rows, s.cols == d.cols, s.cn == d.cn else {
         return srFail(SRStatus.badArgument, "sepFilter2D: shape/channel mismatch")
     }
-    let kx = (0..<Int(kw)).map { kxP[$0] }, ky = (0..<Int(kh)).map { kyP[$0] }
-    sepFilter2Core(s, d, kx, ky, ax, ay, delta, border)
-    return SRStatus.ok
+    if s.cols == 0 || s.rows == 0 { return SRStatus.ok }
+    guard let sp = s.data, let dp = d.data else { return srFail(SRStatus.badArgument, "sepFilter2D: null data") }
+    let rc = sr_c_sep_filter(sp, s.step, s.depth, dp, d.step, d.depth,
+                             Int32(s.cols), Int32(s.rows), s.cn,
+                             kxP, kw, kyP, kh, ax, ay, delta, border, nil, 0)
+    return rc == 0 ? SRStatus.ok : srFail(SRStatus.internalError, "sepFilter2D failed")
 }
 
 @_cdecl("sr_filter2d")
@@ -331,37 +326,12 @@ public func sr_filter2d(_ srcP: MatP?, _ dstP: MatP?, _ kerP: UnsafePointer<Doub
     guard s.rows == d.rows, s.cols == d.cols, s.cn == d.cn else {
         return srFail(SRStatus.badArgument, "filter2D: shape/channel mismatch")
     }
-    let w = s.cols, h = s.rows, c = Int(s.cn), kw = Int(kw0), kh = Int(kh0)
-    if w == 0 || h == 0 { return SRStatus.ok }
-    let ax = ax0 < 0 ? kw / 2 : Int(ax0)
-    let ay = ay0 < 0 ? kh / 2 : Int(ay0)
-    let n = w * c
-    let sBuf = UnsafeMutablePointer<Double>.allocate(capacity: h * n)
-    defer { sBuf.deallocate() }
-    for y in 0..<h {
-        let sr = UnsafeRawPointer(s.row(y))
-        for i in 0..<n { sBuf[y * n + i] = fReadD(sr, i, s.depth) }
-    }
-    for y in 0..<h {
-        let dr = d.row(y)
-        for x in 0..<w {
-            for ch in 0..<c {
-                var acc = delta
-                for ky in 0..<kh {
-                    let ry = srBorderInterp(y + ky - ay, h, border)
-                    if ry < 0 { continue }
-                    let sRow = sBuf + ry * n
-                    let kRow = kerP + ky * kw
-                    for kx in 0..<kw {
-                        let rx = srBorderInterp(x + kx - ax, w, border)
-                        if rx >= 0 { acc += kRow[kx] * sRow[rx * c + ch] }
-                    }
-                }
-                fWriteD(dr, x * c + ch, d.depth, acc)
-            }
-        }
-    }
-    return SRStatus.ok
+    if s.cols == 0 || s.rows == 0 { return SRStatus.ok }
+    guard let sp = s.data, let dp = d.data else { return srFail(SRStatus.badArgument, "filter2D: null data") }
+    let rc = sr_c_filter2d(sp, s.step, s.depth, dp, d.step, d.depth,
+                           Int32(s.cols), Int32(s.rows), s.cn,
+                           kerP, kw0, kh0, ax0, ay0, delta, border)
+    return rc == 0 ? SRStatus.ok : srFail(SRStatus.internalError, "filter2D failed")
 }
 
 @_cdecl("sr_box_filter")
@@ -370,56 +340,12 @@ public func sr_box_filter(_ srcP: MatP?, _ dstP: MatP?, _ kx: Int32, _ ky: Int32
     guard let s = mat(srcP), let d = mat(dstP), kx > 0, ky > 0, s.rows == d.rows, s.cols == d.cols, s.cn == d.cn else {
         return srFail(SRStatus.badArgument, "boxFilter: bad arguments")
     }
-    let w = s.cols, h = s.rows, c = Int(s.cn), kw = Int(kx), kh = Int(ky)
-    if w == 0 || h == 0 { return SRStatus.ok }
-    let ax = ax0 < 0 ? kw / 2 : Int(ax0)
-    let ay = ay0 < 0 ? kh / 2 : Int(ay0)
-    let scale = normalize != 0 ? (1.0 / Double(kw * kh)) : 1.0
-    let n = w * c
-    let tmp = UnsafeMutablePointer<Double>.allocate(capacity: h * n)
-    let rowD = UnsafeMutablePointer<Double>.allocate(capacity: n)
-    defer { tmp.deallocate(); rowD.deallocate() }
-
-    // O(1) horizontal sliding window (exact integer/double sum)
-    for y in 0..<h {
-        let sr = UnsafeRawPointer(s.row(y))
-        for i in 0..<n { rowD[i] = fReadD(sr, i, s.depth) }
-        let tr = tmp + y * n
-        for ch in 0..<c {
-            var acc = 0.0
-            for k in 0..<kw {
-                let rx = srBorderInterp(k - ax, w, border)
-                if rx >= 0 { acc += rowD[rx * c + ch] }
-            }
-            tr[ch] = acc
-            for x in 1..<w {
-                let rxOut = srBorderInterp(x - 1 - ax, w, border)
-                let rxIn = srBorderInterp(x + kw - 1 - ax, w, border)
-                if rxOut >= 0 { acc -= rowD[rxOut * c + ch] }
-                if rxIn >= 0 { acc += rowD[rxIn * c + ch] }
-                tr[x * c + ch] = acc
-            }
-        }
-    }
-    // O(1) vertical sliding window
-    let colAcc = UnsafeMutablePointer<Double>.allocate(capacity: n)
-    defer { colAcc.deallocate() }
-    colAcc.initialize(repeating: 0.0, count: n)
-    for k in 0..<kh {
-        let ry = srBorderInterp(k - ay, h, border)
-        if ry >= 0 { let tr = tmp + ry * n; for i in 0..<n { colAcc[i] += tr[i] } }
-    }
-    for y in 0..<h {
-        let dr = d.row(y)
-        for i in 0..<n { fWriteD(dr, i, d.depth, colAcc[i] * scale) }
-        if y + 1 < h {
-            let ryOut = srBorderInterp(y - ay, h, border)
-            let ryIn = srBorderInterp(y + kh - ay, h, border)
-            if ryOut >= 0 { let tO = tmp + ryOut * n; for i in 0..<n { colAcc[i] -= tO[i] } }
-            if ryIn >= 0 { let tI = tmp + ryIn * n; for i in 0..<n { colAcc[i] += tI[i] } }
-        }
-    }
-    return SRStatus.ok
+    if s.cols == 0 || s.rows == 0 { return SRStatus.ok }
+    guard let sp = s.data, let dp = d.data else { return srFail(SRStatus.badArgument, "boxFilter: null data") }
+    let rc = sr_c_box_filter(sp, s.step, s.depth, dp, d.step, d.depth,
+                             Int32(s.cols), Int32(s.rows), s.cn,
+                             kx, ky, ax0, ay0, normalize, border)
+    return rc == 0 ? SRStatus.ok : srFail(SRStatus.internalError, "boxFilter failed")
 }
 
 private func derivKernel1D(_ order: Int, _ ksize: Int) -> [Double] {
@@ -491,65 +417,11 @@ public func sr_laplacian(_ srcP: MatP?, _ dstP: MatP?, _ ksize: Int32,
     }
     let w = s.cols, h = s.rows, c = Int(s.cn), n = w * c
     if w == 0 || h == 0 { return SRStatus.ok }
-    if (ks == 1 || ks == 3) && (s.depth == 0 || s.depth == 5) && d.depth == 5 {
-        let sc1 = Float((ks == 1 ? 1.0 : 2.0) * scale)
-        let sc0 = Float((ks == 1 ? -4.0 : -8.0) * scale)
-        let dl = Float(delta)
-        @inline(__always) func readF(_ y: Int, _ x: Int, _ ch: Int) -> Float {
-            let yy = srBorderInterp(y, h, border)
-            let xx = srBorderInterp(x, w, border)
-            if yy < 0 || xx < 0 { return 0 }
-            let row = s.row(yy)
-            return s.depth == 5
-                ? row.assumingMemoryBound(to: Float.self)[xx * c + ch]
-                : Float(row.assumingMemoryBound(to: UInt8.self)[xx * c + ch])
-        }
-        for y in 0..<h {
-            let dr = d.row(y).assumingMemoryBound(to: Float.self)
-            if y >= 1 && y < h - 1 && w >= 3 && s.depth == 5 {
-                let rUp = s.row(y - 1).assumingMemoryBound(to: Float.self)
-                let rMid = s.row(y).assumingMemoryBound(to: Float.self)
-                let rDn = s.row(y + 1).assumingMemoryBound(to: Float.self)
-                for ch in 0..<c {
-                    dr[ch] = ks == 1
-                        ? dl + readF(y - 1, 0, ch) * sc1 + readF(y, -1, ch) * sc1 + rMid[ch] * sc0 + rMid[c + ch] * sc1 + readF(y + 1, 0, ch) * sc1
-                        : dl + readF(y - 1, -1, ch) * sc1 + readF(y - 1, 1, ch) * sc1 + rMid[ch] * sc0 + readF(y + 1, -1, ch) * sc1 + readF(y + 1, 1, ch) * sc1
-                }
-                if ks == 1 {
-                    for i in c..<(n - c) {
-                        dr[i] = dl + rUp[i] * sc1 + rMid[i - c] * sc1 + rMid[i] * sc0 + rMid[i + c] * sc1 + rDn[i] * sc1
-                    }
-                } else {
-                    for i in c..<(n - c) {
-                        dr[i] = dl + rUp[i - c] * sc1 + rUp[i + c] * sc1 + rMid[i] * sc0 + rDn[i - c] * sc1 + rDn[i + c] * sc1
-                    }
-                }
-                let last = (w - 1) * c
-                for ch in 0..<c {
-                    let x = w - 1
-                    dr[last + ch] = ks == 1
-                        ? dl + readF(y - 1, x, ch) * sc1 + rMid[last - c + ch] * sc1 + rMid[last + ch] * sc0 + readF(y, x + 1, ch) * sc1 + readF(y + 1, x, ch) * sc1
-                        : dl + readF(y - 1, x - 1, ch) * sc1 + readF(y - 1, x + 1, ch) * sc1 + rMid[last + ch] * sc0 + readF(y + 1, x - 1, ch) * sc1 + readF(y + 1, x + 1, ch) * sc1
-                }
-            } else {
-                for x in 0..<w {
-                    for ch in 0..<c {
-                        dr[x * c + ch] = ks == 1
-                            ? dl + readF(y - 1, x, ch) * sc1 + readF(y, x - 1, ch) * sc1 + readF(y, x, ch) * sc0 + readF(y, x + 1, ch) * sc1 + readF(y + 1, x, ch) * sc1
-                            : dl + readF(y - 1, x - 1, ch) * sc1 + readF(y - 1, x + 1, ch) * sc1 + readF(y, x, ch) * sc0 + readF(y + 1, x - 1, ch) * sc1 + readF(y + 1, x + 1, ch) * sc1
-                    }
-                }
-            }
-        }
-        return SRStatus.ok
-    }
     if ks == 1 || ks == 3 {
-        let ker: [Double] = ks == 1
-            ? [0, 1, 0, 1, -4, 1, 0, 1, 0].map { Double($0) * scale }
-            : [2, 0, 2, 0, -8, 0, 2, 0, 2].map { Double($0) * scale }
-        return ker.withUnsafeBufferPointer { kp in
-            sr_filter2d(srcP, dstP, kp.baseAddress!, 3, 3, -1, -1, delta, border)
-        }
+        guard let sp = s.data, let dp = d.data else { return srFail(SRStatus.badArgument, "Laplacian: null data") }
+        let rc = sr_c_laplacian(sp, s.step, s.depth, dp, d.step, d.depth,
+                                Int32(w), Int32(h), s.cn, ksize, scale, delta, border)
+        return rc == 0 ? SRStatus.ok : srFail(SRStatus.internalError, "Laplacian failed")
     }
     // ks >= 5: Sobel(dx=2,dy=0) + Sobel(dx=0,dy=2) accumulated in Double
     let kx2 = derivKernel1D(2, ks), ky0 = derivKernel1D(0, ks)

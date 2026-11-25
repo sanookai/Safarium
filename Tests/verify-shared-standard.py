@@ -13,6 +13,7 @@ ROOT=Path(__file__).resolve().parents[1]
 
 
 def main(a):
+    a.scratch.mkdir(parents=True, exist_ok=True)
     w=Path(tempfile.mkdtemp(dir=a.scratch.resolve(),prefix="standard-qa-"))
     prefix=a.prefix.expanduser().absolute();queue=prefix/"bin/safarium-render"
     worker=prefix/"libexec/safarium/safarium-html";py=sys.executable

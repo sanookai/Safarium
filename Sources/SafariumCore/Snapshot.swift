@@ -16,6 +16,19 @@ public struct Snapshot: @unchecked Sendable {
     package static let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
     package static let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
 
+    /// Reinterprets Apple video-tagged BT.709 RGB images (`kCGColorSpaceCoreMedia709` / `ITU_R_709`) as sRGB
+    /// without applying a ColorSync `1.961 <-> 2.2` transfer curve warp, while leaving wide-gamut spaces such
+    /// as Display P3 intact for ColorSync gamut mapping into sRGB.
+    package static func reinterpretingVideo709AsSRGB(_ image: CGImage) -> CGImage {
+        guard let space = image.colorSpace,
+              space.model == .rgb,
+              let name = space.name as String?,
+              name == "kCGColorSpaceCoreMedia709" || name == (CGColorSpace.itur_709 as String) else {
+            return image
+        }
+        return image.copy(colorSpace: colorSpace) ?? image
+    }
+
     /// True when `image` already matches canonical premultiplied BGRA8 in sRGB with no mask or decode remapping.
     package static func isCanonicalSRGBBGRA8(_ image: CGImage) -> Bool {
         guard image.bitsPerComponent == 8,
@@ -81,11 +94,12 @@ public struct Snapshot: @unchecked Sendable {
     /// Pixel at (x, y), y=0 at the top. Channels are premultiplied.
     public func pixel(x: Int, y: Int) -> (b: UInt8, g: UInt8, r: UInt8, a: UInt8) {
         var px = [UInt8](repeating: 0, count: 4)
+        let image = Self.reinterpretingVideo709AsSRGB(cgImage)
         px.withUnsafeMutableBytes { buf in
             guard let ctx = CGContext(data: buf.baseAddress, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
                                       space: Snapshot.colorSpace, bitmapInfo: Snapshot.bitmapInfo) else { return }
             ctx.clear(CGRect(x: 0, y: 0, width: 1, height: 1))
-            ctx.draw(cgImage, in: CGRect(x: -x, y: -(height - 1 - y), width: width, height: height))
+            ctx.draw(image, in: CGRect(x: -x, y: -(height - 1 - y), width: width, height: height))
         }
         return (px[0], px[1], px[2], px[3])
     }
@@ -115,12 +129,13 @@ public struct Snapshot: @unchecked Sendable {
                 throw SafariumError.snapshot("missing BGRA destination base address")
             }
             let dstStride = CVPixelBufferGetBytesPerRow(pb)
-            if Self.isCanonicalSRGBBGRA8(cgImage),
-               cgImage.width == w, cgImage.height == h,
-               let provider = cgImage.dataProvider,
+            let image = Self.reinterpretingVideo709AsSRGB(cgImage)
+            if Self.isCanonicalSRGBBGRA8(image),
+               image.width == w, image.height == h,
+               let provider = image.dataProvider,
                let cfData = provider.data,
                let srcPtr = CFDataGetBytePtr(cfData) {
-                let srcStride = cgImage.bytesPerRow
+                let srcStride = image.bytesPerRow
                 let rowBytes = w * 4
                 let needed = (h - 1) * srcStride + rowBytes
                 if srcStride >= rowBytes, dstStride >= rowBytes, CFDataGetLength(cfData) >= needed {
@@ -147,15 +162,16 @@ public struct Snapshot: @unchecked Sendable {
 
     /// Borrows zero-copy canonical sRGB BGRA8 bytes when the backing CGImage already matches `w`×`h` in memory.
     package func borrowCanonicalBGRABytes<R>(width w: Int, height h: Int, _ body: (UnsafeRawPointer, Int) throws -> R) rethrows -> R? {
+        let image = Self.reinterpretingVideo709AsSRGB(cgImage)
         guard w > 0, h > 0,
-              Self.isCanonicalSRGBBGRA8(cgImage),
-              cgImage.width == w, cgImage.height == h,
-              let provider = cgImage.dataProvider,
+              Self.isCanonicalSRGBBGRA8(image),
+              image.width == w, image.height == h,
+              let provider = image.dataProvider,
               let cfData = provider.data,
               let srcPtr = CFDataGetBytePtr(cfData) else {
             return nil
         }
-        let srcStride = cgImage.bytesPerRow
+        let srcStride = image.bytesPerRow
         let rowBytes = w * 4
         let needed = (h - 1) * srcStride + rowBytes
         guard srcStride >= rowBytes, CFDataGetLength(cfData) >= needed else {
@@ -182,12 +198,13 @@ public struct Snapshot: @unchecked Sendable {
     }
 
     private func drawBGRA(to base: UnsafeMutableRawPointer?, width w: Int, height h: Int, stride: Int) throws {
+        let image = Self.reinterpretingVideo709AsSRGB(cgImage)
         guard let base, w > 0, h > 0, w <= Int.max / 4, stride >= w * 4,
               let ctx = CGContext(data: base, width: w, height: h, bitsPerComponent: 8, bytesPerRow: stride,
                                   space: Snapshot.colorSpace, bitmapInfo: Snapshot.bitmapInfo) else {
             throw SafariumError.snapshot("cannot create \(w)×\(h) BGRA drawing context")
         }
         ctx.clear(CGRect(x: 0, y: 0, width: w, height: h))
-        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
     }
 }

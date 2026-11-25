@@ -146,28 +146,32 @@ public enum SafariumAccelerate {
                 let x0 = j << 1
                 let off0 = x0 << 2
                 let off1 = off0 + 4
+                let offPrev = (j > 0) ? (off0 - 4) : off0
 
                 let b00 = Int32(r0[off0]); let g00 = Int32(r0[off0 + 1]); let r00 = Int32(r0[off0 + 2])
                 let b01 = Int32(r0[off1]); let g01 = Int32(r0[off1 + 1]); let r01 = Int32(r0[off1 + 2])
                 let b10 = Int32(r1[off0]); let g10 = Int32(r1[off0 + 1]); let r10 = Int32(r1[off0 + 2])
                 let b11 = Int32(r1[off1]); let g11 = Int32(r1[off1 + 1]); let r11 = Int32(r1[off1 + 2])
+                let b0m = Int32(r0[offPrev]); let g0m = Int32(r0[offPrev + 1]); let r0m = Int32(r0[offPrev + 2])
+                let b1m = Int32(r1[offPrev]); let g1m = Int32(r1[offPrev + 1]); let r1m = Int32(r1[offPrev + 2])
 
-                let y00 = (11966 * r00 + 40254 * g00 + 4063 * b00 + 1081344) >> 16
-                let y01 = (11966 * r01 + 40254 * g01 + 4063 * b01 + 1081344) >> 16
-                let y10 = (11966 * r10 + 40254 * g10 + 4063 * b10 + 1081344) >> 16
-                let y11 = (11966 * r11 + 40254 * g11 + 4063 * b11 + 1081344) >> 16
+                let y00 = (11966 * r00 + 40254 * g00 + 4064 * b00 + 1081344) >> 16
+                let y01 = (11966 * r01 + 40254 * g01 + 4064 * b01 + 1081344) >> 16
+                let y10 = (11966 * r10 + 40254 * g10 + 4064 * b10 + 1081344) >> 16
+                let y11 = (11966 * r11 + 40254 * g11 + 4064 * b11 + 1081344) >> 16
 
                 yOut0[x0] = UInt8(clamping: max(16, min(235, y00)))
                 yOut0[x0 + 1] = UInt8(clamping: max(16, min(235, y01)))
                 yOut1[x0] = UInt8(clamping: max(16, min(235, y10)))
                 yOut1[x0 + 1] = UInt8(clamping: max(16, min(235, y11)))
 
-                let rL = (r00 + r10 + 1) >> 1
-                let gL = (g00 + g10 + 1) >> 1
-                let bL = (b00 + b10 + 1) >> 1
+                // Left-cosited 4:2:0 filtering: [1, 2, 1]/4 horizontal centered at even column x0 × [1, 1]/2 vertical.
+                let rL = (r0m + 2 * r00 + r01 + r1m + 2 * r10 + r11 + 4) >> 3
+                let gL = (g0m + 2 * g00 + g01 + g1m + 2 * g10 + g11 + 4) >> 3
+                let bL = (b0m + 2 * b00 + b01 + b1m + 2 * b10 + b11 + 4) >> 3
 
-                let cb = (-6593 * rL - 22179 * gL + 28772 * bL + 8421376) >> 16
-                let cr = (28772 * rL - 26134 * gL - 2638 * bL + 8421376) >> 16
+                let cb = (-6596 * rL - 22189 * gL + 28785 * bL + 8421376) >> 16
+                let cr = (28784 * rL - 26145 * gL - 2639 * bL + 8421376) >> 16
                 uvOut[x0] = UInt8(clamping: max(16, min(240, cb)))
                 uvOut[x0 + 1] = UInt8(clamping: max(16, min(240, cr)))
             }

@@ -204,6 +204,51 @@ def split(m, mv=None):
     return tuple(np.ascontiguousarray(a[..., i]) for i in range(a.shape[2]))
 
 
+def _opt_declare(name: str, argtypes: list, restype=_lib.I32):
+    try:
+        return _lib.declare(name, argtypes, restype=restype)
+    except AttributeError:
+        def _missing(*_a, _n=name):
+            raise error(f"{_n}: libSafariumRaster is missing this symbol (rebuild the dylib)")
+        return _missing
+
+
+_np_bgr2gray = _opt_declare("sr_np_bgr2gray", [_lib.VP, ctypes.c_ssize_t, _lib.VP, ctypes.c_ssize_t, _lib.I32, _lib.I32, _lib.I32, _lib.I32, _lib.I32])
+_np_cvt_swap = _opt_declare("sr_np_cvt_swap", [_lib.VP, ctypes.c_ssize_t, _lib.VP, ctypes.c_ssize_t, _lib.I32, _lib.I32, _lib.I32, _lib.I32, _lib.I32, _lib.I32])
+_np_gray2bgr = _opt_declare("sr_np_gray2bgr", [_lib.VP, ctypes.c_ssize_t, _lib.VP, ctypes.c_ssize_t, _lib.I32, _lib.I32, _lib.I32, _lib.I32])
+_np_reduce_u8 = _opt_declare("sr_np_reduce_u8", [_lib.VP, ctypes.c_ssize_t, _lib.VP, ctypes.c_ssize_t, _lib.I32, _lib.I32, _lib.I32, _lib.I32, _lib.I32, _lib.I32])
+_np_laplacian = _opt_declare("sr_np_laplacian", [_lib.VP, ctypes.c_ssize_t, _lib.I32, _lib.VP, ctypes.c_ssize_t, _lib.I32,
+                                                 _lib.I32, _lib.I32, _lib.I32, _lib.I32, _lib.F64, _lib.F64, _lib.I32])
+
+_DEPTH_CODE = {np.dtype(np.uint8): 0, np.dtype(np.int8): 1, np.dtype(np.uint16): 2, np.dtype(np.int16): 3,
+               np.dtype(np.int32): 4, np.dtype(np.float32): 5, np.dtype(np.float64): 6}
+
+
+def _usable_src(a: np.ndarray) -> np.ndarray:
+    item = a.dtype.itemsize
+    if a.ndim == 2:
+        ok = a.strides[1] == item and a.strides[0] >= 0
+    elif a.ndim == 3:
+        ok = a.strides[2] == item and a.strides[1] == a.shape[2] * item and a.strides[0] >= 0
+    else:
+        ok = False
+    return a if ok else np.ascontiguousarray(a)
+
+
+def _alloc_or_direct(dst, shape: tuple, dt: np.dtype, src_a: np.ndarray):
+    if isinstance(dst, np.ndarray) and dst.shape == shape and dst.dtype == dt and dst.flags.writeable:
+        item = dt.itemsize
+        if dst.ndim == 2:
+            ok = dst.strides[1] == item and dst.strides[0] >= shape[1] * item
+        elif dst.ndim == 3:
+            ok = dst.strides[2] == item and dst.strides[1] == shape[2] * item and dst.strides[0] >= shape[1] * shape[2] * item
+        else:
+            ok = False
+        if ok and not np.shares_memory(src_a, dst):
+            return dst, True
+    return np.empty(shape, dt), False
+
+
 def reduce(src, dim, rtype, dst=None, dtype=-1):
     a = _np(src)
     if dim not in (0, 1):
@@ -212,19 +257,33 @@ def reduce(src, dim, rtype, dst=None, dtype=-1):
     if rtype in (C.REDUCE_MAX, C.REDUCE_MIN):
         if out_dt != a.dtype:
             raise error("reduce: MIN/MAX need dtype == src depth")
-        res = (a.max if rtype == C.REDUCE_MAX else a.min)(axis=dim, keepdims=True)
     elif rtype in (C.REDUCE_SUM, C.REDUCE_AVG):
         if rtype == C.REDUCE_SUM and a.dtype.kind in "iu" and np.dtype(out_dt).itemsize <= a.dtype.itemsize \
                 and out_dt.kind in "iu":
             raise error("reduce: (-210:Unsupported format or combination of formats) "
                         f"Unsupported combination of input and output array formats")
+    else:
+        raise error(f"reduce: unsupported rtype {rtype}")
+    if a.dtype == np.uint8 and a.ndim in (2, 3) and a.shape[0] > 0 and a.shape[1] > 0 \
+            and np.dtype(out_dt) in (np.uint8, np.int32, np.float32, np.float64):
+        au = _usable_src(a)
+        h, w = au.shape[:2]
+        cn = 1 if au.ndim == 2 else au.shape[2]
+        out_shape = (1, w) if dim == 0 else (h, 1)
+        if au.ndim == 3:
+            out_shape = out_shape + (cn,)
+        out, direct = _alloc_or_direct(dst, out_shape, np.dtype(out_dt), au)
+        _lib.check(_np_reduce_u8(au.ctypes.data, au.strides[0], out.ctypes.data, out.strides[0],
+                                 w, h, cn, int(dim), int(rtype), _DEPTH_CODE[np.dtype(out_dt)]), "reduce")
+        return out if direct else _finish(out, dst)
+    if rtype in (C.REDUCE_MAX, C.REDUCE_MIN):
+        res = (a.max if rtype == C.REDUCE_MAX else a.min)(axis=dim, keepdims=True)
+    else:
         acc = np.float64 if (a.dtype.kind == "f" or out_dt.kind == "f") else np.int64
         res = a.astype(acc).sum(axis=dim, keepdims=True)
         if rtype == C.REDUCE_AVG:
             res = res.astype(np.float64) / a.shape[dim]
         res = _saturate(res, out_dt)
-    else:
-        raise error(f"reduce: unsupported rtype {rtype}")
     return _finish(np.ascontiguousarray(res.astype(out_dt, copy=False)), dst)
 
 
@@ -255,9 +314,19 @@ def Laplacian(src, ddepth, dst=None, ksize=1, scale=1.0, delta=0.0, borderType=C
     if ksize not in _LAP_TAPS:
         raise error(f"Laplacian: only ksize 1 and 3 are supported by the Safarium shim (got {ksize})")
     out_dt = _dtype_of(ddepth, a.dtype)
-    mode = _PAD_MODE.get(borderType & ~C.BORDER_ISOLATED)
+    b = int(borderType) & ~C.BORDER_ISOLATED
+    mode = _PAD_MODE.get(b)
     if mode is None:
         raise error(f"Laplacian: unsupported borderType {borderType}")
+    if a.ndim in (2, 3) and a.shape[0] > 0 and a.shape[1] > 0 \
+            and a.dtype in _DEPTH_CODE and np.dtype(out_dt) in _DEPTH_CODE:
+        au = _usable_src(a)
+        cn = 1 if au.ndim == 2 else au.shape[2]
+        out, direct = _alloc_or_direct(dst, au.shape, np.dtype(out_dt), au)
+        _lib.check(_np_laplacian(au.ctypes.data, au.strides[0], _DEPTH_CODE[au.dtype],
+                                 out.ctypes.data, out.strides[0], _DEPTH_CODE[np.dtype(out_dt)],
+                                 au.shape[1], au.shape[0], cn, int(ksize), float(scale), float(delta), b), "Laplacian")
+        return out if direct else _finish(out, dst)
     work = np.float64 if (a.dtype == np.float64 or out_dt == np.float64) else np.float32
     x = a.astype(work)
     h, w = x.shape[:2]
@@ -334,43 +403,59 @@ def cvtColor(src, code, dst=None, dstCn=0, hint=None):
             raise error(f"cvtColor: (-15:Bad number of channels) Invalid number of channels in input image: {scn}")
         if dstCn:
             dcn = dstCn
-        rgb = a[..., [2, 1, 0]] if swap else a[..., :3]
-        if dcn == 4:
-            alpha = a[..., 3:4] if scn == 4 else np.full(a.shape[:2] + (1,), _alpha_max(a.dtype), a.dtype)
-            res = np.concatenate([rgb, alpha], axis=2)
-        else:
-            res = np.ascontiguousarray(rgb)
+        au = _usable_src(a)
+        h, w = au.shape[:2]
+        out_shape = (h, w, dcn)
+        out, direct = _alloc_or_direct(dst, out_shape, au.dtype, au)
+        if h and w:
+            _lib.check(_np_cvt_swap(au.ctypes.data, au.strides[0], out.ctypes.data, out.strides[0],
+                                    w, h, scn, dcn, _DEPTH_CODE[au.dtype], 1 if swap else 0), "cvtColor")
+        return out if direct else _finish(out, dst)
     elif code in _FROM_GRAY:
         _check_depth(a, (np.uint8, np.uint16, np.float32))
         if scn != 1:
             raise error(f"cvtColor: (-15:Bad number of channels) Invalid number of channels in input image: {scn}")
         g = a if a.ndim == 2 else a[..., 0]
         dcn = dstCn or _FROM_GRAY[code]
-        planes = [g, g, g] + ([np.full_like(g, _alpha_max(a.dtype))] if dcn == 4 else [])
-        res = np.stack(planes, axis=2)
+        gu = _usable_src(g)
+        h, w = gu.shape[:2]
+        out_shape = (h, w, dcn)
+        out, direct = _alloc_or_direct(dst, out_shape, gu.dtype, gu)
+        if h and w:
+            _lib.check(_np_gray2bgr(gu.ctypes.data, gu.strides[0], out.ctypes.data, out.strides[0],
+                                    w, h, dcn, _DEPTH_CODE[gu.dtype]), "cvtColor")
+        return out if direct else _finish(out, dst)
     elif code in _TO_GRAY:
         _check_depth(a, (np.uint8, np.uint16, np.float32))
         if scn not in (3, 4):
             raise error(f"cvtColor: (-15:Bad number of channels) Invalid number of channels in input image: {scn}")
         bi = _TO_GRAY[code]
-        b, g, r = a[..., bi], a[..., 1], a[..., 2 - bi]
-        if a.dtype.kind == "f":
-            f = np.float32
-            res = (b * f(0.114) + g * f(0.587) + r * f(0.299)).astype(a.dtype)
-        else:
-            # OpenCV 5.1 fixed point, shift 16: B 7470, G 38470, R 19596 (sum 65536). Fitted against reference
-            # cv2 5.1 and verified exhaustively for u8 (the 4.x shift-14 weights 1868/9617/4899 differ by 1 on ~0.25%).
-            v = (b.astype(np.int64) * 7470 + g.astype(np.int64) * 38470 + r.astype(np.int64) * 19596 + (1 << 15)) >> 16
-            res = v.astype(a.dtype)
+        au = _usable_src(a)
+        h, w = au.shape[:2]
+        out_shape = (h, w)
+        out, direct = _alloc_or_direct(dst, out_shape, au.dtype, au)
+        if h and w:
+            _lib.check(_np_bgr2gray(au.ctypes.data, au.strides[0], out.ctypes.data, out.strides[0],
+                                    w, h, scn, _DEPTH_CODE[au.dtype], bi), "cvtColor")
+        return out if direct else _finish(out, dst)
     elif code in _TO_HSV:
         _check_depth(a, (np.uint8, np.float32))
         if scn not in (3, 4):
             raise error(f"cvtColor: (-15:Bad number of channels) Invalid number of channels in input image: {scn}")
         bi = _TO_HSV[code]
-        res = _hsv_u8(a, bi) if a.dtype == np.uint8 else _hsv_f32_rows(a, bi)
+        if a.dtype == np.uint8:
+            au = _usable_src(a if a.ndim == 3 else a[..., None])
+            h, w, cn = au.shape
+            out, direct = _alloc_or_direct(dst, (h, w, 3), np.uint8, au)
+            if h and w:
+                _lib.check(_hsv_u8_c(au.ctypes.data, au.strides[0], out.ctypes.data, out.strides[0],
+                                     h, w, cn, bi, _S_LUT_U8.ctypes.data, _S_TAIL_U8.ctypes.data,
+                                     _HDIV180_I32.ctypes.data), "cvtColor")
+            return out if direct else _finish(out, dst)
+        res = _hsv_f32_rows(a, bi)
+        return _finish(np.ascontiguousarray(res), dst)
     else:
         raise error(f"cvtColor: colour conversion code {code} is not supported by the Safarium shim")
-    return _finish(np.ascontiguousarray(res), dst)
 
 
 # The last (cols % 8) pixels of every row go through OpenCV's scalar tail, whose saturation is the round-half-up integer
@@ -394,8 +479,8 @@ def _s_tail_lut() -> np.ndarray:
 _S_LUT_U8 = np.ascontiguousarray(_S_LUT.astype(np.uint8))
 _S_TAIL_U8 = _s_tail_lut()
 _HDIV180_I32 = np.ascontiguousarray(_HDIV180.astype(np.int32))
-_hsv_u8_c = _lib.declare("sr_core_hsv_u8", [_lib.VP, ctypes.c_ssize_t, _lib.VP, ctypes.c_ssize_t, ctypes.c_ssize_t,
-                                            ctypes.c_ssize_t, _lib.I32, _lib.I32, _lib.VP, _lib.VP, _lib.VP])
+_hsv_u8_c = _opt_declare("sr_np_hsv_u8", [_lib.VP, ctypes.c_ssize_t, _lib.VP, ctypes.c_ssize_t, _lib.I32,
+                                             _lib.I32, _lib.I32, _lib.I32, _lib.VP, _lib.VP, _lib.VP])
 
 
 def _hsv_u8(a: np.ndarray, bi: int) -> np.ndarray:

@@ -1,5 +1,7 @@
-// SafariumRasterC — Phase 3 C kernels: colormap, equalizeHist, CLAHE, median, bilateral, Canny, integral.
+// SafariumRasterC — Phase 3/4 C & NEON kernels: colormap, equalizeHist, CLAHE, median, bilateral, Canny, integral, sep/box/filter2d/pyrDown.
 #include "include/sr_ops.h"
+#include "include/sr_ops_perf.h"
+#include <arm_neon.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -73,11 +75,17 @@ int32_t sr_c_apply_colormap(const uint8_t *src, int32_t w, int32_t h, int32_t sr
 int32_t sr_c_equalize_hist_u8(const uint8_t *src, int32_t w, int32_t h, int32_t srcStride,
                               uint8_t *dst, int32_t dstStride) {
     if (!src || !dst || w <= 0 || h <= 0) return -1;
-    uint64_t hist[256] = {0};
+    uint64_t h0[256] = {0}, h1[256] = {0}, h2[256] = {0}, h3[256] = {0};
     for (int32_t y = 0; y < h; y++) {
         const uint8_t *s = src + (size_t)y * (size_t)srcStride;
-        for (int32_t x = 0; x < w; x++) hist[s[x]]++;
+        int32_t x = 0;
+        for (; x + 4 <= w; x += 4) {
+            h0[s[x]]++; h1[s[x + 1]]++; h2[s[x + 2]]++; h3[s[x + 3]]++;
+        }
+        for (; x < w; x++) h0[s[x]]++;
     }
+    uint64_t hist[256];
+    for (int i = 0; i < 256; i++) hist[i] = h0[i] + h1[i] + h2[i] + h3[i];
     uint64_t total = (uint64_t)w * (uint64_t)h;
     int first = 0;
     while (first < 256 && hist[first] == 0) first++;
@@ -100,7 +108,12 @@ int32_t sr_c_equalize_hist_u8(const uint8_t *src, int32_t w, int32_t h, int32_t 
     for (int32_t y = 0; y < h; y++) {
         const uint8_t *s = src + (size_t)y * (size_t)srcStride;
         uint8_t *d = dst + (size_t)y * (size_t)dstStride;
-        for (int32_t x = 0; x < w; x++) d[x] = lut[s[x]];
+        int32_t x = 0;
+        for (; x + 8 <= w; x += 8) {
+            d[x] = lut[s[x]]; d[x + 1] = lut[s[x + 1]]; d[x + 2] = lut[s[x + 2]]; d[x + 3] = lut[s[x + 3]];
+            d[x + 4] = lut[s[x + 4]]; d[x + 5] = lut[s[x + 5]]; d[x + 6] = lut[s[x + 6]]; d[x + 7] = lut[s[x + 7]];
+        }
+        for (; x < w; x++) d[x] = lut[s[x]];
     }
     return 0;
 }
@@ -264,19 +277,6 @@ int32_t sr_c_clahe_u16(const uint16_t *src, int32_t w, int32_t h, int32_t srcStr
 
 // MARK: - medianBlur (Huang sliding histogram for u8 + sort/9-net for u16/f32)
 
-#define SWAP(T, a, b) do { T _t = (a); (a) = (b); (b) = _t; } while(0)
-
-static inline float median9_f32(float p[9]) {
-    SWAP(float, p[1], p[2]); SWAP(float, p[4], p[5]); SWAP(float, p[7], p[8]);
-    if (p[0] > p[1]) SWAP(float, p[0], p[1]); if (p[3] > p[4]) SWAP(float, p[3], p[4]); if (p[6] > p[7]) SWAP(float, p[6], p[7]);
-    if (p[1] > p[2]) SWAP(float, p[1], p[2]); if (p[4] > p[5]) SWAP(float, p[4], p[5]); if (p[7] > p[8]) SWAP(float, p[7], p[8]);
-    if (p[0] > p[3]) p[0] = p[3]; if (p[5] > p[8]) p[8] = p[5]; if (p[4] > p[7]) SWAP(float, p[4], p[7]);
-    if (p[3] > p[6]) p[6] = p[3]; if (p[1] > p[4]) SWAP(float, p[1], p[4]); if (p[2] > p[5]) p[2] = p[5];
-    if (p[4] > p[7]) SWAP(float, p[4], p[7]);
-    if (p[4] < p[2]) { if (p[2] < p[6]) return p[2]; return p[4] < p[6] ? p[6] : p[4]; }
-    if (p[4] < p[6]) return p[4]; return p[2] < p[6] ? p[6] : p[2];
-}
-
 // Simpler completely verified 9-element median via exact partial network
 static inline uint8_t m9_u8(uint8_t a[9]) {
     #define OP(i,j) if (a[i] > a[j]) { uint8_t t = a[i]; a[i] = a[j]; a[j] = t; }
@@ -314,6 +314,17 @@ static int cmp_f32(const void *a, const void *b) {
     return (va > vb) - (va < vb);
 }
 
+static inline uint8x16_t m9_u8_x16(uint8x16_t p0, uint8x16_t p1, uint8x16_t p2,
+                                   uint8x16_t p3, uint8x16_t p4, uint8x16_t p5,
+                                   uint8x16_t p6, uint8x16_t p7, uint8x16_t p8) {
+    #define VOP(a, b) do { uint8x16_t lo = vminq_u8(a, b), hi = vmaxq_u8(a, b); a = lo; b = hi; } while (0)
+    VOP(p0, p1); VOP(p3, p4); VOP(p6, p7); VOP(p1, p2); VOP(p4, p5); VOP(p7, p8); VOP(p0, p1); VOP(p3, p4); VOP(p6, p7);
+    VOP(p0, p3); VOP(p3, p6); VOP(p0, p3); VOP(p1, p4); VOP(p4, p7); VOP(p1, p4); VOP(p2, p5); VOP(p5, p8); VOP(p2, p5);
+    VOP(p1, p3); VOP(p5, p7); VOP(p2, p6); VOP(p4, p6); VOP(p2, p4); VOP(p2, p3); VOP(p4, p5); VOP(p3, p4);
+    #undef VOP
+    return p4;
+}
+
 int32_t sr_c_median_u8(const uint8_t *src, int32_t w, int32_t h, int32_t ch, int32_t srcStride,
                        uint8_t *dst, int32_t dstStride, int32_t ksize) {
     if (!src || !dst || w <= 0 || h <= 0 || ksize < 1 || (ksize % 2) == 0) return -1;
@@ -322,21 +333,52 @@ int32_t sr_c_median_u8(const uint8_t *src, int32_t w, int32_t h, int32_t ch, int
         return 0;
     }
     if (ksize == 3) {
+        const int32_t n = w * ch;
         for (int32_t y = 0; y < h; y++) {
             int32_t ym = y > 0 ? y - 1 : 0, yp = y + 1 < h ? y + 1 : h - 1;
             const uint8_t *r0 = src + (size_t)ym * srcStride;
             const uint8_t *r1 = src + (size_t)y * srcStride;
             const uint8_t *r2 = src + (size_t)yp * srcStride;
             uint8_t *d = dst + (size_t)y * dstStride;
-            for (int32_t x = 0; x < w; x++) {
-                int32_t xm = x > 0 ? x - 1 : 0, xp = x + 1 < w ? x + 1 : w - 1;
+            if (w >= 3) {
+                // Left 1-px column border
+                for (int32_t c = 0; c < ch; c++) {
+                    uint8_t v[9] = {r0[c], r0[c], r0[ch+c], r1[c], r1[c], r1[ch+c], r2[c], r2[c], r2[ch+c]};
+                    d[c] = m9_u8(v);
+                }
+                int32_t i = ch;
+                int32_t end_i = n - ch;
+                for (; i + 16 <= end_i; i += 16) {
+                    uint8x16_t med = m9_u8_x16(
+                        vld1q_u8(r0 + i - ch), vld1q_u8(r0 + i), vld1q_u8(r0 + i + ch),
+                        vld1q_u8(r1 + i - ch), vld1q_u8(r1 + i), vld1q_u8(r1 + i + ch),
+                        vld1q_u8(r2 + i - ch), vld1q_u8(r2 + i), vld1q_u8(r2 + i + ch));
+                    vst1q_u8(d + i, med);
+                }
+                for (; i < end_i; i++) {
+                    uint8_t v[9] = {r0[i-ch], r0[i], r0[i+ch], r1[i-ch], r1[i], r1[i+ch], r2[i-ch], r2[i], r2[i+ch]};
+                    d[i] = m9_u8(v);
+                }
+                int32_t last = n - ch;
                 for (int32_t c = 0; c < ch; c++) {
                     uint8_t v[9] = {
-                        r0[xm*ch+c], r0[x*ch+c], r0[xp*ch+c],
-                        r1[xm*ch+c], r1[x*ch+c], r1[xp*ch+c],
-                        r2[xm*ch+c], r2[x*ch+c], r2[xp*ch+c]
+                        r0[last-ch+c], r0[last+c], r0[last+c],
+                        r1[last-ch+c], r1[last+c], r1[last+c],
+                        r2[last-ch+c], r2[last+c], r2[last+c]
                     };
-                    d[x*ch+c] = m9_u8(v);
+                    d[last + c] = m9_u8(v);
+                }
+            } else {
+                for (int32_t x = 0; x < w; x++) {
+                    int32_t xm = x > 0 ? x - 1 : 0, xp = x + 1 < w ? x + 1 : w - 1;
+                    for (int32_t c = 0; c < ch; c++) {
+                        uint8_t v[9] = {
+                            r0[xm*ch+c], r0[x*ch+c], r0[xp*ch+c],
+                            r1[xm*ch+c], r1[x*ch+c], r1[xp*ch+c],
+                            r2[xm*ch+c], r2[x*ch+c], r2[xp*ch+c]
+                        };
+                        d[x*ch+c] = m9_u8(v);
+                    }
                 }
             }
         }
@@ -355,9 +397,11 @@ int32_t sr_c_median_u8(const uint8_t *src, int32_t w, int32_t h, int32_t ch, int
                     hist[row[sx * ch + c]]++;
                 }
             }
+            int32_t med = 0, le_cnt = hist[0];
+            while (med < 255 && le_cnt <= halfN) { med++; le_cnt += hist[med]; }
             for (int32_t x = 0; x < w; x++) {
-                int32_t acc = 0, med = 0;
-                while (med < 255) { acc += hist[med]; if (acc > halfN) break; med++; }
+                while (med < 255 && le_cnt <= halfN) { med++; le_cnt += hist[med]; }
+                while (med > 0 && le_cnt - hist[med] > halfN) { le_cnt -= hist[med]; med--; }
                 d[x * ch + c] = (uint8_t)med;
                 if (x + 1 < w) {
                     int32_t xOut = x - rad < 0 ? 0 : x - rad;
@@ -365,8 +409,10 @@ int32_t sr_c_median_u8(const uint8_t *src, int32_t w, int32_t h, int32_t ch, int
                     for (int32_t dy = -rad; dy <= rad; dy++) {
                         int32_t sy = y + dy < 0 ? 0 : (y + dy >= h ? h - 1 : y + dy);
                         const uint8_t *row = src + (size_t)sy * srcStride;
-                        hist[row[xOut * ch + c]]--;
-                        hist[row[xIn * ch + c]]++;
+                        uint8_t vOut = row[xOut * ch + c];
+                        uint8_t vIn = row[xIn * ch + c];
+                        hist[vOut]--; if (vOut <= med) le_cnt--;
+                        hist[vIn]++;  if (vIn <= med) le_cnt++;
                     }
                 }
             }
@@ -478,7 +524,7 @@ int32_t sr_c_bilateral_u8(const uint8_t *src, int32_t w, int32_t h, int32_t ch, 
     int32_t *dyA = (int32_t *)malloc(sizeof(int32_t) * (size_t)maxPts);
     float *swA = (float *)malloc(sizeof(float) * (size_t)maxPts);
     if (!dxA || !dyA || !swA) { free(dxA); free(dyA); free(swA); return -1; }
-    int nPts = 0;
+    int32_t nPts = 0;
     for (int32_t dy = -radius; dy <= radius; dy++) {
         for (int32_t dx = -radius; dx <= radius; dx++) {
             int32_t r2 = dx * dx + dy * dy;
@@ -488,40 +534,68 @@ int32_t sr_c_bilateral_u8(const uint8_t *src, int32_t w, int32_t h, int32_t ch, 
             }
         }
     }
+    ptrdiff_t *ofsA = (ptrdiff_t *)malloc(sizeof(ptrdiff_t) * (size_t)nPts);
+    if (!ofsA) { free(dxA); free(dyA); free(swA); return -1; }
+    for (int k = 0; k < nPts; k++) ofsA[k] = (ptrdiff_t)dyA[k] * srcStride + (ptrdiff_t)dxA[k] * ch;
 
     for (int32_t y = 0; y < h; y++) {
         const uint8_t *sRow = src + (size_t)y * srcStride;
         uint8_t *dRow = dst + (size_t)y * dstStride;
+        int interiorY = (y >= radius && y < h - radius);
         for (int32_t x = 0; x < w; x++) {
+            int interior = interiorY && (x >= radius && x < w - radius);
             if (ch == 1) {
                 int32_t c0 = sRow[x];
                 float sum = 0.0f, wsum = 0.0f;
-                for (int k = 0; k < nPts; k++) {
-                    int32_t sy = border_idx(y + dyA[k], h, borderMode);
-                    int32_t sx = border_idx(x + dxA[k], w, borderMode);
-                    int32_t v = (sy < 0 || sx < 0) ? 0 : src[(size_t)sy * srcStride + sx];
-                    int32_t d = v - c0; if (d < 0) d = -d;
-                    float wt = swA[k] * colorLUT[d];
-                    sum += (float)v * wt;
-                    wsum += wt;
+                if (interior) {
+                    const uint8_t *ctr = sRow + x;
+                    for (int k = 0; k < nPts; k++) {
+                        int32_t v = ctr[ofsA[k]];
+                        int32_t d = v - c0; if (d < 0) d = -d;
+                        float wt = swA[k] * colorLUT[d];
+                        sum += (float)v * wt;
+                        wsum += wt;
+                    }
+                } else {
+                    for (int k = 0; k < nPts; k++) {
+                        int32_t sy = border_idx(y + dyA[k], h, borderMode);
+                        int32_t sx = border_idx(x + dxA[k], w, borderMode);
+                        int32_t v = (sy < 0 || sx < 0) ? 0 : src[(size_t)sy * srcStride + sx];
+                        int32_t d = v - c0; if (d < 0) d = -d;
+                        float wt = swA[k] * colorLUT[d];
+                        sum += (float)v * wt;
+                        wsum += wt;
+                    }
                 }
                 int32_t out = (int32_t)lrintf(sum / wsum);
                 dRow[x] = (uint8_t)(out < 0 ? 0 : (out > 255 ? 255 : out));
             } else {
                 int32_t b0 = sRow[3*x], g0 = sRow[3*x+1], r0 = sRow[3*x+2];
                 float sb = 0.0f, sg = 0.0f, sr = 0.0f, wsum = 0.0f;
-                for (int k = 0; k < nPts; k++) {
-                    int32_t sy = border_idx(y + dyA[k], h, borderMode);
-                    int32_t sx = border_idx(x + dxA[k], w, borderMode);
-                    int32_t b1 = 0, g1 = 0, r1 = 0;
-                    if (sy >= 0 && sx >= 0) {
-                        const uint8_t *p = src + (size_t)sy * srcStride + (size_t)sx * 3;
-                        b1 = p[0]; g1 = p[1]; r1 = p[2];
+                if (interior) {
+                    const uint8_t *ctr = sRow + (size_t)x * 3;
+                    for (int k = 0; k < nPts; k++) {
+                        const uint8_t *p = ctr + ofsA[k];
+                        int32_t b1 = p[0], g1 = p[1], r1 = p[2];
+                        int32_t d = abs(b1 - b0) + abs(g1 - g0) + abs(r1 - r0);
+                        float wt = swA[k] * colorLUT[d];
+                        sb += (float)b1 * wt; sg += (float)g1 * wt; sr += (float)r1 * wt;
+                        wsum += wt;
                     }
-                    int32_t d = abs(b1 - b0) + abs(g1 - g0) + abs(r1 - r0);
-                    float wt = swA[k] * colorLUT[d];
-                    sb += (float)b1 * wt; sg += (float)g1 * wt; sr += (float)r1 * wt;
-                    wsum += wt;
+                } else {
+                    for (int k = 0; k < nPts; k++) {
+                        int32_t sy = border_idx(y + dyA[k], h, borderMode);
+                        int32_t sx = border_idx(x + dxA[k], w, borderMode);
+                        int32_t b1 = 0, g1 = 0, r1 = 0;
+                        if (sy >= 0 && sx >= 0) {
+                            const uint8_t *p = src + (size_t)sy * srcStride + (size_t)sx * 3;
+                            b1 = p[0]; g1 = p[1]; r1 = p[2];
+                        }
+                        int32_t d = abs(b1 - b0) + abs(g1 - g0) + abs(r1 - r0);
+                        float wt = swA[k] * colorLUT[d];
+                        sb += (float)b1 * wt; sg += (float)g1 * wt; sr += (float)r1 * wt;
+                        wsum += wt;
+                    }
                 }
                 float inv = 1.0f / wsum;
                 int32_t ob = (int32_t)lrintf(sb * inv), og = (int32_t)lrintf(sg * inv), or_ = (int32_t)lrintf(sr * inv);
@@ -531,7 +605,7 @@ int32_t sr_c_bilateral_u8(const uint8_t *src, int32_t w, int32_t h, int32_t ch, 
             }
         }
     }
-    free(dxA); free(dyA); free(swA);
+    free(ofsA); free(dxA); free(dyA); free(swA);
     return 0;
 }
 
@@ -871,5 +945,683 @@ int32_t sr_c_integral(const void *src, int32_t w, int32_t h, int32_t ch, int32_t
     }
 
     free(sumBuf); free(tilBuf);
+    return 0;
+}
+
+// MARK: - Rolling-row NEON Separable, Box, Filter2D, and pyrDown (Workstream 3a)
+
+static inline double f_read_d(const void *row, int32_t idx, int32_t depth) {
+    switch (depth) {
+    case SR_PERF_DEPTH_U8:  return (double)((const uint8_t *)row)[idx];
+    case SR_PERF_DEPTH_S8:  return (double)((const int8_t *)row)[idx];
+    case SR_PERF_DEPTH_U16: return (double)((const uint16_t *)row)[idx];
+    case SR_PERF_DEPTH_S16: return (double)((const int16_t *)row)[idx];
+    case SR_PERF_DEPTH_S32: return (double)((const int32_t *)row)[idx];
+    case SR_PERF_DEPTH_F32: return (double)((const float *)row)[idx];
+    default:                return ((const double *)row)[idx];
+    }
+}
+
+static inline void f_write_d(void *row, int32_t idx, int32_t depth, double v) {
+    switch (depth) {
+    case SR_PERF_DEPTH_U8: {
+        long r = lrint(v);
+        ((uint8_t *)row)[idx] = (uint8_t)(r < 0 ? 0 : (r > 255 ? 255 : r));
+        break;
+    }
+    case SR_PERF_DEPTH_S8: {
+        long r = lrint(v);
+        ((int8_t *)row)[idx] = (int8_t)(r < -128 ? -128 : (r > 127 ? 127 : r));
+        break;
+    }
+    case SR_PERF_DEPTH_U16: {
+        long r = lrint(v);
+        ((uint16_t *)row)[idx] = (uint16_t)(r < 0 ? 0 : (r > 65535 ? 65535 : r));
+        break;
+    }
+    case SR_PERF_DEPTH_S16: {
+        long r = lrint(v);
+        ((int16_t *)row)[idx] = (int16_t)(r < -32768 ? -32768 : (r > 32767 ? 32767 : r));
+        break;
+    }
+    case SR_PERF_DEPTH_S32: {
+        long long r = llrint(v);
+        ((int32_t *)row)[idx] = (int32_t)(r < -2147483648LL ? -2147483648LL : (r > 2147483647LL ? 2147483647LL : r));
+        break;
+    }
+    case SR_PERF_DEPTH_F32:
+        ((float *)row)[idx] = (float)v;
+        break;
+    default:
+        ((double *)row)[idx] = v;
+        break;
+    }
+}
+
+static inline void load_row_f32(const void *src, int32_t n, int32_t depth, float *out) {
+    if (depth == SR_PERF_DEPTH_F32) { memcpy(out, src, sizeof(float) * (size_t)n); return; }
+    int32_t i = 0;
+    if (depth == SR_PERF_DEPTH_U8) {
+        const uint8_t *s = (const uint8_t *)src;
+        for (; i + 16 <= n; i += 16) {
+            uint8x16_t v = vld1q_u8(s + i);
+            uint16x8_t l = vmovl_u8(vget_low_u8(v)), h = vmovl_u8(vget_high_u8(v));
+            vst1q_f32(out + i + 0,  vcvtq_f32_u32(vmovl_u16(vget_low_u16(l))));
+            vst1q_f32(out + i + 4,  vcvtq_f32_u32(vmovl_u16(vget_high_u16(l))));
+            vst1q_f32(out + i + 8,  vcvtq_f32_u32(vmovl_u16(vget_low_u16(h))));
+            vst1q_f32(out + i + 12, vcvtq_f32_u32(vmovl_u16(vget_high_u16(h))));
+        }
+        for (; i < n; i++) out[i] = (float)s[i];
+    } else if (depth == SR_PERF_DEPTH_U16) {
+        const uint16_t *s = (const uint16_t *)src;
+        for (; i + 8 <= n; i += 8) {
+            uint16x8_t v = vld1q_u16(s + i);
+            vst1q_f32(out + i + 0, vcvtq_f32_u32(vmovl_u16(vget_low_u16(v))));
+            vst1q_f32(out + i + 4, vcvtq_f32_u32(vmovl_u16(vget_high_u16(v))));
+        }
+        for (; i < n; i++) out[i] = (float)s[i];
+    } else {
+        for (; i < n; i++) out[i] = (float)f_read_d(src, i, depth);
+    }
+}
+
+static inline void store_row_f32_halfup(const float *acc, float delta, void *dst, int32_t n, int32_t depth) {
+    if (depth == SR_PERF_DEPTH_F32) {
+        if (delta == 0.0f) { memcpy(dst, acc, sizeof(float) * (size_t)n); return; }
+        float32x4_t vd = vdupq_n_f32(delta);
+        int32_t i = 0;
+        for (; i + 16 <= n; i += 16) {
+            for (int k = 0; k < 16; k += 4) vst1q_f32((float *)dst + i + k, vaddq_f32(vld1q_f32(acc + i + k), vd));
+        }
+        for (; i < n; i++) ((float *)dst)[i] = acc[i] + delta;
+        return;
+    }
+    const float32x4_t v0 = vdupq_n_f32(0.0f);
+    const float32x4_t vadd = vdupq_n_f32(delta + 0.5f);
+    int32_t i = 0;
+    if (depth == SR_PERF_DEPTH_U8) {
+        uint8_t *d = (uint8_t *)dst;
+        const float32x4_t v255 = vdupq_n_f32(255.0f);
+        for (; i + 16 <= n; i += 16) {
+            uint32x4_t a0 = vcvtq_u32_f32(vminq_f32(vmaxq_f32(vaddq_f32(vld1q_f32(acc + i), vadd), v0), v255));
+            uint32x4_t a1 = vcvtq_u32_f32(vminq_f32(vmaxq_f32(vaddq_f32(vld1q_f32(acc + i + 4), vadd), v0), v255));
+            uint32x4_t a2 = vcvtq_u32_f32(vminq_f32(vmaxq_f32(vaddq_f32(vld1q_f32(acc + i + 8), vadd), v0), v255));
+            uint32x4_t a3 = vcvtq_u32_f32(vminq_f32(vmaxq_f32(vaddq_f32(vld1q_f32(acc + i + 12), vadd), v0), v255));
+            uint16x8_t q0 = vcombine_u16(vmovn_u32(a0), vmovn_u32(a1));
+            uint16x8_t q1 = vcombine_u16(vmovn_u32(a2), vmovn_u32(a3));
+            vst1q_u8(d + i, vcombine_u8(vmovn_u16(q0), vmovn_u16(q1)));
+        }
+        for (; i < n; i++) {
+            float t = acc[i] + delta + 0.5f;
+            d[i] = t <= 0.0f ? 0 : (t >= 255.0f ? 255 : (uint8_t)t);
+        }
+    } else if (depth == SR_PERF_DEPTH_U16) {
+        uint16_t *d = (uint16_t *)dst;
+        const float32x4_t v65535 = vdupq_n_f32(65535.0f);
+        for (; i + 8 <= n; i += 8) {
+            uint32x4_t a0 = vcvtq_u32_f32(vminq_f32(vmaxq_f32(vaddq_f32(vld1q_f32(acc + i), vadd), v0), v65535));
+            uint32x4_t a1 = vcvtq_u32_f32(vminq_f32(vmaxq_f32(vaddq_f32(vld1q_f32(acc + i + 4), vadd), v0), v65535));
+            vst1q_u16(d + i, vcombine_u16(vmovn_u32(a0), vmovn_u32(a1)));
+        }
+        for (; i < n; i++) {
+            float t = acc[i] + delta + 0.5f;
+            d[i] = t <= 0.0f ? 0 : (t >= 65535.0f ? 65535 : (uint16_t)t);
+        }
+    } else {
+        for (; i < n; i++) f_write_d(dst, i, depth, (double)(acc[i] + delta));
+    }
+}
+
+int32_t sr_c_sep_filter(const void *src, ptrdiff_t sstep_bytes, int32_t sdepth,
+                        void *dst, ptrdiff_t dstep_bytes, int32_t ddepth,
+                        int32_t w, int32_t h, int32_t cn,
+                        const double *kx, int32_t kw, const double *ky, int32_t kh,
+                        int32_t ax, int32_t ay, double delta, int32_t border,
+                        const double *bval_or_null, int32_t use_f32) {
+    if (!src || !dst || !kx || !ky || w <= 0 || h <= 0 || cn <= 0 || kw <= 0 || kh <= 0) return -1;
+    if (ax < 0) ax = kw / 2;
+    if (ay < 0) ay = kh / 2;
+    const int32_t n = w * cn;
+    const int32_t nP = (n + 15) & ~15;
+    double bv[4] = {0, 0, 0, 0};
+    if (bval_or_null) for (int i = 0; i < 4; i++) bv[i] = bval_or_null[i];
+
+    // If src == dst and border wraps/reflects past ring capacity, stage src safely.
+    void *src_copy = NULL;
+    if (src == dst && h > kh) {
+        size_t rb = (size_t)n * (size_t)(sdepth == SR_PERF_DEPTH_U8 ? 1 : (sdepth <= SR_PERF_DEPTH_S16 ? 2 : (sdepth == SR_PERF_DEPTH_F64 ? 8 : 4)));
+        src_copy = malloc(rb * (size_t)h);
+        if (!src_copy) return -1;
+        for (int32_t y = 0; y < h; y++) memcpy((uint8_t *)src_copy + (size_t)y * rb, (const uint8_t *)src + (ptrdiff_t)y * sstep_bytes, rb);
+        src = src_copy;
+        sstep_bytes = (ptrdiff_t)rb;
+    }
+
+    if (use_f32) {
+        float *kxf = (float *)malloc(sizeof(float) * (size_t)kw);
+        float *kyf = (float *)malloc(sizeof(float) * (size_t)kh);
+        int32_t slots = kh < 4 ? 4 : kh;
+        float *pad = (float *)calloc((size_t)(w + kw - 1) * (size_t)cn + 16, sizeof(float));
+        float *ring = (float *)calloc((size_t)slots * (size_t)nP + 16, sizeof(float));
+        float *const_row = (float *)calloc((size_t)nP + 16, sizeof(float));
+        float *acc = (float *)calloc((size_t)nP + 16, sizeof(float));
+        int32_t *keys = (int32_t *)malloc(sizeof(int32_t) * (size_t)slots);
+        const float **rpts = (const float **)malloc(sizeof(float *) * (size_t)kh);
+        if (!kxf || !kyf || !pad || !ring || !const_row || !acc || !keys || !rpts) {
+            free(kxf); free(kyf); free(pad); free(ring); free(const_row); free(acc); free(keys); free(rpts); free(src_copy);
+            return -1;
+        }
+        float sum_kx = 0.0f;
+        for (int32_t k = 0; k < kw; k++) { kxf[k] = (float)kx[k]; sum_kx += kxf[k]; }
+        for (int32_t k = 0; k < kh; k++) kyf[k] = (float)ky[k];
+        for (int32_t i = 0; i < slots; i++) keys[i] = -1;
+        for (int32_t x = 0; x < w; x++) for (int32_t c = 0; c < cn; c++) const_row[x * cn + c] = (float)bv[c < 4 ? c : 0] * sum_kx;
+
+        int32_t left = ax, right = kw - 1 - ax;
+        for (int32_t y = 0; y < h; y++) {
+            for (int32_t j = 0; j < kh; j++) {
+                int32_t sy = border_idx(y + j - ay, h, border);
+                if (sy < 0) { rpts[j] = const_row; continue; }
+                int32_t slot = sy % slots;
+                float *rr = ring + (size_t)slot * (size_t)nP;
+                if (keys[slot] != sy) {
+                    const void *sr = (const uint8_t *)src + (ptrdiff_t)sy * sstep_bytes;
+                    load_row_f32(sr, n, sdepth, pad + (size_t)left * (size_t)cn);
+                    for (int32_t q = 0; q < left; q++) {
+                        int32_t sx = border_idx(q - left, w, border);
+                        for (int32_t c = 0; c < cn; c++)
+                            pad[q * cn + c] = sx < 0 ? (float)bv[c < 4 ? c : 0] : pad[(left + sx) * cn + c];
+                    }
+                    for (int32_t q = 0; q < right; q++) {
+                        int32_t sx = border_idx(w + q, w, border);
+                        for (int32_t c = 0; c < cn; c++)
+                            pad[(left + w + q) * cn + c] = sx < 0 ? (float)bv[c < 4 ? c : 0] : pad[(left + sx) * cn + c];
+                    }
+                    for (int32_t i = 0; i < nP; i += 16) {
+                        float32x4_t a0 = vdupq_n_f32(0), a1 = a0, a2 = a0, a3 = a0;
+                        const float *p = pad + i;
+                        for (int32_t k = 0; k < kw; k++, p += cn) {
+                            float32x4_t kv = vdupq_n_f32(kxf[k]);
+                            a0 = vfmaq_f32(a0, vld1q_f32(p + 0), kv);
+                            a1 = vfmaq_f32(a1, vld1q_f32(p + 4), kv);
+                            a2 = vfmaq_f32(a2, vld1q_f32(p + 8), kv);
+                            a3 = vfmaq_f32(a3, vld1q_f32(p + 12), kv);
+                        }
+                        vst1q_f32(rr + i + 0, a0);
+                        vst1q_f32(rr + i + 4, a1);
+                        vst1q_f32(rr + i + 8, a2);
+                        vst1q_f32(rr + i + 12, a3);
+                    }
+                    keys[slot] = sy;
+                }
+                rpts[j] = rr;
+            }
+            for (int32_t i = 0; i < nP; i += 16) {
+                float32x4_t a0 = vdupq_n_f32(0), a1 = a0, a2 = a0, a3 = a0;
+                for (int32_t j = 0; j < kh; j++) {
+                    float32x4_t kv = vdupq_n_f32(kyf[j]);
+                    const float *p = rpts[j] + i;
+                    a0 = vfmaq_f32(a0, vld1q_f32(p + 0), kv);
+                    a1 = vfmaq_f32(a1, vld1q_f32(p + 4), kv);
+                    a2 = vfmaq_f32(a2, vld1q_f32(p + 8), kv);
+                    a3 = vfmaq_f32(a3, vld1q_f32(p + 12), kv);
+                }
+                vst1q_f32(acc + i + 0, a0);
+                vst1q_f32(acc + i + 4, a1);
+                vst1q_f32(acc + i + 8, a2);
+                vst1q_f32(acc + i + 12, a3);
+            }
+            store_row_f32_halfup(acc, (float)delta, (uint8_t *)dst + (ptrdiff_t)y * dstep_bytes, n, ddepth);
+        }
+        free(kxf); free(kyf); free(pad); free(ring); free(const_row); free(acc); free(keys); free(rpts); free(src_copy);
+        return 0;
+    }
+
+    // Full-precision double streaming kh-row ring (for Sobel / Scharr / sepFilter2D full-depth)
+    const int32_t nD = (n + 7) & ~7;
+    int32_t slots = kh < 4 ? 4 : kh;
+    double *pad = (double *)calloc((size_t)(w + kw - 1) * (size_t)cn + 8, sizeof(double));
+    double *ring = (double *)calloc((size_t)slots * (size_t)nD + 8, sizeof(double));
+    double *acc = (double *)calloc((size_t)nD + 8, sizeof(double));
+    int32_t *keys = (int32_t *)malloc(sizeof(int32_t) * (size_t)slots);
+    const double **rpts = (const double **)malloc(sizeof(double *) * (size_t)kh);
+    if (!pad || !ring || !acc || !keys || !rpts) {
+        free(pad); free(ring); free(acc); free(keys); free(rpts); free(src_copy);
+        return -1;
+    }
+    for (int32_t i = 0; i < slots; i++) keys[i] = -1;
+    int32_t left = ax, right = kw - 1 - ax;
+
+    for (int32_t y = 0; y < h; y++) {
+        int32_t nact = 0;
+        double ky_act[64];
+        double *ky_dyn = kh > 64 ? (double *)malloc(sizeof(double) * (size_t)kh) : ky_act;
+        if (!ky_dyn) { free(pad); free(ring); free(acc); free(keys); free(rpts); free(src_copy); return -1; }
+        for (int32_t j = 0; j < kh; j++) {
+            int32_t sy = border_idx(y + j - ay, h, border);
+            if (sy < 0) continue;
+            int32_t slot = sy % slots;
+            double *rr = ring + (size_t)slot * (size_t)nD;
+            if (keys[slot] != sy) {
+                const void *sr = (const uint8_t *)src + (ptrdiff_t)sy * sstep_bytes;
+                for (int32_t i = 0; i < n; i++) pad[left * cn + i] = f_read_d(sr, i, sdepth);
+                for (int32_t q = 0; q < left; q++) {
+                    int32_t sx = border_idx(q - left, w, border);
+                    for (int32_t c = 0; c < cn; c++) pad[q * cn + c] = sx < 0 ? 0.0 : pad[(left + sx) * cn + c];
+                }
+                for (int32_t q = 0; q < right; q++) {
+                    int32_t sx = border_idx(w + q, w, border);
+                    for (int32_t c = 0; c < cn; c++) pad[(left + w + q) * cn + c] = sx < 0 ? 0.0 : pad[(left + sx) * cn + c];
+                }
+                for (int32_t i = 0; i < nD; i += 8) {
+                    float64x2_t a0 = vdupq_n_f64(0), a1 = a0, a2 = a0, a3 = a0;
+                    const double *p = pad + i;
+                    for (int32_t k = 0; k < kw; k++, p += cn) {
+                        float64x2_t kv = vdupq_n_f64(kx[k]);
+                        a0 = vfmaq_f64(a0, vld1q_f64(p + 0), kv);
+                        a1 = vfmaq_f64(a1, vld1q_f64(p + 2), kv);
+                        a2 = vfmaq_f64(a2, vld1q_f64(p + 4), kv);
+                        a3 = vfmaq_f64(a3, vld1q_f64(p + 6), kv);
+                    }
+                    vst1q_f64(rr + i + 0, a0); vst1q_f64(rr + i + 2, a1);
+                    vst1q_f64(rr + i + 4, a2); vst1q_f64(rr + i + 6, a3);
+                }
+                keys[slot] = sy;
+            }
+            rpts[nact] = rr;
+            ky_dyn[nact] = ky[j];
+            nact++;
+        }
+        for (int32_t i = 0; i < nD; i += 8) {
+            float64x2_t a0 = vdupq_n_f64(delta), a1 = a0, a2 = a0, a3 = a0;
+            for (int32_t j = 0; j < nact; j++) {
+                float64x2_t kv = vdupq_n_f64(ky_dyn[j]);
+                const double *p = rpts[j] + i;
+                a0 = vfmaq_f64(a0, vld1q_f64(p + 0), kv);
+                a1 = vfmaq_f64(a1, vld1q_f64(p + 2), kv);
+                a2 = vfmaq_f64(a2, vld1q_f64(p + 4), kv);
+                a3 = vfmaq_f64(a3, vld1q_f64(p + 6), kv);
+            }
+            vst1q_f64(acc + i + 0, a0); vst1q_f64(acc + i + 2, a1);
+            vst1q_f64(acc + i + 4, a2); vst1q_f64(acc + i + 6, a3);
+        }
+        if (ky_dyn != ky_act) free(ky_dyn);
+        void *dr = (uint8_t *)dst + (ptrdiff_t)y * dstep_bytes;
+        for (int32_t i = 0; i < n; i++) f_write_d(dr, i, ddepth, acc[i]);
+    }
+    free(pad); free(ring); free(acc); free(keys); free(rpts); free(src_copy);
+    return 0;
+}
+
+int32_t sr_c_box_filter(const void *src, ptrdiff_t sstep_bytes, int32_t sdepth,
+                        void *dst, ptrdiff_t dstep_bytes, int32_t ddepth,
+                        int32_t w, int32_t h, int32_t cn,
+                        int32_t kw, int32_t kh, int32_t ax, int32_t ay,
+                        int32_t normalize, int32_t border) {
+    if (!src || !dst || w <= 0 || h <= 0 || cn <= 0 || kw <= 0 || kh <= 0) return -1;
+    if (ax < 0) ax = kw / 2;
+    if (ay < 0) ay = kh / 2;
+    const int32_t n = w * cn;
+    const double scale = normalize ? (1.0 / ((double)kw * (double)kh)) : 1.0;
+
+    // Rolling ring of kh+1 horizontal-summed rows + O(1) vertical colAcc (zero full-frame allocation!)
+    int32_t slots = kh + 2;
+    double *rowD = (double *)malloc(sizeof(double) * (size_t)n);
+    double *ring = (double *)calloc((size_t)slots * (size_t)n, sizeof(double));
+    int32_t *keys = (int32_t *)malloc(sizeof(int32_t) * (size_t)slots);
+    double *colAcc = (double *)calloc((size_t)n, sizeof(double));
+    double *zeros = (double *)calloc((size_t)n, sizeof(double));
+    if (!rowD || !ring || !keys || !colAcc || !zeros) {
+        free(rowD); free(ring); free(keys); free(colAcc); free(zeros);
+        return -1;
+    }
+    for (int32_t i = 0; i < slots; i++) keys[i] = -1;
+
+    // Helper macro to get horizontal-summed row for source index sy
+    #define GET_HROW(sy_expr, out_ptr) do { \
+        int32_t _sy = (sy_expr); \
+        if (_sy < 0) { (out_ptr) = zeros; } \
+        else { \
+            int32_t _slot = _sy % slots; \
+            double *_tr = ring + (size_t)_slot * (size_t)n; \
+            if (keys[_slot] != _sy) { \
+                const void *_sr = (const uint8_t *)src + (ptrdiff_t)_sy * sstep_bytes; \
+                for (int32_t _i = 0; _i < n; _i++) rowD[_i] = f_read_d(_sr, _i, sdepth); \
+                for (int32_t _c = 0; _c < cn; _c++) { \
+                    double _acc = 0.0; \
+                    for (int32_t _k = 0; _k < kw; _k++) { \
+                        int32_t _rx = border_idx(_k - ax, w, border); \
+                        if (_rx >= 0) _acc += rowD[_rx * cn + _c]; \
+                    } \
+                    _tr[_c] = _acc; \
+                    for (int32_t _x = 1; _x < w; _x++) { \
+                        int32_t _rOut = border_idx(_x - 1 - ax, w, border); \
+                        int32_t _rIn = border_idx(_x + kw - 1 - ax, w, border); \
+                        if (_rOut >= 0) _acc -= rowD[_rOut * cn + _c]; \
+                        if (_rIn >= 0) _acc += rowD[_rIn * cn + _c]; \
+                        _tr[_x * cn + _c] = _acc; \
+                    } \
+                } \
+                keys[_slot] = _sy; \
+            } \
+            (out_ptr) = _tr; \
+        } \
+    } while (0)
+
+    for (int32_t k = 0; k < kh; k++) {
+        const double *hr;
+        GET_HROW(border_idx(k - ay, h, border), hr);
+        if (hr != zeros) for (int32_t i = 0; i < n; i++) colAcc[i] += hr[i];
+    }
+    for (int32_t y = 0; y < h; y++) {
+        void *dr = (uint8_t *)dst + (ptrdiff_t)y * dstep_bytes;
+        if (ddepth == SR_PERF_DEPTH_U8 && scale != 1.0) {
+            for (int32_t i = 0; i < n; i++) f_write_d(dr, i, ddepth, colAcc[i] * scale);
+        } else {
+            for (int32_t i = 0; i < n; i++) f_write_d(dr, i, ddepth, colAcc[i] * scale);
+        }
+        if (y + 1 < h) {
+            const double *hOut, *hIn;
+            GET_HROW(border_idx(y - ay, h, border), hOut);
+            GET_HROW(border_idx(y + kh - ay, h, border), hIn);
+            int32_t i = 0;
+            if (hOut != zeros && hIn != zeros) {
+                for (; i + 2 <= n; i += 2) {
+                    float64x2_t c = vld1q_f64(colAcc + i);
+                    c = vaddq_f64(vsubq_f64(c, vld1q_f64(hOut + i)), vld1q_f64(hIn + i));
+                    vst1q_f64(colAcc + i, c);
+                }
+                for (; i < n; i++) colAcc[i] += hIn[i] - hOut[i];
+            } else if (hOut != zeros) {
+                for (; i < n; i++) colAcc[i] -= hOut[i];
+            } else if (hIn != zeros) {
+                for (; i < n; i++) colAcc[i] += hIn[i];
+            }
+        }
+    }
+    #undef GET_HROW
+    free(rowD); free(ring); free(keys); free(colAcc); free(zeros);
+    return 0;
+}
+
+int32_t sr_c_filter2d(const void *src, ptrdiff_t sstep_bytes, int32_t sdepth,
+                      void *dst, ptrdiff_t dstep_bytes, int32_t ddepth,
+                      int32_t w, int32_t h, int32_t cn,
+                      const double *kernel, int32_t kw, int32_t kh,
+                      int32_t ax, int32_t ay, double delta, int32_t border) {
+    if (!src || !dst || !kernel || w <= 0 || h <= 0 || cn <= 0 || kw <= 0 || kh <= 0) return -1;
+    if (ax < 0) ax = kw / 2;
+    if (ay < 0) ay = kh / 2;
+    const int32_t n = w * cn;
+    const int32_t pn = (w + kw - 1) * cn;
+    const int32_t nD = (n + 7) & ~7;
+    int32_t left = ax, right = kw - 1 - ax;
+
+    void *src_copy = NULL;
+    if (src == dst && h > kh) {
+        size_t rb = (size_t)n * (size_t)(sdepth == SR_PERF_DEPTH_U8 ? 1 : (sdepth <= SR_PERF_DEPTH_S16 ? 2 : (sdepth == SR_PERF_DEPTH_F64 ? 8 : 4)));
+        src_copy = malloc(rb * (size_t)h);
+        if (!src_copy) return -1;
+        for (int32_t y = 0; y < h; y++) memcpy((uint8_t *)src_copy + (size_t)y * rb, (const uint8_t *)src + (ptrdiff_t)y * sstep_bytes, rb);
+        src = src_copy;
+        sstep_bytes = (ptrdiff_t)rb;
+    }
+
+    int32_t slots = kh < 4 ? 4 : kh;
+    double *ring = (double *)calloc((size_t)slots * (size_t)(pn + 8), sizeof(double));
+    double *zeros = (double *)calloc((size_t)(pn + 8), sizeof(double));
+    double *acc = (double *)calloc((size_t)nD + 8, sizeof(double));
+    int32_t *keys = (int32_t *)malloc(sizeof(int32_t) * (size_t)slots);
+    const double **rpts = (const double **)malloc(sizeof(double *) * (size_t)kh);
+    if (!ring || !zeros || !acc || !keys || !rpts) {
+        free(ring); free(zeros); free(acc); free(keys); free(rpts); free(src_copy);
+        return -1;
+    }
+    for (int32_t i = 0; i < slots; i++) keys[i] = -1;
+    const int32_t pstride = pn + 8;
+
+    for (int32_t y = 0; y < h; y++) {
+        for (int32_t ky = 0; ky < kh; ky++) {
+            int32_t sy = border_idx(y + ky - ay, h, border);
+            if (sy < 0) { rpts[ky] = zeros; continue; }
+            int32_t slot = sy % slots;
+            double *pad = ring + (size_t)slot * (size_t)pstride;
+            if (keys[slot] != sy) {
+                const void *sr = (const uint8_t *)src + (ptrdiff_t)sy * sstep_bytes;
+                for (int32_t i = 0; i < n; i++) pad[left * cn + i] = f_read_d(sr, i, sdepth);
+                for (int32_t q = 0; q < left; q++) {
+                    int32_t sx = border_idx(q - left, w, border);
+                    for (int32_t c = 0; c < cn; c++) pad[q * cn + c] = sx < 0 ? 0.0 : pad[(left + sx) * cn + c];
+                }
+                for (int32_t q = 0; q < right; q++) {
+                    int32_t sx = border_idx(w + q, w, border);
+                    for (int32_t c = 0; c < cn; c++) pad[(left + w + q) * cn + c] = sx < 0 ? 0.0 : pad[(left + sx) * cn + c];
+                }
+                keys[slot] = sy;
+            }
+            rpts[ky] = pad;
+        }
+        int32_t i = 0;
+        for (; i + 8 <= n; i += 8) {
+            float64x2_t a0 = vdupq_n_f64(delta), a1 = a0, a2 = a0, a3 = a0;
+            for (int32_t ky = 0; ky < kh; ky++) {
+                const double *rp = rpts[ky] + i;
+                const double *kr = kernel + ky * kw;
+                for (int32_t kx = 0; kx < kw; kx++, rp += cn) {
+                    double kv_s = kr[kx];
+                    if (kv_s == 0.0) continue;
+                    float64x2_t kv = vdupq_n_f64(kv_s);
+                    a0 = vfmaq_f64(a0, vld1q_f64(rp + 0), kv);
+                    a1 = vfmaq_f64(a1, vld1q_f64(rp + 2), kv);
+                    a2 = vfmaq_f64(a2, vld1q_f64(rp + 4), kv);
+                    a3 = vfmaq_f64(a3, vld1q_f64(rp + 6), kv);
+                }
+            }
+            vst1q_f64(acc + i + 0, a0); vst1q_f64(acc + i + 2, a1);
+            vst1q_f64(acc + i + 4, a2); vst1q_f64(acc + i + 6, a3);
+        }
+        for (; i < n; i++) {
+            double s = delta;
+            for (int32_t ky = 0; ky < kh; ky++) {
+                const double *rp = rpts[ky] + i;
+                const double *kr = kernel + ky * kw;
+                for (int32_t kx = 0; kx < kw; kx++) s += kr[kx] * rp[kx * cn];
+            }
+            acc[i] = s;
+        }
+        void *dr = (uint8_t *)dst + (ptrdiff_t)y * dstep_bytes;
+        for (int32_t j = 0; j < n; j++) f_write_d(dr, j, ddepth, acc[j]);
+    }
+    free(ring); free(zeros); free(acc); free(keys); free(rpts); free(src_copy);
+    return 0;
+}
+
+int32_t sr_c_pyr_down(const void *src, ptrdiff_t sstep_bytes, int32_t depth,
+                      void *dst, ptrdiff_t dstep_bytes,
+                      int32_t sw, int32_t sh, int32_t dw, int32_t dh, int32_t cn, int32_t border) {
+    if (!src || !dst || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0 || cn <= 0) return -1;
+    const int32_t n = dw * cn;
+
+    if (depth == SR_PERF_DEPTH_U8) {
+        // Exact integer [1, 4, 6, 4, 1] 16-bit NEON rolling 5-row ring (max value 16*16*255 = 65280 <= UINT16_MAX!)
+        int32_t pn = (sw + 4) * cn;
+        uint8_t *pad = (uint8_t *)calloc((size_t)pn + 64, 1);
+        int32_t nP = (n + 15) & ~15;
+        uint16_t *ring = (uint16_t *)calloc(8u * (size_t)nP, sizeof(uint16_t));
+        int32_t keys[8] = {-1,-1,-1,-1,-1,-1,-1,-1};
+        if (!pad || !ring) { free(pad); free(ring); return -1; }
+        for (int32_t y = 0; y < dh; y++) {
+            const uint16_t *rows[5];
+            for (int32_t j = 0; j < 5; j++) {
+                int32_t sy = border_idx(2 * y + j - 2, sh, border);
+                if (sy < 0) sy = 0;
+                int32_t slot = sy & 7;
+                uint16_t *rr = ring + (size_t)slot * (size_t)nP;
+                if (keys[slot] != sy) {
+                    const uint8_t *sr = (const uint8_t *)src + (ptrdiff_t)sy * sstep_bytes;
+                    memcpy(pad + (ptrdiff_t)2 * cn, sr, (size_t)sw * (size_t)cn);
+                    for (int32_t q = 0; q < 2; q++) {
+                        int32_t l = border_idx(q - 2, sw, border), r = border_idx(sw + q, sw, border);
+                        for (int32_t c = 0; c < cn; c++) {
+                            pad[q * cn + c] = l < 0 ? 0 : pad[(l + 2) * cn + c];
+                            pad[(sw + 2 + q) * cn + c] = r < 0 ? 0 : pad[(r + 2) * cn + c];
+                        }
+                    }
+                    if (cn == 1) {
+                        int32_t x = 0;
+                        for (; x + 16 <= dw && 2 * (x + 16) + 2 < sw + 4; x += 16) {
+                            uint8x16x2_t a0 = vld2q_u8(pad + 2 * x);
+                            uint8x16x2_t a1 = vld2q_u8(pad + 2 * x + 2);
+                            uint8x16x2_t a2 = vld2q_u8(pad + 2 * x + 4);
+                            uint16x8_t e0l = vmovl_u8(vget_low_u8(a0.val[0])), e0h = vmovl_u8(vget_high_u8(a0.val[0]));
+                            uint16x8_t o0l = vmovl_u8(vget_low_u8(a0.val[1])), o0h = vmovl_u8(vget_high_u8(a0.val[1]));
+                            uint16x8_t e1l = vmovl_u8(vget_low_u8(a1.val[0])), e1h = vmovl_u8(vget_high_u8(a1.val[0]));
+                            uint16x8_t o1l = vmovl_u8(vget_low_u8(a1.val[1])), o1h = vmovl_u8(vget_high_u8(a1.val[1]));
+                            uint16x8_t e2l = vmovl_u8(vget_low_u8(a2.val[0])), e2h = vmovl_u8(vget_high_u8(a2.val[0]));
+                            uint16x8_t sl = vaddq_u16(vaddq_u16(vaddq_u16(e0l, e2l), vshlq_n_u16(vaddq_u16(o0l, o1l), 2)),
+                                                      vaddq_u16(vshlq_n_u16(e1l, 2), vshlq_n_u16(e1l, 1)));
+                            uint16x8_t sh = vaddq_u16(vaddq_u16(vaddq_u16(e0h, e2h), vshlq_n_u16(vaddq_u16(o0h, o1h), 2)),
+                                                      vaddq_u16(vshlq_n_u16(e1h, 2), vshlq_n_u16(e1h, 1)));
+                            vst1q_u16(rr + x, sl);
+                            vst1q_u16(rr + x + 8, sh);
+                        }
+                        for (; x < dw; x++) {
+                            const uint8_t *p = pad + 2 * x;
+                            rr[x] = (uint16_t)(p[0] + 4 * p[1] + 6 * p[2] + 4 * p[3] + p[4]);
+                        }
+                    } else if (cn == 3) {
+                        int32_t x = 0;
+                        for (; x + 8 <= dw && 2 * x + 23 < sw + 4; x += 8) {
+                            uint8x16x3_t p0 = vld3q_u8(pad + (ptrdiff_t)6 * x);
+                            uint8x8x3_t  p1 = vld3_u8(pad + (ptrdiff_t)6 * x + 48);
+                            #define PYR_U8_CH(c, dstv) do { \
+                                uint8x16_t v16 = p0.val[c]; \
+                                uint8x8_t lo = vget_low_u8(v16), hi = vget_high_u8(v16); \
+                                uint8x8_t h8 = p1.val[c], z = vdup_n_u8(0); \
+                                uint8x8_t e0 = vuzp1_u8(lo, hi); \
+                                uint8x8_t o0 = vuzp2_u8(lo, hi); \
+                                uint8x8_t eh = vuzp1_u8(h8, z); \
+                                uint8x8_t oh = vuzp2_u8(h8, z); \
+                                uint16x8_t we0 = vmovl_u8(e0); \
+                                uint16x8_t wo0 = vmovl_u8(o0); \
+                                uint16x8_t we1 = vmovl_u8(vext_u8(e0, eh, 1)); \
+                                uint16x8_t wo1 = vmovl_u8(vext_u8(o0, oh, 1)); \
+                                uint16x8_t we2 = vmovl_u8(vext_u8(e0, eh, 2)); \
+                                (dstv) = vaddq_u16(vaddq_u16(vaddq_u16(we0, we2), vshlq_n_u16(vaddq_u16(wo0, wo1), 2)), \
+                                                   vaddq_u16(vshlq_n_u16(we1, 2), vshlq_n_u16(we1, 1))); \
+                            } while (0)
+                            uint16x8x3_t out;
+                            PYR_U8_CH(0, out.val[0]);
+                            PYR_U8_CH(1, out.val[1]);
+                            PYR_U8_CH(2, out.val[2]);
+                            #undef PYR_U8_CH
+                            vst3q_u16(rr + (ptrdiff_t)x * 3, out);
+                        }
+                        for (; x < dw; x++) {
+                            const uint8_t *p = pad + (ptrdiff_t)2 * x * 3;
+                            rr[x * 3 + 0] = (uint16_t)(p[0] + 4 * p[3] + 6 * p[6] + 4 * p[9]  + p[12]);
+                            rr[x * 3 + 1] = (uint16_t)(p[1] + 4 * p[4] + 6 * p[7] + 4 * p[10] + p[13]);
+                            rr[x * 3 + 2] = (uint16_t)(p[2] + 4 * p[5] + 6 * p[8] + 4 * p[11] + p[14]);
+                        }
+                    } else {
+                        for (int32_t x = 0; x < dw; x++) {
+                            const uint8_t *p = pad + (ptrdiff_t)2 * x * cn;
+                            for (int32_t c = 0; c < cn; c++)
+                                rr[x * cn + c] = (uint16_t)(p[c] + 4 * p[cn + c] + 6 * p[2 * cn + c] + 4 * p[3 * cn + c] + p[4 * cn + c]);
+                        }
+                    }
+                    keys[slot] = sy;
+                }
+                rows[j] = rr;
+            }
+            uint8_t *dr = (uint8_t *)dst + (ptrdiff_t)y * dstep_bytes;
+            const uint16_t *r0 = rows[0], *r1 = rows[1], *r2 = rows[2], *r3 = rows[3], *r4 = rows[4];
+            int32_t i = 0;
+            for (; i + 8 <= n; i += 8) {
+                uint16x8_t v0 = vld1q_u16(r0 + i), v4 = vld1q_u16(r4 + i);
+                uint16x8_t v1 = vld1q_u16(r1 + i), v3 = vld1q_u16(r3 + i);
+                uint16x8_t v2 = vld1q_u16(r2 + i);
+                uint16x8_t s04 = vaddq_u16(v0, v4);
+                uint16x8_t s13 = vshlq_n_u16(vaddq_u16(v1, v3), 2);
+                uint16x8_t s2  = vaddq_u16(vshlq_n_u16(v2, 2), vshlq_n_u16(v2, 1));
+                uint16x8_t sum = vaddq_u16(vaddq_u16(s04, s13), s2);
+                vst1_u8(dr + i, vrshrn_n_u16(sum, 8));
+            }
+            for (; i < n; i++) {
+                uint32_t s = (uint32_t)r0[i] + 4u * r1[i] + 6u * r2[i] + 4u * r3[i] + r4[i];
+                dr[i] = (uint8_t)((s + 128u) >> 8);
+            }
+        }
+        free(pad); free(ring);
+        return 0;
+    }
+
+    // Float / U16 5-row rolling ring
+    const int32_t nP = (n + 15) & ~15;
+    float *pad = (float *)calloc((size_t)(sw + 4) * (size_t)cn + 32, sizeof(float));
+    float *ring = (float *)calloc(8u * (size_t)nP + 16, sizeof(float));
+    float *acc = (float *)calloc((size_t)nP + 16, sizeof(float));
+    int32_t keys[8] = {-1,-1,-1,-1,-1,-1,-1,-1};
+    if (!pad || !ring || !acc) { free(pad); free(ring); free(acc); return -1; }
+    const float wv = 1.0f / 256.0f, w4 = 4.0f / 256.0f, w6 = 6.0f / 256.0f;
+
+    for (int32_t y = 0; y < dh; y++) {
+        const float *rows[5];
+        for (int32_t j = 0; j < 5; j++) {
+            int32_t sy = border_idx(2 * y + j - 2, sh, border);
+            if (sy < 0) sy = 0;
+            int32_t slot = sy & 7;
+            float *rr = ring + (size_t)slot * (size_t)nP;
+            if (keys[slot] != sy) {
+                const void *sr = (const uint8_t *)src + (ptrdiff_t)sy * sstep_bytes;
+                load_row_f32(sr, sw * cn, depth, pad + (ptrdiff_t)2 * cn);
+                for (int32_t q = 0; q < 2; q++) {
+                    int32_t l = border_idx(q - 2, sw, border), r = border_idx(sw + q, sw, border);
+                    for (int32_t c = 0; c < cn; c++) {
+                        pad[q * cn + c] = l < 0 ? 0.0f : pad[(l + 2) * cn + c];
+                        pad[(sw + 2 + q) * cn + c] = r < 0 ? 0.0f : pad[(r + 2) * cn + c];
+                    }
+                }
+                if (cn == 1) {
+                    int32_t x = 0;
+                    const float32x4_t f4 = vdupq_n_f32(4.0f), f6 = vdupq_n_f32(6.0f);
+                    for (; x + 4 <= dw && 2 * x + 12 <= sw + 4; x += 4) {
+                        float32x4x2_t a = vld2q_f32(pad + 2 * x);
+                        float32x2x2_t b = vld2_f32(pad + 2 * x + 8);
+                        float32x4_t eb = vcombine_f32(b.val[0], vdup_n_f32(0.0f));
+                        float32x4_t ob = vcombine_f32(b.val[1], vdup_n_f32(0.0f));
+                        float32x4_t e0 = a.val[0], o0 = a.val[1];
+                        float32x4_t e1 = vextq_f32(e0, eb, 1), o1 = vextq_f32(o0, ob, 1);
+                        float32x4_t e2 = vextq_f32(e0, eb, 2);
+                        float32x4_t s = vaddq_f32(vaddq_f32(e0, e2), vmulq_f32(vaddq_f32(o0, o1), f4));
+                        s = vfmaq_f32(s, e1, f6);
+                        vst1q_f32(rr + x, s);
+                    }
+                    for (; x < dw; x++) {
+                        const float *p = pad + 2 * x;
+                        rr[x] = p[0] + 4.0f * p[1] + 6.0f * p[2] + 4.0f * p[3] + p[4];
+                    }
+                } else {
+                    for (int32_t x = 0; x < dw; x++) {
+                        const float *p = pad + (ptrdiff_t)2 * x * cn;
+                        for (int32_t c = 0; c < cn; c++)
+                            rr[x * cn + c] = p[c] + 4.0f * p[cn + c] + 6.0f * p[2 * cn + c] + 4.0f * p[3 * cn + c] + p[4 * cn + c];
+                    }
+                }
+                keys[slot] = sy;
+            }
+            rows[j] = rr;
+        }
+        const float *r0 = rows[0], *r1 = rows[1], *r2 = rows[2], *r3 = rows[3], *r4 = rows[4];
+        float32x4_t vw1 = vdupq_n_f32(wv), vw4 = vdupq_n_f32(w4), vw6 = vdupq_n_f32(w6);
+        for (int32_t i = 0; i < nP; i += 4) {
+            float32x4_t s = vmulq_f32(vaddq_f32(vld1q_f32(r0 + i), vld1q_f32(r4 + i)), vw1);
+            s = vfmaq_f32(s, vaddq_f32(vld1q_f32(r1 + i), vld1q_f32(r3 + i)), vw4);
+            s = vfmaq_f32(s, vld1q_f32(r2 + i), vw6);
+            vst1q_f32(acc + i, s);
+        }
+        store_row_f32_halfup(acc, 0.0f, (uint8_t *)dst + (ptrdiff_t)y * dstep_bytes, n, depth);
+    }
+    free(pad); free(ring); free(acc);
     return 0;
 }

@@ -60,7 +60,8 @@ def main(a):
         assert sha(dest)==m["original_sha256"]
     source=w/"stage/index.html";wav=w/"stage/assets/voice.wav"
     goldA=Path(a.reference or ref["final_mp4"])
-    assert sha(goldA)==ref["final_mp4_sha256"]
+    if a.reference:
+        assert goldA.is_file() and sha(goldA)==ref["final_mp4_sha256"]
     if a.silent_reference:
         goldB=Path(a.silent_reference)
     else:
@@ -68,7 +69,20 @@ def main(a):
         goldB=Path(live["scratch_path"])/"runs/1-serial/B/ep30-B.mp4"
     evidence=LOAD(ROOT/"bench/experiments/ram-code-art/live/verification.json")["per_job"]
     prior=next(j for j in evidence if j["job"]=="B" and j["pair"]==1 and j["policy"]=="serial")
-    assert prior["pass"] and sha(goldB)==prior["mp4_sha256"] and a.queue.is_file()
+    assert prior["pass"] and a.queue.is_file()
+    if a.silent_reference:
+        assert goldB.is_file() and sha(goldB)==prior["mp4_sha256"]
+    if goldA.is_file() and goldB.is_file():
+        assert sha(goldA)==ref["final_mp4_sha256"]
+        assert sha(goldB)==prior["mp4_sha256"]
+        reference_mode="mp4_file"
+        archA=archB=None
+    else:
+        archA_path=ROOT/"bench/experiments/render-standard/acceptance/ep30-a-with-audio.json"
+        archB_path=ROOT/"bench/experiments/render-standard/acceptance/ep30-b-video.json"
+        archA=LOAD(archA_path)["reference"]
+        archB=LOAD(archB_path)["reference"]
+        reference_mode="archived_verify_digest"
     for n in "AB":(w/n).mkdir()
     out={k:w/k/(k+" output.mp4") for k in "AB"}
     common=[str(a.queue),"html",str(source),"--width","1080","--height","1920","--fps","30","--frames","60","--bitrate","20000000"]
@@ -108,14 +122,30 @@ def main(a):
     assert any(s["A"] and s["B_submitted"] and not s["B"] for s in samples)
     firstB=min(s["t"] for s in samples if s["B"]);lastA=max(s["t"] for s in samples if s["A"])
     assert firstB>lastA and waiting
-    checks={}
-    for key,p,q,expect in [("A",goldA,out["A"],0),("B",goldB,out["B"],0),("different",goldA,out["B"],2)]:
-        r=sp.run([str(a.queue),"verify",str(p),str(q)],capture_output=True,timeout=95,check=False)
+    def run_verify(key,*paths,expect=0):
+        r=sp.run([str(a.queue),"verify",*[str(p) for p in paths]],capture_output=True,timeout=95,check=False)
         (w/(key+"-quality.json")).write_bytes(r.stdout);(w/(key+"-quality.log")).write_bytes(r.stderr)
         assert r.returncode==expect,(key,r.returncode,r.stderr[-350:])
-        data=json.loads(r.stdout);assert data["exactMatch"]==(expect==0)
-        checks[key]={"exit":r.returncode,"exact":data["exactMatch"],"sections":data["differingSections"],
-                     "frames":data["candidate"]["video"]["frames"],"sample_count":(data["candidate"].get("audio") or {}).get("presentedSamples",0)}
+        return r,json.loads(r.stdout)
+
+    checks={}
+    if reference_mode=="mp4_file":
+        for key,p,q,expect in [("A",goldA,out["A"],0),("B",goldB,out["B"],0),("different",goldA,out["B"],2)]:
+            r,data=run_verify(key,p,q,expect=expect)
+            assert data["exactMatch"]==(expect==0)
+            checks[key]={"exit":r.returncode,"exact":data["exactMatch"],"sections":data["differingSections"],
+                         "frames":data["candidate"]["video"]["frames"],"sample_count":(data["candidate"].get("audio") or {}).get("presentedSamples",0)}
+    else:
+        for key,arch in [("A",archA),("B",archB)]:
+            r,data=run_verify(key,out[key],expect=0)
+            cand=data["reference"];exact=(cand==arch)
+            assert exact,f"archived {key} digest mismatch: cand={cand} arch={arch}"
+            checks[key]={"exit":r.returncode,"exact":exact,"sections":[],
+                         "frames":cand["video"]["frames"],"sample_count":(cand.get("audio") or {}).get("presentedSamples",0)}
+        r,data=run_verify("different",out["A"],out["B"],expect=2)
+        assert data["exactMatch"] is False
+        checks["different"]={"exit":r.returncode,"exact":data["exactMatch"],"sections":data["differingSections"],
+                             "frames":data["candidate"]["video"]["frames"],"sample_count":(data["candidate"].get("audio") or {}).get("presentedSamples",0)}
     assert checks["A"]["frames"]==checks["B"]["frames"]==60 and checks["A"]["sample_count"]==96000 and checks["B"]["sample_count"]==0
     assert set(checks["different"]["sections"])=={"video","audio"}
     # Exercise the revised async virtual clock in separate, freshly started WebKit sessions.
@@ -137,7 +167,7 @@ def main(a):
         "native_worker_samples":len(samples),"max_distinct_native_workers":max(len(set(s["A"]+s["B"])) for s in samples),
         "second_submitted_while_first_active":True,"observed_queue":waiting,"last_A_sample_s":lastA,"first_B_sample_s":firstB,
         "frontmost_same_before_after":(front_before==front_after) if front_before and front_after else None,
-        "original_inputs_unchanged_after":len(manifest),"reference_file_sha256":{"A":ref["final_mp4_sha256"],"B":prior["mp4_sha256"]},
+        "original_inputs_unchanged_after":len(manifest),"reference_mode":reference_mode,"reference_file_sha256":{"A":ref["final_mp4_sha256"],"B":prior["mp4_sha256"]},
         "three_fresh_clock_replays":{"equal":True,"frames_per_replay":3,"activeNV12SHA256":runs[0]["video"]["activeNV12SHA256"],
             "ptsAndDurationsSHA256":runs[0]["video"]["ptsAndDurationsSHA256"]},
         "forbidden_executables_in_sampled_descendants":sorted(unexpected),

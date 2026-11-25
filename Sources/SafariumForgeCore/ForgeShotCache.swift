@@ -88,6 +88,12 @@ public final class ForgeShotCache {
         let chunkSize = 1024 * 1024
         var buf = [UInt8](repeating: 0, count: chunkSize)
         for url in inputURLs.sorted(by: { $0.path < $1.path }) {
+            if ForgeIncrementalCache.isExistingDirectory(path: url.path) {
+                hasher.update(data: Data("dir:\(url.lastPathComponent):".utf8))
+                try ForgeIncrementalCache.hashDirectoryInput(at: url, into: &hasher)
+                hasher.update(data: Data("\n".utf8))
+                continue
+            }
             try SafeFilePublisher.assertRegularReadableFile(url)
             let fd = Darwin.open(url.path, O_RDONLY)
             guard fd >= 0 else {
@@ -250,18 +256,27 @@ public final class ForgeShotCache {
         )
     }
 
-    private func scanEntries() throws -> [(key: String, binURL: URL, metaURL: URL, bytes: Int64, lastAccess: TimeInterval)] {
+    public struct ShotCacheScannedEntry: Sendable {
+        public let key: String
+        public let binURL: URL
+        public let metaURL: URL
+        public let bytes: Int64
+        public let lastAccess: TimeInterval
+    }
+
+    public static func scanShotEntries(at root: URL) throws -> [ShotCacheScannedEntry] {
+        guard FileManager.default.fileExists(atPath: root.path) else { return [] }
         let items = try FileManager.default.contentsOfDirectory(
-            at: rootURL,
+            at: root,
             includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey],
             options: [.skipsHiddenFiles]
         )
-        var out: [(String, URL, URL, Int64, TimeInterval)] = []
+        var out: [ShotCacheScannedEntry] = []
         for url in items {
             let name = url.lastPathComponent
             if name.hasPrefix("._") || name.hasPrefix(".") || !name.hasSuffix(".bin") { continue }
             let key = String(name.dropLast(4))
-            let mURL = metaURL(for: key)
+            let mURL = root.appendingPathComponent("\(key).meta.json")
             let vals = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
             var size = Int64(vals?.fileSize ?? 0)
             var access = vals?.contentModificationDate?.timeIntervalSince1970 ?? 0
@@ -270,9 +285,13 @@ public final class ForgeShotCache {
                 size = max(size, meta.byteSize)
                 access = meta.lastAccessedUnix
             }
-            out.append((key, url, mURL, size, access))
+            out.append(ShotCacheScannedEntry(key: key, binURL: url, metaURL: mURL, bytes: size, lastAccess: access))
         }
         return out
+    }
+
+    private func scanEntries() throws -> [(key: String, binURL: URL, metaURL: URL, bytes: Int64, lastAccess: TimeInterval)] {
+        try Self.scanShotEntries(at: rootURL).map { ($0.key, $0.binURL, $0.metaURL, $0.bytes, $0.lastAccess) }
     }
 
     public func stats() throws -> ForgeShotCacheStatsReport {

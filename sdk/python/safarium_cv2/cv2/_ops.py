@@ -548,12 +548,16 @@ def warpPerspective(src, M, dsize, dst=None, flags=_INTER_LINEAR, borderMode=_BO
 
 
 _LEGACY_CVT_CODES = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 40, 41}
+_BAYER_CVT_CODES = {46, 47, 48, 49, 62, 63, 64, 65, 86, 87, 88, 89, 135, 136, 137, 138, 139, 140, 141, 142}
 
 
 def cvtColor(src, code, dst=None, dstCn=0):
     c = int(code)
     if c in _LEGACY_CVT_CODES:
         return _numpy_ops.cvtColor(src, c, dst=dst, dstCn=dstCn)
+    if c in _BAYER_CVT_CODES:
+        from . import _photo
+        return _photo.demosaicing(src, c, dst=dst, dstCn=dstCn)
     a = _msrc(src, "cvtColor")
     if a.dtype not in (np.uint8, np.uint16, np.float32):
         raise _lib.error(f"cvtColor: unsupported dtype {a.dtype}")

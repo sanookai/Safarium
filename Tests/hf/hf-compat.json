@@ -1,9 +1,17 @@
 {
   "schema": "safarium-hf-compat/v1",
-  "updated": "2026-11-23",
+  "updated": "2026-11-25",
   "testedTargets": {
     "hyperframes": "0.9.72",
+    "testedHyperframesVersions": [
+      "0.9.65",
+      "0.9.72"
+    ],
     "puppeteerCore": "25.18.1",
+    "puppeteerCoreByHyperframesVersion": {
+      "0.9.65": "25.18.1",
+      "0.9.72": "25.18.1"
+    },
     "shimBinary": "safarium-cdp",
     "launcher": "bin/safarium-hf",
     "transportMode": "PRODUCER_FORCE_SCREENSHOT=true (--remote-debugging-pipe)"
@@ -45,10 +53,83 @@
     }
   },
   "lastVerification": {
-    "date": "2026-11-23",
-    "releaseSha": "d3cd78f1825176281d0472c41b84dc0ec8a9b5f0d5893f8c12d7acd54c3a263e",
-    "safariumCDPReleaseTests": "2/2 PASS + raw pipe handshake (Browser.getVersion + Target.createTarget + Browser.close) exit 0",
-    "hfContractScript": "blocked_offline_enotcached",
-    "note": "Tests/hf/hf-contract-test.py exited 1 (ENOTCACHED): bin/safarium-hf sets npm_config_offline=true while npx hyperframes@0.9.72 cache is absent from ~/.npm/_npx; requires one-time online npx warmup with Pick's click."
+    "date": "2026-11-25",
+    "releaseSha": "a430a51624d5b0ebc0c0fd0183197104346fcb5ecb4fa3bba7f7a05770c56ba5",
+    "shimPath": "/tmp/safarium-unified-release/build/out/Products/Release/safarium-cdp",
+    "shimSha256": "af1802453b93e1da0c36611e63401f5f077c7f75933a9b2a10c90d0b5bcaf494",
+    "hfContractScript": "pass_0.9.65_and_0.9.72",
+    "reports": {
+      "0.9.65": "bench/experiments/2026-11-25-wave8/hf-0965.json",
+      "0.9.72": "bench/experiments/2026-11-25-wave8/hf-0972.json"
+    },
+    "evidence": {
+      "0.9.65": {
+        "pass": true,
+        "puppeteerCore": "25.18.1",
+        "gsap": "3.15.0",
+        "checkBundledGSAPOffline": {
+          "pass": true,
+          "exit": 0,
+          "seconds": 5.115
+        },
+        "renderVideoAndAudio": {
+          "pass": true,
+          "exit": 0,
+          "seconds": 4.713,
+          "playable": true,
+          "video": {
+            "codec": "avc1",
+            "width": 320,
+            "height": 180,
+            "fps": 30,
+            "durationSeconds": 1,
+            "packetCount": 30,
+            "colorimetry": "ITU_R_709_2"
+          },
+          "audio": {
+            "codec": "aac ",
+            "sampleRate": 48000,
+            "channels": 2,
+            "durationSeconds": 1,
+            "packetCount": 31
+          },
+          "extractedFrames": 3
+        }
+      },
+      "0.9.72": {
+        "pass": true,
+        "puppeteerCore": "25.18.1",
+        "gsap": "3.15.0",
+        "checkBundledGSAPOffline": {
+          "pass": true,
+          "exit": 0,
+          "seconds": 4.18
+        },
+        "renderVideoAndAudio": {
+          "pass": true,
+          "exit": 0,
+          "seconds": 7.225,
+          "playable": true,
+          "video": {
+            "codec": "avc1",
+            "width": 320,
+            "height": 180,
+            "fps": 30,
+            "durationSeconds": 1,
+            "packetCount": 30,
+            "colorimetry": "ITU_R_709_2"
+          },
+          "audio": {
+            "codec": "aac ",
+            "sampleRate": 48000,
+            "channels": 2,
+            "durationSeconds": 1,
+            "packetCount": 31
+          },
+          "extractedFrames": 3
+        }
+      }
+    },
+    "note": "Pick approved one-time online warmup for hyperframes@0.9.65 on 2026-11-25 (~/.npm/_npx/b47a5b0a36a4b486) alongside hyperframes@0.9.72 (~/.npm/_npx/6de5933ed813678b), both using puppeteer-core 25.18.1 and gsap 3.15.0. Both versions passed offline Tests/hf/hf-contract-test.py via ~/.local/bin/safarium-render and /tmp/safarium-unified-release/build/out/Products/Release/safarium-cdp (~/.local/libexec/safarium/safarium-cdp is not installed by Tools/install-render.py)."
   }
 }

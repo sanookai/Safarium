@@ -179,7 +179,18 @@ __all__ = ["imdecode", "imread", "imencode", "imwrite", "VideoCapture",
 _NP_DEPTH = {0: np.uint8, 2: np.uint16, 4: np.int32, 5: np.float32}
 _NOT_DECODABLE = -2  # SRStatus.unsupported
 
+def _opt_declare(name: str, argtypes: list, restype=I32):
+    try:
+        return declare(name, argtypes, restype=restype)
+    except AttributeError:
+        return None
+
+
+_IO_ALLOC_CB = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, I32, I32, I32, I32)
 _decode = declare("sr_io_decode", [VP, ctypes.c_ssize_t, I32, ctypes.POINTER(VP)])
+_decode_cb = _opt_declare("sr_io_decode_cb", [VP, ctypes.c_ssize_t, I32, I32, _IO_ALLOC_CB, VP])
+_jpeg_probe = _opt_declare("sr_io_jpeg_probe", [VP, ctypes.c_ssize_t, I32, ctypes.POINTER(I32), ctypes.POINTER(I32), ctypes.POINTER(I32)])
+_jpeg_decode_into = _opt_declare("sr_io_jpeg_decode_into", [VP, ctypes.c_ssize_t, I32, VP, ctypes.c_ssize_t])
 _decode_frame = declare("sr_io_decode_frame", [VP, ctypes.c_ssize_t, I32, I32, ctypes.POINTER(VP)])
 _frame_info = declare("sr_io_frame_info", [VP, ctypes.c_ssize_t, ctypes.POINTER(I32)])
 _frame_delay = declare("sr_io_frame_delay", [VP, ctypes.c_ssize_t, I32], restype=I32)
@@ -354,13 +365,46 @@ IMWRITE_WEBP_QUALITY = 64
 
 
 def _as_bytes_array(buf) -> np.ndarray:
+    if isinstance(buf, (bytes, bytearray, memoryview)):
+        return np.ascontiguousarray(np.frombuffer(buf, np.uint8))
     a = np.asarray(buf)
     if a.dtype != np.uint8:
         a = a.astype(np.uint8)
+    if a.ndim == 1 and a.flags.c_contiguous:
+        return a
     return np.ascontiguousarray(a.reshape(-1))
 
 
 def _decode_blob(data: np.ndarray, flags, index=None):
+    if index is None and _jpeg_probe is not None and data.size >= 4 and int(data[0]) == 0xFF and int(data[1]) == 0xD8:
+        jw, jh, jc = I32(), I32(), I32()
+        rc_j = _jpeg_probe(data.ctypes.data, data.size, int(flags), ctypes.byref(jw), ctypes.byref(jh), ctypes.byref(jc))
+        if rc_j < 0:
+            _lib.check(rc_j, "imdecode")
+        if rc_j == 0:
+            w, ht, ch = int(jw.value), int(jh.value), int(jc.value)
+            shape = (ht, w) if ch == 1 else (ht, w, ch)
+            out = np.empty(shape, dtype=np.uint8)
+            if _jpeg_decode_into(data.ctypes.data, data.size, int(flags), out.ctypes.data, w * ch) == 0:
+                return out
+    if _decode_cb is not None:
+        holder = [None]
+
+        def _alloc(_ctx, w, ht, ch, depth):
+            shape = (int(ht), int(w)) if ch == 1 else (int(ht), int(w), int(ch))
+            arr = np.empty(shape, dtype=_NP_DEPTH[int(depth)])
+            holder[0] = arr
+            return int(arr.ctypes.data)
+
+        cb = _IO_ALLOC_CB(_alloc)
+        rc = _decode_cb(data.ctypes.data, data.size, int(flags), -1 if index is None else int(index), cb, None)
+        if rc == _NOT_DECODABLE:
+            return None
+        if rc == 1:
+            out = holder[0]
+            return np.ascontiguousarray(out[..., [2, 1, 0] + list(range(3, out.shape[2]))])
+        _lib.check(rc, "imdecode")
+        return holder[0]
     h = VP()
     if index is None:
         rc = _decode(data.ctypes.data, data.size, int(flags), ctypes.byref(h))

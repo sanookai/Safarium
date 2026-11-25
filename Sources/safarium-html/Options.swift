@@ -72,7 +72,7 @@ struct Options {
         var out: String?, wav: String?, srt: String?, srtLang: String?
         var selectedCodec: VideoCodec = .h264
         var isTransparent = false
-        var pixFmt: SinkPixelFormat = .bgra
+        var pixFmt: SinkPixelFormat? = nil
         var snapQual: SnapshotQuality = .fast
         var isLowRam = false
         var isStaticHoldProbe = false
@@ -173,8 +173,9 @@ struct Options {
         if isTransparent && !selectedCodec.hasAlpha {
             throw WorkerError("--transparent requires an alpha codec (hevc-alpha or prores4444)")
         }
-        if (pixFmt == .nv12vImage || pixFmt == .nv12Left) && (isTransparent || selectedCodec.hasAlpha) {
-            throw WorkerError("--pixel-format \(pixFmt.rawValue) cannot be used with alpha/transparent output")
+        let resolvedPixFmt = pixFmt ?? ((isTransparent || selectedCodec.hasAlpha) ? .bgra : .nv12Left)
+        if (resolvedPixFmt == .nv12vImage || resolvedPixFmt == .nv12Left) && (isTransparent || selectedCodec.hasAlpha) {
+            throw WorkerError("--pixel-format \(resolvedPixFmt.rawValue) cannot be used with alpha/transparent output")
         }
         if srtLang != nil && srt == nil {
             throw WorkerError("--subtitle-lang requires --subtitles FILE.srt")
@@ -211,7 +212,7 @@ struct Options {
         }
         width = w; height = h; fps = rate; frames = count
         codec = selectedCodec; transparent = isTransparent
-        pixelFormat = pixFmt; snapshotQuality = snapQual
+        pixelFormat = resolvedPixFmt; snapshotQuality = snapQual
         lowRam = isLowRam; staticHoldProbe = isStaticHoldProbe
         hashFrames = isHashFrames; jsonOutput = isJsonOutput
         jsonErrors = isJsonErrors; progressJSONL = isProgressJSONL

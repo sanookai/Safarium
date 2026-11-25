@@ -347,8 +347,9 @@ public enum ForgeSequenceIngest {
             CVBufferSetAttachment(pb, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2, .shouldPropagate)
             CVBufferSetAttachment(pb, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate)
 
-            if orientRaw == 1 && rawCG.width == targetW && rawCG.height == targetH {
-                try Snapshot(cgImage: rawCG).draw(into: pb, width: targetW, height: targetH)
+            let colorSafeCG = Snapshot.reinterpretingVideo709AsSRGB(rawCG)
+            if orientRaw == 1 && colorSafeCG.width == targetW && colorSafeCG.height == targetH {
+                try Snapshot(cgImage: colorSafeCG).draw(into: pb, width: targetW, height: targetH)
                 return pb
             }
 
@@ -380,15 +381,19 @@ public enum ForgeSequenceIngest {
             }
 
             if orientRaw != 1, let exifOrient = CGImagePropertyOrientation(rawValue: orientRaw) {
-                let ci = CIImage(cgImage: rawCG).oriented(exifOrient)
-                let ciCtx = SafariumMetalContext.shared?.ciContext ?? CIContext(options: [.cacheIntermediates: false])
+                let ci = CIImage(cgImage: colorSafeCG).oriented(exifOrient)
+                let ciCtx = SafariumMetalContext.shared?.ciContext ?? CIContext(options: [
+                    .workingColorSpace: Snapshot.colorSpace,
+                    .outputColorSpace: Snapshot.colorSpace,
+                    .cacheIntermediates: false,
+                ])
                 if let orientedCG = ciCtx.createCGImage(ci, from: ci.extent, format: .BGRA8, colorSpace: Snapshot.colorSpace) {
                     drawOrientedImage(orientedCG, into: ctx, targetW: targetW, targetH: targetH, preserveLeftTopOnOddPad: preserveLeftTopOnOddPad)
                     return pb
                 }
             }
 
-            drawOrientedImage(rawCG, into: ctx, targetW: targetW, targetH: targetH, preserveLeftTopOnOddPad: preserveLeftTopOnOddPad)
+            drawOrientedImage(colorSafeCG, into: ctx, targetW: targetW, targetH: targetH, preserveLeftTopOnOddPad: preserveLeftTopOnOddPad)
             return pb
         }
     }

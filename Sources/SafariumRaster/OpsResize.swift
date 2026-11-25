@@ -350,6 +350,31 @@ private func resizeNearest(_ src: SRImage, _ dst: SRImage, _ sx: Double, _ sy: D
     }
 }
 
+@_silgen_name("sr_c_resize_nearest")
+private func sr_c_resize_nearest(_ src: UnsafePointer<UInt8>, _ sstep: Int, _ sw: Int32, _ sh: Int32,
+                                 _ dst: UnsafeMutablePointer<UInt8>, _ dstep: Int, _ dw: Int32, _ dh: Int32,
+                                 _ elemBytes: Int32, _ scaleX: Double, _ scaleY: Double)
+
+@_silgen_name("sr_c_area_half_u8")
+private func sr_c_area_half_u8(_ src: UnsafePointer<UInt8>, _ sstep: Int, _ sw: Int32, _ sh: Int32,
+                               _ dst: UnsafeMutablePointer<UInt8>, _ dstep: Int, _ dw: Int32, _ dh: Int32, _ cn: Int32)
+
+@_silgen_name("sr_c_area_half_f32")
+private func sr_c_area_half_f32(_ src: UnsafePointer<Float>, _ sstep: Int, _ sw: Int32, _ sh: Int32,
+                                _ dst: UnsafeMutablePointer<Float>, _ dstep: Int, _ dw: Int32, _ dh: Int32, _ cn: Int32)
+
+@_silgen_name("sr_c_resize_linear_fast")
+private func sr_c_resize_linear_fast(_ src: UnsafeRawPointer, _ sstep: Int, _ sw: Int32, _ sh: Int32,
+                                     _ dst: UnsafeMutableRawPointer, _ dstep: Int, _ dw: Int32, _ dh: Int32,
+                                     _ cn: Int32, _ depth: Int32, _ scaleX: Double, _ scaleY: Double) -> Int32
+
+@_silgen_name("sr_c_resize_taps")
+private func sr_c_resize_taps(_ src: UnsafeRawPointer, _ sstep: Int, _ sw: Int32, _ sh: Int32,
+                              _ dst: UnsafeMutableRawPointer, _ dstep: Int, _ dw: Int32, _ dh: Int32,
+                              _ cn: Int32, _ depth: Int32,
+                              _ xOff: UnsafePointer<Int32>, _ xIdx: UnsafePointer<Int32>, _ xW: UnsafePointer<Float>, _ xFixedK: Int32,
+                              _ yOff: UnsafePointer<Int32>, _ yIdx: UnsafePointer<Int32>, _ yW: UnsafePointer<Float>) -> Int32
+
 /// scaleX/scaleY = source pixels per destination pixel (OpenCV's 1/fx).
 @_cdecl("sr_resize")
 public func sr_resize(_ sd: UnsafeMutableRawPointer?, _ sw: Int32, _ sh: Int32, _ ss: Int32, _ sc: Int32, _ sdep: Int32,
@@ -374,10 +399,29 @@ public func sr_resize(_ sd: UnsafeMutableRawPointer?, _ sw: Int32, _ sh: Int32, 
     // OpenCV: INTER_AREA is true area averaging only when both axes shrink; otherwise its generic path uses a
     // two-tap "area mode" formula on each axis.
     let areaMode2 = mode == 3 && !(scaleX >= 1 && scaleY >= 1)
-    if mode == 0 { resizeNearest(src, dst, scaleX, scaleY); return SRStatus.ok }
-    if mode == 3 && !areaMode2 && src.depth == .u8 && scaleX == 2 && scaleY == 2 && src.width == dst.width * 2
+    if mode == 0 {
+        sr_c_resize_nearest(src.data.assumingMemoryBound(to: UInt8.self), src.stride, sw, sh,
+                            dst.data.assumingMemoryBound(to: UInt8.self), dst.stride, dw, dh,
+                            Int32(src.pixelBytes), scaleX, scaleY)
+        return SRStatus.ok
+    }
+    if mode == 3 && !areaMode2 && scaleX == 2 && scaleY == 2 && src.width == dst.width * 2
         && src.height == dst.height * 2 && src.channels != 2 {
-        areaHalfU8(src, dst); return SRStatus.ok
+        if src.depth == .u8 {
+            sr_c_area_half_u8(src.data.assumingMemoryBound(to: UInt8.self), src.stride, sw, sh,
+                              dst.data.assumingMemoryBound(to: UInt8.self), dst.stride, dw, dh, sc)
+            return SRStatus.ok
+        } else if src.depth == .f32 {
+            sr_c_area_half_f32(src.data.assumingMemoryBound(to: Float.self), src.stride, sw, sh,
+                               dst.data.assumingMemoryBound(to: Float.self), dst.stride, dw, dh, sc)
+            return SRStatus.ok
+        }
+    }
+    if (mode != 2 && mode != 3 && mode != 4) && (src.depth == .u8 || src.depth == .f32) {
+        if sr_c_resize_linear_fast(src.data, src.stride, sw, sh, dst.data, dst.stride, dw, dh,
+                                   sc, sdep, scaleX, scaleY) == 0 {
+            return SRStatus.ok
+        }
     }
     let tx: SRTaps, ty: SRTaps
     switch mode {
@@ -392,10 +436,20 @@ public func sr_resize(_ sd: UnsafeMutableRawPointer?, _ sw: Int32, _ sh: Int32, 
     default:
         tx = linearTaps(dst.width, src.width, scaleX); ty = linearTaps(dst.height, src.height, scaleY)
     }
-    switch src.depth {
-    case .u8: resizeSeparable(src, dst, tx, ty, UInt8.self)
-    case .u16: resizeSeparable(src, dst, tx, ty, UInt16.self)
-    default: resizeSeparable(src, dst, tx, ty, Float.self)
+    let rc = tx.off.withUnsafeBufferPointer { xop in
+        tx.idx.withUnsafeBufferPointer { xip in
+            tx.w.withUnsafeBufferPointer { xwp in
+                ty.off.withUnsafeBufferPointer { yop in
+                    ty.idx.withUnsafeBufferPointer { yip in
+                        ty.w.withUnsafeBufferPointer { ywp in
+                            sr_c_resize_taps(src.data, src.stride, sw, sh, dst.data, dst.stride, dw, dh,
+                                             sc, sdep, xop.baseAddress!, xip.baseAddress!, xwp.baseAddress!, Int32(tx.fixedK),
+                                             yop.baseAddress!, yip.baseAddress!, ywp.baseAddress!)
+                        }
+                    }
+                }
+            }
+        }
     }
-    return SRStatus.ok
+    return rc == 0 ? SRStatus.ok : srFail(SRStatus.internalError, "resize failed")
 }

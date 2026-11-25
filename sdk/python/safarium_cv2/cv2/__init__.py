@@ -10,6 +10,8 @@ from ._core import *  # noqa: F401,F403  (phase 1: core-numeric)
 from ._linalg import *  # noqa: F401,F403  (phase 2: linalg + transforms)
 from ._draw import *  # noqa: F401,F403
 from ._ops import *  # noqa: F401,F403
+from ._geo import *  # noqa: F401,F403  (phase 4: geometry, contours, Hough, LSD, segmentation, Subdiv2D)
+from ._photo import *  # noqa: F401,F403  (phase 8: photo, inpaint, NLM, seamlessClone, NPR, HDR, Bayer)
 from ._io import *  # noqa: F401,F403
 from ._videoio import *  # noqa: F401,F403  (phase 6: wins over _io's VideoCapture)
 from ._gpu import *  # noqa: F401,F403  (opt-in Metal paths; off by default)

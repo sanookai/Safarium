@@ -10,6 +10,16 @@ import ImageIO
 import CoreGraphics
 import Accelerate
 
+@_silgen_name("sr_jpeg_decode_baseline")
+private func sr_jpeg_decode_baseline(_ data: UnsafePointer<UInt8>, _ len: Int,
+                                     _ outW: UnsafeMutablePointer<Int32>?, _ outH: UnsafeMutablePointer<Int32>?,
+                                     _ outCn: UnsafeMutablePointer<Int32>?,
+                                     _ dst: UnsafeMutablePointer<UInt8>?, _ dstStride: Int, _ wantCn: Int32) -> Int32
+
+@_silgen_name("sr_c_cvt_swap_u8")
+private func sr_io_cvt_swap_u8(_ src: UnsafePointer<UInt8>, _ sstep: Int, _ dst: UnsafeMutablePointer<UInt8>, _ dstep: Int,
+                               _ w: Int32, _ h: Int32, _ scn: Int32, _ dcn: Int32, _ swapRB: Int32)
+
 // MARK: - Pixel container
 
 /// Owned, tightly packed interleaved pixel buffer (BGR / BGRA / gray order, OpenCV conventions).
@@ -126,21 +136,36 @@ func ioExtractNative(_ im: CGImage) -> IOMat? {
             if byteOrder == CGBitmapInfo.byteOrder16Little.rawValue { offs = alphaFirst ? [0, 0, 0, 1] : [1, 1, 1, 0] }
         }
         out.bytes.withUnsafeMutableBufferPointer { o in
-            for y in 0..<h {
-                let s = base + y * bpr
-                let d = o.baseAddress! + y * w * outCh
-                for x in 0..<w {
-                    let p = s + x * comps
-                    switch (isGray, comps) {
-                    case (true, 1): d[x] = p[0]
-                    case (true, _):  // gray + alpha
-                        let g = p[offs[0]]
-                        d[x * 4] = g; d[x * 4 + 1] = g; d[x * 4 + 2] = g; d[x * 4 + 3] = p[offs[3]]
-                    default:
-                        d[x * outCh] = p[offs[2]]
-                        d[x * outCh + 1] = p[offs[1]]
-                        d[x * outCh + 2] = p[offs[0]]
-                        if outCh == 4 { d[x * 4 + 3] = p[offs[3]] }
+            let dstBase = o.baseAddress!
+            if isGray && comps == 1 {
+                for y in 0..<h { memcpy(dstBase + y * w, base + y * bpr, w) }
+            } else if !isGray && comps == 3 && offs[0] == 0 && offs[1] == 1 && offs[2] == 2 {
+                sr_io_cvt_swap_u8(base, bpr, dstBase, w * 3, Int32(w), Int32(h), 3, 3, 1)
+            } else if !isGray && comps == 4 && offs[0] == 2 && offs[1] == 1 && offs[2] == 0 && offs[3] == 3 {
+                if outCh == 4 {
+                    for y in 0..<h { memcpy(dstBase + y * w * 4, base + y * bpr, w * 4) }
+                } else {
+                    sr_io_cvt_swap_u8(base, bpr, dstBase, w * 3, Int32(w), Int32(h), 4, 3, 0)
+                }
+            } else if !isGray && comps == 4 && offs[0] == 0 && offs[1] == 1 && offs[2] == 2 && offs[3] == 3 {
+                sr_io_cvt_swap_u8(base, bpr, dstBase, w * outCh, Int32(w), Int32(h), 4, Int32(outCh), 1)
+            } else {
+                for y in 0..<h {
+                    let s = base + y * bpr
+                    let d = dstBase + y * w * outCh
+                    for x in 0..<w {
+                        let p = s + x * comps
+                        switch (isGray, comps) {
+                        case (true, 1): d[x] = p[0]
+                        case (true, _):  // gray + alpha
+                            let g = p[offs[0]]
+                            d[x * 4] = g; d[x * 4 + 1] = g; d[x * 4 + 2] = g; d[x * 4 + 3] = p[offs[3]]
+                        default:
+                            d[x * outCh] = p[offs[2]]
+                            d[x * outCh + 1] = p[offs[1]]
+                            d[x * outCh + 2] = p[offs[0]]
+                            if outCh == 4 { d[x * 4 + 3] = p[offs[3]] }
+                        }
                     }
                 }
             }
@@ -187,24 +212,29 @@ func ioExtractNative(_ im: CGImage) -> IOMat? {
         let first = (comps == 4 && alphaFirst) ? 1 : 0
         out.bytes.withUnsafeMutableBytes { raw in
             let o = raw.bindMemory(to: Float.self).baseAddress!
-            for y in 0..<h {
-                let s = base + y * bpr
-                @inline(__always) func sample(_ x: Int, _ c: Int) -> Float {
-                    if half {
-                        var v: UInt16 = 0
-                        memcpy(&v, s + (x * comps + c) * 2, 2)
-                        return Float(Float16(bitPattern: byteOrder == CGBitmapInfo.byteOrder16Big.rawValue ? UInt16(bigEndian: v) : v))
+            if isGray && !half && !bigEndian && bpp == 32 {
+                let rawDst = raw.baseAddress!
+                for y in 0..<h { memcpy(rawDst + y * w * 4, base + y * bpr, w * 4) }
+            } else {
+                for y in 0..<h {
+                    let s = base + y * bpr
+                    @inline(__always) func sample(_ x: Int, _ c: Int) -> Float {
+                        if half {
+                            var v: UInt16 = 0
+                            memcpy(&v, s + (x * comps + c) * 2, 2)
+                            return Float(Float16(bitPattern: byteOrder == CGBitmapInfo.byteOrder16Big.rawValue ? UInt16(bigEndian: v) : v))
+                        }
+                        var v: UInt32 = 0
+                        memcpy(&v, s + (x * comps + c) * 4, 4)
+                        return Float(bitPattern: bigEndian ? UInt32(bigEndian: v) : v)
                     }
-                    var v: UInt32 = 0
-                    memcpy(&v, s + (x * comps + c) * 4, 4)
-                    return Float(bitPattern: bigEndian ? UInt32(bigEndian: v) : v)
-                }
-                for x in 0..<w {
-                    if isGray { o[y * w + x] = sample(x, 0) } else {
-                        o[(y * w + x) * ch] = sample(x, first + 2)       // B
-                        o[(y * w + x) * ch + 1] = sample(x, first + 1)   // G
-                        o[(y * w + x) * ch + 2] = sample(x, first)       // R
-                        if ch == 4 { o[(y * w + x) * 4 + 3] = sample(x, alphaFirst ? 0 : 3) }
+                    for x in 0..<w {
+                        if isGray { o[y * w + x] = sample(x, 0) } else {
+                            o[(y * w + x) * ch] = sample(x, first + 2)       // B
+                            o[(y * w + x) * ch + 1] = sample(x, first + 1)   // G
+                            o[(y * w + x) * ch + 2] = sample(x, first)       // R
+                            if ch == 4 { o[(y * w + x) * 4 + 3] = sample(x, alphaFirst ? 0 : 3) }
+                        }
                     }
                 }
             }
@@ -472,6 +502,32 @@ private func ioBMPHasGrayPalette(_ d: Data) -> Bool {
 /// the caller reports an error instead of "not an image". Nothing is allocated for such a file.
 func ioDecode(_ data: Data, flags: Int32, tooLarge: inout Bool, index: Int = 0) -> IOMat? {
     if index == 0 {
+        if data.count >= 4, data.first == 0xFF {
+            var jw: Int32 = 0, jh: Int32 = 0, jnf: Int32 = 0
+            let probe = data.withUnsafeBytes { raw -> Int32 in
+                guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return 1 }
+                return sr_jpeg_decode_baseline(base, data.count, &jw, &jh, &jnf, nil, 0, 0)
+            }
+            if probe == -2 { tooLarge = true; return nil }
+            if probe == 0 {
+                let unchanged = flags < 0
+                let wantColor = !unchanged && (flags & ioFlagColor) != 0
+                let wantAny = !unchanged && (flags & ioFlagAnyColor) != 0
+                let outCh = Int(unchanged ? jnf : (wantColor ? 3 : (wantAny ? jnf : 1)))
+                let m = IOMat(width: Int(jw), height: Int(jh), channels: outCh, depth: .u8)
+                let rc = data.withUnsafeBytes { raw -> Int32 in
+                    m.bytes.withUnsafeMutableBufferPointer { dst in
+                        sr_jpeg_decode_baseline(raw.bindMemory(to: UInt8.self).baseAddress!, data.count,
+                                               nil, nil, nil, dst.baseAddress!, Int(jw) * outCh, Int32(outCh))
+                    }
+                }
+                if rc == 0 {
+                    if unchanged { return m }
+                    let scale = (flags & 64) != 0 ? 8 : ((flags & 32) != 0 ? 4 : ((flags & 16) != 0 ? 2 : 1))
+                    return ioReduce(m, scale: scale, jpeg: true)
+                }
+            }
+        }
         if let own = ioDecodeOwn(data, tooLarge: &tooLarge) { return ioFinishOwn(own, flags: flags) }
         if tooLarge { return nil }
         // a file that claims one of the formats we parse ourselves but fails our (strict) parser is refused, not retried by ImageIO
@@ -490,24 +546,39 @@ func ioDecode(_ data: Data, flags: Int32, tooLarge: inout Bool, index: Int = 0) 
         case .unsupported: break
         }
     }
-    guard let src = CGImageSourceCreateWithData(data as CFData, opts as CFDictionary), CGImageSourceGetCount(src) > index else { return nil }
-    if let props = CGImageSourceCopyPropertiesAtIndex(src, index, nil) as? [CFString: Any],
-       let pw = props[kCGImagePropertyPixelWidth] as? Int, let ph = props[kCGImagePropertyPixelHeight] as? Int,
-       pw * ph > ioMaxImagePixels {
-        tooLarge = true
-        return nil
+    var extracted: IOMat?
+    var sourceKind = ""
+    var frameCount = 0
+    var orient = 1
+    var isJpeg = false
+    var sizeTooLarge = false
+    autoreleasepool {
+        guard let src = CGImageSourceCreateWithData(data as CFData, opts as CFDictionary) else { return }
+        frameCount = CGImageSourceGetCount(src)
+        guard frameCount > index else { return }
+        let props = CGImageSourceCopyPropertiesAtIndex(src, index, nil) as? [CFString: Any]
+        if let pw = props?[kCGImagePropertyPixelWidth] as? Int, let ph = props?[kCGImagePropertyPixelHeight] as? Int,
+           pw * ph > ioMaxImagePixels {
+            sizeTooLarge = true
+            return
+        }
+        sourceKind = (CGImageSourceGetType(src) as String?) ?? ""
+        isJpeg = sourceKind == "public.jpeg"
+        if let o = props?[kCGImagePropertyOrientation] as? Int { orient = o }
+        if let g = gifFrame {
+            let gm = IOMat(width: g.width, height: g.height, channels: 4, depth: .u8)
+            gm.bytes = g.bgra
+            extracted = gm
+        } else {
+            guard let cg = CGImageSourceCreateImageAtIndex(src, index, opts as CFDictionary),
+                  let native = ioExtractNative(cg) else { return }
+            extracted = native
+        }
     }
-    var m: IOMat
-    if let g = gifFrame {
-        m = IOMat(width: g.width, height: g.height, channels: 4, depth: .u8)
-        m.bytes = g.bgra
-    } else {
-        guard let cg = CGImageSourceCreateImageAtIndex(src, index, opts as CFDictionary), let native = ioExtractNative(cg) else { return nil }
-        m = native
-    }
+    if sizeTooLarge { tooLarge = true; return nil }
+    guard var m = extracted else { return nil }
 
     let unchanged = flags < 0
-    let sourceKind = (CGImageSourceGetType(src) as String?) ?? ""
     if sourceKind == "com.ilm.openexr-image", m.depth == .f32, m.channels == 4 {
         // ImageIO always exposes an alpha plane for EXR; a fully opaque one means the file is plain RGB (what cv2 returns)
         let opaque = m.bytes.withUnsafeBytes { raw -> Bool in
@@ -533,7 +604,7 @@ func ioDecode(_ data: Data, flags: Int32, tooLarge: inout Bool, index: Int = 0) 
         }
     }
     if sourceKind == "com.compuserve.gif", m.depth == .u8 {
-        var animatedOrTransparent = CGImageSourceGetCount(src) > 1
+        var animatedOrTransparent = frameCount > 1
         if let g = gifFrame {
             animatedOrTransparent = g.frameCount > 1 || g.hasTransparency
         } else if m.channels == 4 {
@@ -544,14 +615,13 @@ func ioDecode(_ data: Data, flags: Int32, tooLarge: inout Bool, index: Int = 0) 
     }
     if !unchanged {
         if m.depth == .f32 { return nil }  // cv2 refuses a float TIFF unless asked for IMREAD_UNCHANGED
-        let kind = (CGImageSourceGetType(src) as String?) ?? ""
-        let isPNG = kind == "public.png"
+        let isPNG = sourceKind == "public.png"
         let wantGray = (flags & ioFlagColor) == 0 && (flags & ioFlagAnyColor) == 0
         if m.depth == .u16 && (flags & ioFlagAnyDepth) == 0 {
             if isPNG && wantGray && m.channels >= 3 {
                 m = ioU16ToU8(ioToGray(m, kind: .libpng))  // libpng converts to gray at 16 bits, then strips
             } else {
-                m = ioU16ToU8(m, round257: kind == "public.tiff" && m.channels >= 3)
+                m = ioU16ToU8(m, round257: sourceKind == "public.tiff" && m.channels >= 3)
             }
         }
         if (flags & ioFlagColor) != 0 {
@@ -559,15 +629,13 @@ func ioDecode(_ data: Data, flags: Int32, tooLarge: inout Bool, index: Int = 0) 
         } else if (flags & ioFlagAnyColor) != 0 {
             m = m.channels == 1 ? m : ioDropAlpha(m)
         } else {
-            m = ioToGray(m, kind: IOGrayKind(sourceType: kind))
+            m = ioToGray(m, kind: IOGrayKind(sourceType: sourceKind))
         }
-        if (flags & ioFlagIgnoreOrientation) == 0,
-           let props = CGImageSourceCopyPropertiesAtIndex(src, index, nil) as? [CFString: Any],
-           let o = props[kCGImagePropertyOrientation] as? Int {
-            m = ioApplyOrientation(m, o)
+        if (flags & ioFlagIgnoreOrientation) == 0, orient != 1 {
+            m = ioApplyOrientation(m, orient)
         }
         let scale = (flags & 64) != 0 ? 8 : ((flags & 32) != 0 ? 4 : ((flags & 16) != 0 ? 2 : 1))
-        m = ioReduce(m, scale: scale, jpeg: ioSourceIsJPEG(src))
+        m = ioReduce(m, scale: scale, jpeg: isJpeg)
     }
     return m
 }
@@ -603,13 +671,268 @@ private func ioF32ToU8(_ m: IOMat, scale: Double) -> IOMat {
     return out
 }
 
+public typealias IOAllocCallback = @convention(c) (UnsafeMutableRawPointer?, Int32, Int32, Int32, Int32) -> UnsafeMutableRawPointer?
+
+/// Fast uncompressed single-strip/multi-strip little-endian Float32 grayscale TIFF reader directly into `dst`.
+/// Returns 0 = decoded, 1 = fallback to ImageIO, -1 = tooLarge (> ioMaxImagePixels).
+private func ioTryFastUncompressedF32TIFF(_ data: Data, _ flags: Int32,
+                                          _ allocCb: IOAllocCallback, _ allocCtx: UnsafeMutableRawPointer?) -> Int32 {
+    guard flags < 0, data.count >= 16 else { return 1 }
+    return data.withUnsafeBytes { raw -> Int32 in
+        guard let b = raw.bindMemory(to: UInt8.self).baseAddress else { return 1 }
+        let n = data.count
+        guard b[0] == 0x49 && b[1] == 0x49 && b[2] == 0x2A && b[3] == 0x00 else { return 1 }
+        func u16(_ o: Int) -> Int {
+            o + 2 <= n ? (Int(b[o]) | (Int(b[o + 1]) << 8)) : -1
+        }
+        func u32(_ o: Int) -> Int {
+            o + 4 <= n ? (Int(b[o]) | (Int(b[o + 1]) << 8) | (Int(b[o + 2]) << 16) | (Int(b[o + 3]) << 24)) : -1
+        }
+        let ifd = u32(4)
+        guard ifd >= 8, ifd + 2 <= n else { return 1 }
+        let cnt = u16(ifd)
+        guard cnt > 0, cnt <= 128, ifd + 2 + cnt * 12 + 4 <= n else { return 1 }
+        var w = -1, h = -1, bps = 0, comp = 1, photo = 1, spp = 1, orient = 1, planar = 1, fmt = 1
+        var stripOffType = 0, stripOffCnt = 0, stripOffVal = 0
+        var stripByteType = 0, stripByteCnt = 0, stripByteVal = 0
+        for i in 0..<cnt {
+            let e = ifd + 2 + i * 12
+            let tag = u16(e), typ = u16(e + 2), c = u32(e + 4), voff = u32(e + 8)
+            func scalarVal() -> Int {
+                if c != 1 { return -1 }
+                if typ == 3 { return u16(e + 8) }
+                if typ == 4 { return voff }
+                return -1
+            }
+            switch tag {
+            case 256: w = scalarVal()
+            case 257: h = scalarVal()
+            case 258: bps = scalarVal()
+            case 259: comp = scalarVal()
+            case 262: photo = scalarVal()
+            case 273: stripOffType = typ; stripOffCnt = c; stripOffVal = voff
+            case 274: orient = scalarVal()
+            case 277: spp = scalarVal()
+            case 279: stripByteType = typ; stripByteCnt = c; stripByteVal = voff
+            case 284: planar = scalarVal()
+            case 322, 323, 324, 325: return 1 // tiled TIFF -> ImageIO
+            case 339: fmt = scalarVal()
+            default: break
+            }
+        }
+        guard w > 0, h > 0 else { return 1 }
+        if w * h > ioMaxImagePixels { return -1 }
+        guard bps == 32, comp == 1, spp == 1, fmt == 3, orient <= 1, planar <= 1, (photo == 0 || photo == 1) else { return 1 }
+        guard stripOffCnt > 0, stripOffCnt == stripByteCnt else { return 1 }
+        let dstBytes = w * h * 4
+        if stripOffCnt == 1 {
+            let off = stripOffVal, bc = stripByteVal
+            guard off >= 0, bc >= dstBytes, off + dstBytes <= n else { return 1 }
+            guard let dstRaw = allocCb(allocCtx, Int32(w), Int32(h), 1, SRDepth.f32.rawValue) else { return 1 }
+            memcpy(dstRaw, b + off, dstBytes)
+            return 0
+        }
+        let offElem = stripOffType == 3 ? 2 : (stripOffType == 4 ? 4 : 0)
+        let bcElem = stripByteType == 3 ? 2 : (stripByteType == 4 ? 4 : 0)
+        guard offElem > 0, bcElem > 0,
+              stripOffVal >= 0, stripOffVal + stripOffCnt * offElem <= n,
+              stripByteVal >= 0, stripByteVal + stripByteCnt * bcElem <= n else { return 1 }
+        var totalCheck = 0
+        for s in 0..<stripOffCnt {
+            let off = offElem == 2 ? u16(stripOffVal + s * 2) : u32(stripOffVal + s * 4)
+            let bc = bcElem == 2 ? u16(stripByteVal + s * 2) : u32(stripByteVal + s * 4)
+            let cp = min(bc, dstBytes - totalCheck)
+            guard off >= 0, cp >= 0, off + cp <= n else { return 1 }
+            totalCheck += cp
+            if totalCheck >= dstBytes { break }
+        }
+        guard totalCheck == dstBytes else { return 1 }
+        guard let dstRaw = allocCb(allocCtx, Int32(w), Int32(h), 1, SRDepth.f32.rawValue) else { return 1 }
+        var written = 0
+        for s in 0..<stripOffCnt {
+            let off = offElem == 2 ? u16(stripOffVal + s * 2) : u32(stripOffVal + s * 4)
+            let bc = bcElem == 2 ? u16(stripByteVal + s * 2) : u32(stripByteVal + s * 4)
+            let cp = min(bc, dstBytes - written)
+            if cp > 0 {
+                memcpy(dstRaw + written, b + off, cp)
+                written += cp
+            }
+            if written >= dstBytes { break }
+        }
+        return 0
+    }
+}
+
+private func ioTryExtractDirect(_ im: CGImage, _ sourceKind: String, _ flags: Int32, _ swapRBForPy: Bool,
+                                _ allocCb: IOAllocCallback, _ allocCtx: UnsafeMutableRawPointer?) -> Bool {
+    let w = im.width, h = im.height
+    guard w > 0, h > 0 else { return false }
+    let bpc = im.bitsPerComponent, bpp = im.bitsPerPixel, bpr = im.bytesPerRow
+    let info = im.bitmapInfo.rawValue
+    let alphaInfo = info & CGBitmapInfo.alphaInfoMask.rawValue
+    let byteOrder = info & CGBitmapInfo.byteOrderMask.rawValue
+    let isFloat = (info & CGBitmapInfo.floatComponents.rawValue) != 0
+    let model = im.colorSpace?.model ?? .rgb
+    guard model == .monochrome || model == .rgb, bpc > 0, bpp % bpc == 0, bpp / bpc <= 4 else { return false }
+    let comps = bpp / bpc
+    let isGray = model == .monochrome
+    if isGray ? !(comps == 1 || (comps == 2 && alphaInfo != CGImageAlphaInfo.none.rawValue)) : !(comps == 3 || comps == 4) {
+        return false
+    }
+    if sourceKind == "com.ilm.openexr-image" && isFloat && comps == 4 { return false }
+    if sourceKind == "com.microsoft.bmp" && bpc == 8 && comps == 3 { return false }
+    if sourceKind == "public.tiff" && bpc == 8 && comps == 4 { return false }
+    if sourceKind == "com.compuserve.gif" { return false }
+    guard let provider = im.dataProvider, let cfData = provider.data, let base = CFDataGetBytePtr(cfData) else { return false }
+    let dataLen = CFDataGetLength(cfData)
+    guard dataLen >= bpr * (h - 1) + (w * bpp + 7) / 8 else { return false }
+
+    let hasAlpha = !(alphaInfo == CGImageAlphaInfo.none.rawValue
+                     || alphaInfo == CGImageAlphaInfo.noneSkipFirst.rawValue
+                     || alphaInfo == CGImageAlphaInfo.noneSkipLast.rawValue)
+    let alphaFirst = alphaInfo == CGImageAlphaInfo.premultipliedFirst.rawValue
+        || alphaInfo == CGImageAlphaInfo.first.rawValue
+        || alphaInfo == CGImageAlphaInfo.noneSkipFirst.rawValue
+    let unchanged = flags < 0
+    let wantColor = !unchanged && (flags & ioFlagColor) != 0
+
+    if bpc == 8 && !isFloat {
+        var offs = [0, 1, 2, 3]
+        if comps == 4 {
+            var logical: [Int] = alphaFirst ? [3, 0, 1, 2] : [0, 1, 2, 3]
+            if byteOrder == CGBitmapInfo.byteOrder32Little.rawValue { logical.reverse() }
+            for (slot, comp) in logical.enumerated() { offs[comp] = slot }
+        } else if isGray && comps == 2 {
+            offs = alphaFirst ? [1, 1, 1, 0] : [0, 0, 0, 1]
+            if byteOrder == CGBitmapInfo.byteOrder16Little.rawValue { offs = alphaFirst ? [0, 0, 0, 1] : [1, 1, 1, 0] }
+        }
+        let nativeCh = isGray ? (comps == 2 ? 4 : 1) : ((comps == 4 && hasAlpha) ? 4 : 3)
+        if unchanged {
+            guard !swapRBForPy else { return false }
+            guard let dstRaw = allocCb(allocCtx, Int32(w), Int32(h), Int32(nativeCh), SRDepth.u8.rawValue) else { return false }
+            let d = dstRaw.assumingMemoryBound(to: UInt8.self)
+            if isGray && comps == 1 {
+                for y in 0..<h { memcpy(d + y * w, base + y * bpr, w) }
+                return true
+            } else if !isGray && comps == 3 && offs[0] == 0 && offs[1] == 1 && offs[2] == 2 {
+                sr_io_cvt_swap_u8(base, bpr, d, w * 3, Int32(w), Int32(h), 3, 3, 1)
+                return true
+            } else if !isGray && comps == 4 && offs[0] == 2 && offs[1] == 1 && offs[2] == 0 && offs[3] == 3 {
+                if nativeCh == 4 {
+                    for y in 0..<h { memcpy(d + y * w * 4, base + y * bpr, w * 4) }
+                } else {
+                    sr_io_cvt_swap_u8(base, bpr, d, w * 3, Int32(w), Int32(h), 4, 3, 0)
+                }
+                return true
+            } else if !isGray && comps == 4 && offs[0] == 0 && offs[1] == 1 && offs[2] == 2 && offs[3] == 3 {
+                sr_io_cvt_swap_u8(base, bpr, d, w * nativeCh, Int32(w), Int32(h), 4, Int32(nativeCh), 1)
+                return true
+            }
+            return false
+        }
+        if wantColor && !isGray {
+            guard let dstRaw = allocCb(allocCtx, Int32(w), Int32(h), 3, SRDepth.u8.rawValue) else { return false }
+            let d = dstRaw.assumingMemoryBound(to: UInt8.self)
+            if comps == 3 && offs[0] == 0 && offs[1] == 1 && offs[2] == 2 {
+                sr_io_cvt_swap_u8(base, bpr, d, w * 3, Int32(w), Int32(h), 3, 3, swapRBForPy ? 0 : 1)
+                return true
+            } else if comps == 4 && offs[0] == 2 && offs[1] == 1 && offs[2] == 0 && offs[3] == 3 {
+                sr_io_cvt_swap_u8(base, bpr, d, w * 3, Int32(w), Int32(h), 4, 3, swapRBForPy ? 1 : 0)
+                return true
+            } else if comps == 4 && offs[0] == 0 && offs[1] == 1 && offs[2] == 2 && offs[3] == 3 {
+                sr_io_cvt_swap_u8(base, bpr, d, w * 3, Int32(w), Int32(h), 4, 3, swapRBForPy ? 0 : 1)
+                return true
+            }
+            return false
+        }
+        return false
+    }
+    if unchanged && (bpc == 32 && isFloat) && isGray && comps == 1 && bpp == 32 && byteOrder != CGBitmapInfo.byteOrder32Big.rawValue {
+        guard let dstRaw = allocCb(allocCtx, Int32(w), Int32(h), 1, SRDepth.f32.rawValue) else { return false }
+        for y in 0..<h { memcpy(dstRaw + y * w * 4, base + y * bpr, w * 4) }
+        return true
+    }
+    return false
+}
+
+@_cdecl("sr_io_decode_cb")
+public func sr_io_decode_cb(_ buf: UnsafePointer<UInt8>?, _ len: Int, _ flags: Int32, _ index: Int32,
+                            _ allocCb: IOAllocCallback?, _ allocCtx: UnsafeMutableRawPointer?) -> Int32 {
+    guard let buf, len > 0, let allocCb else { return srFail(SRStatus.badArgument, "imdecode: empty buffer") }
+    let idx = index < 0 ? 0 : Int(index)
+    let wantRgbPy = flags >= 0 && (flags & 256) != 0
+    let data = Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: buf), count: len, deallocator: .none)
+    if idx == 0 && len >= 16 && buf[0] == 0x49 && buf[1] == 0x49 && buf[2] == 0x2A && buf[3] == 0x00 && flags < 0 {
+        let rcT = ioTryFastUncompressedF32TIFF(data, flags, allocCb, allocCtx)
+        if rcT == 0 { return SRStatus.ok }
+        if rcT < 0 { return srFail(SRStatus.badArgument, "imdecode: image is larger than CV_IO_MAX_IMAGE_PIXELS (2^30 pixels)") }
+    }
+    var tooLarge = false
+    var handledDirect = false
+    if idx == 0 && !(len >= 4 && buf[0] == 0xFF) && ioGifCanvas(data) == nil {
+        let scale = flags < 0 ? 1 : ((flags & 64) != 0 ? 8 : ((flags & 32) != 0 ? 4 : ((flags & 16) != 0 ? 2 : 1)))
+        if scale == 1 && (ioDecodeOwn(data, tooLarge: &tooLarge) == nil) && !tooLarge {
+            let h3 = [UInt8](data.prefix(3))
+            let isOwnMagic = h3.count == 3 && ((h3[0] == 0x50 && ((h3[1] >= 0x31 && h3[1] <= 0x37) || h3[1] == 0x66 || h3[1] == 0x46) && (h3[2] == 10 || h3[2] == 32 || h3[2] == 9 || h3[2] == 13))
+                || (h3[0] == 0x23 && h3[1] == 0x3F) || (h3[0] == 0x59 && h3[1] == 0xA6 && h3[2] == 0x6A))
+            if !isOwnMagic {
+                let opts: [CFString: Any] = [kCGImageSourceShouldAllowFloat: true, kCGImageSourceShouldCache: false]
+                autoreleasepool {
+                    guard let src = CGImageSourceCreateWithData(data as CFData, opts as CFDictionary) else { return }
+                    let fc = CGImageSourceGetCount(src)
+                    guard fc > 0 else { return }
+                    let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
+                    if let pw = props?[kCGImagePropertyPixelWidth] as? Int, let ph = props?[kCGImagePropertyPixelHeight] as? Int,
+                       pw * ph > ioMaxImagePixels { tooLarge = true; return }
+                    let sourceKind = (CGImageSourceGetType(src) as String?) ?? ""
+                    let orient = (props?[kCGImagePropertyOrientation] as? Int) ?? 1
+                    if flags >= 0 && orient != 1 && (flags & ioFlagIgnoreOrientation) == 0 { return }
+                    guard let cg = CGImageSourceCreateImageAtIndex(src, 0, opts as CFDictionary) else { return }
+                    handledDirect = ioTryExtractDirect(cg, sourceKind, flags, wantRgbPy, allocCb, allocCtx)
+                }
+                if tooLarge { return srFail(SRStatus.badArgument, "imdecode: image is larger than CV_IO_MAX_IMAGE_PIXELS (2^30 pixels)") }
+                if handledDirect { return SRStatus.ok }
+            }
+        }
+    }
+    tooLarge = false
+    let m: IOMat? = autoreleasepool {
+        ioDecode(data, flags: flags, tooLarge: &tooLarge, index: idx)
+    }
+    guard let m else {
+        if tooLarge { return srFail(SRStatus.badArgument, "imdecode: image is larger than CV_IO_MAX_IMAGE_PIXELS (2^30 pixels)") }
+        return srFail(SRStatus.unsupported, "imdecode: cannot decode image")
+    }
+    guard let dstRaw = allocCb(allocCtx, Int32(m.width), Int32(m.height), Int32(m.channels), m.depth.rawValue) else {
+        return srFail(SRStatus.internalError, "imdecode: allocation callback failed")
+    }
+    if wantRgbPy && m.channels >= 3 && m.depth == .u8 {
+        if m.channels == 3 || m.channels == 4 {
+            m.bytes.withUnsafeBytes { s in
+                sr_io_cvt_swap_u8(s.bindMemory(to: UInt8.self).baseAddress!, m.rowBytes,
+                                  dstRaw.assumingMemoryBound(to: UInt8.self), m.rowBytes,
+                                  Int32(m.width), Int32(m.height), Int32(m.channels), Int32(m.channels), 1)
+            }
+            return SRStatus.ok
+        }
+    }
+    m.bytes.withUnsafeBytes { s in
+        if !s.isEmpty { memcpy(dstRaw, s.baseAddress!, s.count) }
+    }
+    if wantRgbPy && m.channels >= 3 && m.depth != .u8 { return 1 } // tell Python to swap channels in NumPy for u16/f32
+    return SRStatus.ok
+}
+
 @_cdecl("sr_io_decode")
 public func sr_io_decode(_ buf: UnsafePointer<UInt8>?, _ len: Int, _ flags: Int32,
                          _ out: UnsafeMutablePointer<UnsafeMutableRawPointer?>?) -> Int32 {
     guard let buf, len > 0, let out else { return srFail(SRStatus.badArgument, "imdecode: empty buffer") }
-    let data = Data(bytes: buf, count: len)
     var tooLarge = false
-    guard let m = ioDecode(data, flags: flags, tooLarge: &tooLarge) else {
+    let m: IOMat? = autoreleasepool {
+        let data = Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: buf), count: len, deallocator: .none)
+        return ioDecode(data, flags: flags, tooLarge: &tooLarge)
+    }
+    guard let m else {
         if tooLarge { return srFail(SRStatus.badArgument, "imdecode: image is larger than CV_IO_MAX_IMAGE_PIXELS (2^30 pixels)") }
         return srFail(SRStatus.unsupported, "imdecode: cannot decode image")
     }
@@ -617,6 +940,41 @@ public func sr_io_decode(_ buf: UnsafePointer<UInt8>?, _ len: Int, _ flags: Int3
     blob.mat = m
     out.pointee = Unmanaged.passRetained(blob).toOpaque()
     return SRStatus.ok
+}
+
+@_cdecl("sr_io_jpeg_probe")
+public func sr_io_jpeg_probe(_ buf: UnsafePointer<UInt8>?, _ len: Int, _ flags: Int32,
+                             _ outW: UnsafeMutablePointer<Int32>?, _ outH: UnsafeMutablePointer<Int32>?,
+                             _ outCh: UnsafeMutablePointer<Int32>?) -> Int32 {
+    guard let buf, len > 3, let outW, let outH, let outCh else { return 1 }
+    if flags >= 0 && (flags & (16 | 32 | 64)) != 0 { return 1 }
+    var w: Int32 = 0, h: Int32 = 0, nf: Int32 = 0
+    let rc = sr_jpeg_decode_baseline(buf, len, &w, &h, &nf, nil, 0, 0)
+    if rc == -2 { return srFail(SRStatus.badArgument, "imdecode: image is larger than CV_IO_MAX_IMAGE_PIXELS (2^30 pixels)") }
+    if rc != 0 { return 1 }
+    let unchanged = flags < 0
+    let wantColor = !unchanged && (flags & ioFlagColor) != 0
+    let wantAny = !unchanged && (flags & ioFlagAnyColor) != 0
+    outW.pointee = w
+    outH.pointee = h
+    outCh.pointee = unchanged ? nf : (wantColor ? 3 : (wantAny ? nf : 1))
+    return 0
+}
+
+@_cdecl("sr_io_jpeg_decode_into")
+public func sr_io_jpeg_decode_into(_ buf: UnsafePointer<UInt8>?, _ len: Int, _ flags: Int32,
+                                   _ dst: UnsafeMutablePointer<UInt8>?, _ dstStride: Int) -> Int32 {
+    guard let buf, len > 3, let dst else { return 1 }
+    var w: Int32 = 0, h: Int32 = 0, nf: Int32 = 0
+    let probe = sr_jpeg_decode_baseline(buf, len, &w, &h, &nf, nil, 0, 0)
+    if probe != 0 { return 1 }
+    let unchanged = flags < 0
+    let wantColor = !unchanged && (flags & ioFlagColor) != 0
+    let wantAny = !unchanged && (flags & ioFlagAnyColor) != 0
+    let outCh: Int32 = unchanged ? nf : (wantColor ? 3 : (wantAny ? nf : 1))
+    let wantRgb = !unchanged && (flags & 256) != 0 && outCh == 3
+    let wantCn: Int32 = wantRgb ? -3 : outCh
+    return sr_jpeg_decode_baseline(buf, len, nil, nil, nil, dst, dstStride, wantCn)
 }
 
 /// out[0..3] = width, height, channels, depth code.
@@ -682,23 +1040,42 @@ func ioMakeCGImage(_ img: SRImage, uti: String) -> CGImage? {
     let bpc = depth.bytes * 8
     let bytesPer = depth.bytes
     let rowBytes = w * outCh * bytesPer
-    var buf = [UInt8](repeating: 0, count: rowBytes * h)
+    let totalBytes = max(1, rowBytes * h)
+    guard let rawPtr = malloc(totalBytes) else { return nil }
+    let o = rawPtr.assumingMemoryBound(to: UInt8.self)
 
-    @inline(__always) func readU8(_ p: UnsafeRawPointer, _ k: Int) -> UInt8 {
-        switch img.depth {
-        case .u8: return p.load(fromByteOffset: k, as: UInt8.self)
-        case .u16: return UInt8(p.loadUnaligned(fromByteOffset: k * 2, as: UInt16.self) >> 8)
-        case .f32: return srSatU8(Double(p.loadUnaligned(fromByteOffset: k * 4, as: Float.self)))
-        case .s32: return srSatU8(Double(p.loadUnaligned(fromByteOffset: k * 4, as: Int32.self)))
+    if depth == .u8 && img.depth == .u8 {
+        let srcU8 = img.data.assumingMemoryBound(to: UInt8.self)
+        if isGray && ch == 1 {
+            for y in 0..<h { memcpy(o + y * rowBytes, srcU8 + y * img.stride, rowBytes) }
+        } else if !isGray && (ch == 3 || ch == 4) && (outCh == 3 || outCh == 4) {
+            sr_io_cvt_swap_u8(srcU8, img.stride, o, rowBytes, Int32(w), Int32(h), Int32(ch), Int32(outCh), 1)
+        } else {
+            for y in 0..<h {
+                let s = UnsafeRawPointer(img.row(y))
+                let d = rawPtr + y * rowBytes
+                for x in 0..<w {
+                    for c in 0..<outCh {
+                        let sc = (!isGray && c < 3) ? 2 - c : c
+                        d.storeBytes(of: s.load(fromByteOffset: x * ch + sc, as: UInt8.self), toByteOffset: x * outCh + c, as: UInt8.self)
+                    }
+                }
+            }
         }
-    }
-    buf.withUnsafeMutableBytes { o in
+    } else {
+        @inline(__always) func readU8(_ p: UnsafeRawPointer, _ k: Int) -> UInt8 {
+            switch img.depth {
+            case .u8: return p.load(fromByteOffset: k, as: UInt8.self)
+            case .u16: return UInt8(p.loadUnaligned(fromByteOffset: k * 2, as: UInt16.self) >> 8)
+            case .f32: return srSatU8(Double(p.loadUnaligned(fromByteOffset: k * 4, as: Float.self)))
+            case .s32: return srSatU8(Double(p.loadUnaligned(fromByteOffset: k * 4, as: Int32.self)))
+            }
+        }
         for y in 0..<h {
             let s = UnsafeRawPointer(img.row(y))
-            let d = o.baseAddress! + y * rowBytes
+            let d = rawPtr + y * rowBytes
             for x in 0..<w {
                 for c in 0..<outCh {
-                    // BGR(A) -> RGB(A): swap channel 0 and 2 for colour images.
                     let sc = (!isGray && c < 3) ? 2 - c : c
                     let k = x * ch + sc
                     switch depth {
@@ -720,7 +1097,11 @@ func ioMakeCGImage(_ img: SRImage, uti: String) -> CGImage? {
     // EXR stores linear light: hand ImageIO linear spaces so the float values are written as they are (no colour conversion)
     var cs = isGray ? CGColorSpaceCreateDeviceGray() : CGColorSpaceCreateDeviceRGB()
     if uti == "com.ilm.openexr-image", let lin = CGColorSpace(name: isGray ? CGColorSpace.extendedLinearGray : CGColorSpace.extendedLinearSRGB) { cs = lin }
-    guard let provider = CGDataProvider(data: Data(buf) as CFData) else { return nil }
+    guard let provider = CGDataProvider(dataInfo: rawPtr, data: rawPtr, size: totalBytes,
+                                        releaseData: { _, p, _ in free(UnsafeMutableRawPointer(mutating: p)) }) else {
+        free(rawPtr)
+        return nil
+    }
     return CGImage(width: w, height: h, bitsPerComponent: bpc, bitsPerPixel: bpc * outCh, bytesPerRow: rowBytes,
                    space: cs, bitmapInfo: CGBitmapInfo(rawValue: bi), provider: provider, decode: nil,
                    shouldInterpolate: false, intent: .defaultIntent)
@@ -911,50 +1292,52 @@ func ioEncodeAny(_ img: SRImage, ext: String, params p: IOParams) -> [UInt8]? {
     case .jp2, .avif, .heic: break
     }
     guard let uti = ioUTI(kind) else { return nil }
-    let out = NSMutableData()
-    guard let dest = CGImageDestinationCreateWithData(out, uti as CFString, 1, nil) else { return nil }
-    var props: [CFString: Any] = [:]
-    var source = img
-    var holder: [UInt8] = []
-    switch kind {
-    case .jp2:
-        let rate = Double(max(1, p.get(272, 1000))) / 1000.0   // IMWRITE_JPEG2000_COMPRESSION_X1000: target compression ratio x1000
-        props[kCGImageDestinationLossyCompressionQuality] = min(1.0, 1.0 / rate)
-    case .avif, .heic:
-        props[kCGImageDestinationLossyCompressionQuality] = Double(max(0, min(100, p.get(512, 95)))) / 100.0
-    case .exr:
-        if p.get(48, 2) == 1 {   // IMWRITE_EXR_TYPE_HALF
-            guard let cg = ioMakeHalfCGImage(img) else { return nil }
-            CGImageDestinationAddImage(dest, cg, props as CFDictionary)
-            guard CGImageDestinationFinalize(dest) else { return nil }
-            return [UInt8](out as Data)
+    return autoreleasepool {
+        let out = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(out, uti as CFString, 1, nil) else { return nil }
+        var props: [CFString: Any] = [:]
+        var source = img
+        var holder: [UInt8] = []
+        switch kind {
+        case .jp2:
+            let rate = Double(max(1, p.get(272, 1000))) / 1000.0   // IMWRITE_JPEG2000_COMPRESSION_X1000: target compression ratio x1000
+            props[kCGImageDestinationLossyCompressionQuality] = min(1.0, 1.0 / rate)
+        case .avif, .heic:
+            props[kCGImageDestinationLossyCompressionQuality] = Double(max(0, min(100, p.get(512, 95)))) / 100.0
+        case .exr:
+            if p.get(48, 2) == 1 {   // IMWRITE_EXR_TYPE_HALF
+                guard let cg = ioMakeHalfCGImage(img) else { return nil }
+                CGImageDestinationAddImage(dest, cg, props as CFDictionary)
+                guard CGImageDestinationFinalize(dest) else { return nil }
+                return [UInt8](out as Data)
+            }
+            if img.depth != .f32 {
+                let f = ioToF32Image(img)
+                holder = f.bytes
+            }
+        case .tiff:
+            var tiff: [CFString: Any] = [:]
+            let comp = p.get(259, 5)
+            if [1, 5, 32773, 8, 32946].contains(comp) { tiff[kCGImagePropertyTIFFCompression] = comp == 32946 ? 8 : comp }
+            props[kCGImagePropertyTIFFDictionary] = tiff
+        default: break
         }
-        if img.depth != .f32 {
-            let f = ioToF32Image(img)
-            holder = f.bytes
+        if !holder.isEmpty {
+            return holder.withUnsafeMutableBytes { raw -> [UInt8]? in
+                guard let s = SRImage(raw.baseAddress, Int32(img.width), Int32(img.height), Int32(img.width * img.channels * 4),
+                                      Int32(img.channels), SRDepth.f32.rawValue) else { return nil }
+                source = s
+                guard let cg = ioMakeCGImage(source, uti: uti) else { return nil }
+                CGImageDestinationAddImage(dest, cg, props as CFDictionary)
+                guard CGImageDestinationFinalize(dest) else { return nil }
+                return [UInt8](out as Data)
+            }
         }
-    case .tiff:
-        var tiff: [CFString: Any] = [:]
-        let comp = p.get(259, 5)
-        if [1, 5, 32773, 8, 32946].contains(comp) { tiff[kCGImagePropertyTIFFCompression] = comp == 32946 ? 8 : comp }
-        props[kCGImagePropertyTIFFDictionary] = tiff
-    default: break
+        guard let cg = ioMakeCGImage(source, uti: uti) else { return nil }
+        CGImageDestinationAddImage(dest, cg, props as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+        return [UInt8](out as Data)
     }
-    if !holder.isEmpty {
-        return holder.withUnsafeMutableBytes { raw -> [UInt8]? in
-            guard let s = SRImage(raw.baseAddress, Int32(img.width), Int32(img.height), Int32(img.width * img.channels * 4),
-                                  Int32(img.channels), SRDepth.f32.rawValue) else { return nil }
-            source = s
-            guard let cg = ioMakeCGImage(source, uti: uti) else { return nil }
-            CGImageDestinationAddImage(dest, cg, props as CFDictionary)
-            guard CGImageDestinationFinalize(dest) else { return nil }
-            return [UInt8](out as Data)
-        }
-    }
-    guard let cg = ioMakeCGImage(source, uti: uti) else { return nil }
-    CGImageDestinationAddImage(dest, cg, props as CFDictionary)
-    guard CGImageDestinationFinalize(dest) else { return nil }
-    return [UInt8](out as Data)
 }
 
 /// ext includes the leading dot (".png"). quality is the IMWRITE_JPEG_QUALITY value (0...100). Kept for the old Python wrapper.

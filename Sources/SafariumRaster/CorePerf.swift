@@ -310,3 +310,118 @@ func perfFlipHU8x3(_ s: CoreMat, _ d: CoreMat) -> Bool {
     let map: [UInt8] = [2, 1, 0]
     return vImagePermuteChannels_RGB888(&d3, &d3b, map, vImage_Flags(kvImageDoNotTile)) == kvImageNoError
 }
+
+// MARK: - Workstream 1 NEON NumPy / pixel kernels (ops_perf_neon.c)
+
+@_silgen_name("sr_c_bgr2gray_u8")
+private func sr_c_bgr2gray_u8(_ src: UnsafePointer<UInt8>, _ sstep: Int, _ dst: UnsafeMutablePointer<UInt8>, _ dstep: Int,
+                              _ w: Int32, _ h: Int32, _ scn: Int32, _ blueIdx: Int32)
+@_silgen_name("sr_c_bgr2gray_u16")
+private func sr_c_bgr2gray_u16(_ src: UnsafePointer<UInt16>, _ sstep: Int, _ dst: UnsafeMutablePointer<UInt16>, _ dstep: Int,
+                               _ w: Int32, _ h: Int32, _ scn: Int32, _ blueIdx: Int32)
+@_silgen_name("sr_c_bgr2gray_f32")
+private func sr_c_bgr2gray_f32(_ src: UnsafePointer<Float>, _ sstep: Int, _ dst: UnsafeMutablePointer<Float>, _ dstep: Int,
+                               _ w: Int32, _ h: Int32, _ scn: Int32, _ blueIdx: Int32)
+@_silgen_name("sr_c_cvt_swap_u8")
+private func sr_c_cvt_swap_u8(_ src: UnsafePointer<UInt8>, _ sstep: Int, _ dst: UnsafeMutablePointer<UInt8>, _ dstep: Int,
+                              _ w: Int32, _ h: Int32, _ scn: Int32, _ dcn: Int32, _ swapRB: Int32)
+@_silgen_name("sr_c_cvt_swap_u16")
+private func sr_c_cvt_swap_u16(_ src: UnsafePointer<UInt16>, _ sstep: Int, _ dst: UnsafeMutablePointer<UInt16>, _ dstep: Int,
+                               _ w: Int32, _ h: Int32, _ scn: Int32, _ dcn: Int32, _ swapRB: Int32)
+@_silgen_name("sr_c_cvt_swap_f32")
+private func sr_c_cvt_swap_f32(_ src: UnsafePointer<Float>, _ sstep: Int, _ dst: UnsafeMutablePointer<Float>, _ dstep: Int,
+                               _ w: Int32, _ h: Int32, _ scn: Int32, _ dcn: Int32, _ swapRB: Int32)
+@_silgen_name("sr_c_gray2bgr_u8")
+private func sr_c_gray2bgr_u8(_ src: UnsafePointer<UInt8>, _ sstep: Int, _ dst: UnsafeMutablePointer<UInt8>, _ dstep: Int,
+                              _ w: Int32, _ h: Int32, _ dcn: Int32)
+@_silgen_name("sr_c_gray2bgr_u16")
+private func sr_c_gray2bgr_u16(_ src: UnsafePointer<UInt16>, _ sstep: Int, _ dst: UnsafeMutablePointer<UInt16>, _ dstep: Int,
+                               _ w: Int32, _ h: Int32, _ dcn: Int32)
+@_silgen_name("sr_c_gray2bgr_f32")
+private func sr_c_gray2bgr_f32(_ src: UnsafePointer<Float>, _ sstep: Int, _ dst: UnsafeMutablePointer<Float>, _ dstep: Int,
+                               _ w: Int32, _ h: Int32, _ dcn: Int32)
+@_silgen_name("sr_c_bgr2hsv_u8")
+private func sr_c_bgr2hsv_u8(_ src: UnsafePointer<UInt8>, _ sstep: Int, _ dst: UnsafeMutablePointer<UInt8>, _ dstep: Int,
+                             _ w: Int32, _ h: Int32, _ scn: Int32, _ blueIdx: Int32,
+                             _ sLut: UnsafePointer<UInt8>, _ sTail: UnsafePointer<UInt8>, _ hdiv: UnsafePointer<Int32>)
+@_silgen_name("sr_c_reduce_u8")
+private func sr_c_reduce_u8(_ src: UnsafePointer<UInt8>, _ sstep: Int, _ dst: UnsafeMutableRawPointer, _ dstep: Int,
+                            _ w: Int32, _ h: Int32, _ cn: Int32, _ dim: Int32, _ rtype: Int32, _ ddepth: Int32) -> Int32
+@_silgen_name("sr_c_laplacian")
+private func sr_c_np_laplacian(_ src: UnsafeRawPointer, _ sstep: Int, _ sdepth: Int32,
+                               _ dst: UnsafeMutableRawPointer, _ dstep: Int, _ ddepth: Int32,
+                               _ w: Int32, _ h: Int32, _ cn: Int32,
+                               _ ksize: Int32, _ scale: Double, _ delta: Double, _ border: Int32) -> Int32
+
+@_cdecl("sr_np_bgr2gray")
+public func sr_np_bgr2gray(_ src: UnsafeRawPointer?, _ sstep: Int, _ dst: UnsafeMutableRawPointer?, _ dstep: Int,
+                           _ w: Int32, _ h: Int32, _ scn: Int32, _ depth: Int32, _ blueIdx: Int32) -> Int32 {
+    guard let src, let dst, w >= 0, h >= 0, scn == 3 || scn == 4 else { return srFail(SRStatus.badArgument, "bgr2gray: bad arguments") }
+    if w == 0 || h == 0 { return SRStatus.ok }
+    switch depth {
+    case 0: sr_c_bgr2gray_u8(src.assumingMemoryBound(to: UInt8.self), sstep, dst.assumingMemoryBound(to: UInt8.self), dstep, w, h, scn, blueIdx)
+    case 2: sr_c_bgr2gray_u16(src.assumingMemoryBound(to: UInt16.self), sstep, dst.assumingMemoryBound(to: UInt16.self), dstep, w, h, scn, blueIdx)
+    case 5: sr_c_bgr2gray_f32(src.assumingMemoryBound(to: Float.self), sstep, dst.assumingMemoryBound(to: Float.self), dstep, w, h, scn, blueIdx)
+    default: return srFail(SRStatus.unsupported, "bgr2gray: unsupported depth \(depth)")
+    }
+    return SRStatus.ok
+}
+
+@_cdecl("sr_np_cvt_swap")
+public func sr_np_cvt_swap(_ src: UnsafeRawPointer?, _ sstep: Int, _ dst: UnsafeMutableRawPointer?, _ dstep: Int,
+                           _ w: Int32, _ h: Int32, _ scn: Int32, _ dcn: Int32, _ depth: Int32, _ swapRB: Int32) -> Int32 {
+    guard let src, let dst, w >= 0, h >= 0, scn == 3 || scn == 4, dcn == 3 || dcn == 4 else { return srFail(SRStatus.badArgument, "cvt_swap: bad arguments") }
+    if w == 0 || h == 0 { return SRStatus.ok }
+    switch depth {
+    case 0: sr_c_cvt_swap_u8(src.assumingMemoryBound(to: UInt8.self), sstep, dst.assumingMemoryBound(to: UInt8.self), dstep, w, h, scn, dcn, swapRB)
+    case 2: sr_c_cvt_swap_u16(src.assumingMemoryBound(to: UInt16.self), sstep, dst.assumingMemoryBound(to: UInt16.self), dstep, w, h, scn, dcn, swapRB)
+    case 5: sr_c_cvt_swap_f32(src.assumingMemoryBound(to: Float.self), sstep, dst.assumingMemoryBound(to: Float.self), dstep, w, h, scn, dcn, swapRB)
+    default: return srFail(SRStatus.unsupported, "cvt_swap: unsupported depth \(depth)")
+    }
+    return SRStatus.ok
+}
+
+@_cdecl("sr_np_gray2bgr")
+public func sr_np_gray2bgr(_ src: UnsafeRawPointer?, _ sstep: Int, _ dst: UnsafeMutableRawPointer?, _ dstep: Int,
+                           _ w: Int32, _ h: Int32, _ dcn: Int32, _ depth: Int32) -> Int32 {
+    guard let src, let dst, w >= 0, h >= 0, dcn == 3 || dcn == 4 else { return srFail(SRStatus.badArgument, "gray2bgr: bad arguments") }
+    if w == 0 || h == 0 { return SRStatus.ok }
+    switch depth {
+    case 0: sr_c_gray2bgr_u8(src.assumingMemoryBound(to: UInt8.self), sstep, dst.assumingMemoryBound(to: UInt8.self), dstep, w, h, dcn)
+    case 2: sr_c_gray2bgr_u16(src.assumingMemoryBound(to: UInt16.self), sstep, dst.assumingMemoryBound(to: UInt16.self), dstep, w, h, dcn)
+    case 5: sr_c_gray2bgr_f32(src.assumingMemoryBound(to: Float.self), sstep, dst.assumingMemoryBound(to: Float.self), dstep, w, h, dcn)
+    default: return srFail(SRStatus.unsupported, "gray2bgr: unsupported depth \(depth)")
+    }
+    return SRStatus.ok
+}
+
+@_cdecl("sr_np_hsv_u8")
+public func sr_np_hsv_u8(_ src: UnsafeRawPointer?, _ sstep: Int, _ dst: UnsafeMutableRawPointer?, _ dstep: Int,
+                         _ h: Int32, _ w: Int32, _ scn: Int32, _ blueIdx: Int32,
+                         _ sLut: UnsafePointer<UInt8>?, _ sTail: UnsafePointer<UInt8>?, _ hdiv: UnsafePointer<Int32>?) -> Int32 {
+    guard let src, let dst, let sLut, let sTail, let hdiv, h >= 0, w >= 0, scn == 3 || scn == 4 else {
+        return srFail(SRStatus.badArgument, "hsv_u8: bad arguments")
+    }
+    if w == 0 || h == 0 { return SRStatus.ok }
+    sr_c_bgr2hsv_u8(src.assumingMemoryBound(to: UInt8.self), sstep, dst.assumingMemoryBound(to: UInt8.self), dstep,
+                    w, h, scn, blueIdx, sLut, sTail, hdiv)
+    return SRStatus.ok
+}
+
+@_cdecl("sr_np_reduce_u8")
+public func sr_np_reduce_u8(_ src: UnsafeRawPointer?, _ sstep: Int, _ dst: UnsafeMutableRawPointer?, _ dstep: Int,
+                            _ w: Int32, _ h: Int32, _ cn: Int32, _ dim: Int32, _ rtype: Int32, _ ddepth: Int32) -> Int32 {
+    guard let src, let dst, w > 0, h > 0, cn > 0 else { return srFail(SRStatus.badArgument, "reduce: bad arguments") }
+    return sr_c_reduce_u8(src.assumingMemoryBound(to: UInt8.self), sstep, dst, dstep, w, h, cn, dim, rtype, ddepth) == 0
+        ? SRStatus.ok : srFail(SRStatus.internalError, "reduce failed")
+}
+
+@_cdecl("sr_np_laplacian")
+public func sr_np_laplacian(_ src: UnsafeRawPointer?, _ sstep: Int, _ sdepth: Int32,
+                            _ dst: UnsafeMutableRawPointer?, _ dstep: Int, _ ddepth: Int32,
+                            _ w: Int32, _ h: Int32, _ cn: Int32,
+                            _ ksize: Int32, _ scale: Double, _ delta: Double, _ border: Int32) -> Int32 {
+    guard let src, let dst, w > 0, h > 0, cn > 0 else { return srFail(SRStatus.badArgument, "Laplacian: bad arguments") }
+    return sr_c_np_laplacian(src, sstep, sdepth, dst, dstep, ddepth, w, h, cn, ksize, scale, delta, border) == 0
+        ? SRStatus.ok : srFail(SRStatus.internalError, "Laplacian failed")
+}

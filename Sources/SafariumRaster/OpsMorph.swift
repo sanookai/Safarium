@@ -119,6 +119,20 @@ private func morphOnce<T: MorphPix>(_ src: SRImage, _ dst: SRImage, _ kernel: [U
     }
 }
 
+@_silgen_name("sr_c_morph_u8")
+private func sr_c_morph_u8(_ src: UnsafePointer<UInt8>, _ sstep: Int, _ dst: UnsafeMutablePointer<UInt8>, _ dstep: Int,
+                           _ w: Int32, _ h: Int32, _ cn: Int32,
+                           _ kernel: UnsafePointer<UInt8>, _ kw: Int32, _ kh: Int32, _ ax: Int32, _ ay: Int32,
+                           _ isMax: Int32, _ iterations: Int32, _ border: Int32, _ bval: UnsafePointer<Double>,
+                           _ identityBorder: Int32) -> Int32
+
+@_silgen_name("sr_c_morph_f32")
+private func sr_c_morph_f32(_ src: UnsafePointer<Float>, _ sstep: Int, _ dst: UnsafeMutablePointer<Float>, _ dstep: Int,
+                            _ w: Int32, _ h: Int32, _ cn: Int32,
+                            _ kernel: UnsafePointer<UInt8>, _ kw: Int32, _ kh: Int32, _ ax: Int32, _ ay: Int32,
+                            _ isMax: Int32, _ iterations: Int32, _ border: Int32, _ bval: UnsafePointer<Double>,
+                            _ identityBorder: Int32) -> Int32
+
 /// op: 0 = erode (min), 1 = dilate (max). borderValue == DBL_MAX in channel 0 means OpenCV's default (neutral) border.
 @_cdecl("sr_morph")
 public func sr_morph(_ sd: UnsafeMutableRawPointer?, _ sw: Int32, _ sh: Int32, _ ss: Int32, _ sc: Int32, _ sdep: Int32,
@@ -136,27 +150,22 @@ public func sr_morph(_ sd: UnsafeMutableRawPointer?, _ sw: Int32, _ sh: Int32, _
     guard [SR_BORDER_CONSTANT, SR_BORDER_REPLICATE, SR_BORDER_REFLECT, SR_BORDER_WRAP, SR_BORDER_REFLECT_101].contains(border) else {
         return srFail(SRStatus.unsupported, "morph: unsupported border type")
     }
-    let ax = anchorX < 0 ? Int(kw) / 2 : Int(anchorX), ay = anchorY < 0 ? Int(kh) / 2 : Int(anchorY)
-    guard ax < Int(kw), ay < Int(kh) else { return srFail(SRStatus.badArgument, "morph: anchor outside kernel") }
-    let k = Array(UnsafeBufferPointer(start: kernel, count: Int(kw * kh)))
+    if src.width == 0 || src.height == 0 { return SRStatus.ok }
+    let ax = anchorX < 0 ? kw / 2 : anchorX, ay = anchorY < 0 ? kh / 2 : anchorY
+    guard ax < kw, ay < kh else { return srFail(SRStatus.badArgument, "morph: anchor outside kernel") }
     let bvAll = borderValue.map { Array(UnsafeBufferPointer(start: $0, count: 4)) } ?? [Double.greatestFiniteMagnitude, 0, 0, 0]
-    let identity = border == SR_BORDER_CONSTANT && bvAll[0] == Double.greatestFiniteMagnitude
-    let isMax = op == 1
-    let iters = Int(iterations)
-    if iters == 0 {
-        for y in 0..<src.height { memcpy(dst.row(y), src.row(y), src.width * src.pixelBytes) }
-        return SRStatus.ok
+    let identity: Int32 = (border == SR_BORDER_CONSTANT && bvAll[0] == Double.greatestFiniteMagnitude) ? 1 : 0
+    let isMax: Int32 = op == 1 ? 1 : 0
+    let rc: Int32 = bvAll.withUnsafeBufferPointer { bp in
+        if src.depth == .u8 {
+            return sr_c_morph_u8(src.data.assumingMemoryBound(to: UInt8.self), src.stride,
+                                 dst.data.assumingMemoryBound(to: UInt8.self), dst.stride,
+                                 sw, sh, sc, kernel, kw, kh, ax, ay, isMax, iterations, border, bp.baseAddress!, identity)
+        } else {
+            return sr_c_morph_f32(src.data.assumingMemoryBound(to: Float.self), src.stride,
+                                  dst.data.assumingMemoryBound(to: Float.self), dst.stride,
+                                  sw, sh, sc, kernel, kw, kh, ax, ay, isMax, iterations, border, bp.baseAddress!, identity)
+        }
     }
-    // Iterate through a scratch copy so src and dst may alias.
-    let bytes = src.width * src.pixelBytes
-    let scratch = UnsafeMutableRawPointer.allocate(byteCount: max(1, bytes * src.height), alignment: 16)
-    defer { scratch.deallocate() }
-    guard let cur = SRImage(scratch, sw, sh, Int32(bytes), sc, sdep) else { return srFail(SRStatus.internalError, "morph: scratch") }
-    for y in 0..<src.height { memcpy(cur.row(y), src.row(y), bytes) }
-    for _ in 0..<iters {
-        if src.depth == .u8 { morphOnce(cur, cur, k, Int(kw), Int(kh), ax, ay, isMax, border, bvAll, identity, UInt8.self) }
-        else { morphOnce(cur, cur, k, Int(kw), Int(kh), ax, ay, isMax, border, bvAll, identity, Float.self) }
-    }
-    for y in 0..<src.height { memcpy(dst.row(y), cur.row(y), bytes) }
-    return SRStatus.ok
+    return rc == 0 ? SRStatus.ok : srFail(SRStatus.internalError, "morph failed")
 }
