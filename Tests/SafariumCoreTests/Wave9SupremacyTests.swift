@@ -57,10 +57,13 @@ final class Wave9SupremacyTests: XCTestCase {
                     switch shot {
                     case 0:
                         // Subtle dark gradient (tests 10-bit banding resistance & static hold detection)
-                        let v = UInt8(min(255, 16 + (x * 48) / max(1, width) + (y * 24) / max(1, height)))
+                        let gx: Int = (x * 48) / max(1, width)
+                        let gy: Int = (y * 24) / max(1, height)
+                        let vInt: Int = min(255, 16 + gx + gy)
+                        let v = UInt8(vInt)
                         bgra[off + 0] = v
-                        bgra[off + 1] = UInt8(min(255, Int(v) + 4))
-                        bgra[off + 2] = UInt8(min(255, Int(v) + 10))
+                        bgra[off + 1] = UInt8(min(255, vInt + 4))
+                        bgra[off + 2] = UInt8(min(255, vInt + 10))
                         bgra[off + 3] = 255
                     case 1:
                         // Fast moving high-contrast diagonal stripes (high temporal & spatial complexity)
