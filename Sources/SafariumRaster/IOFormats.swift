@@ -288,15 +288,146 @@ func ioEncodeHDR(_ img: SRImage, _ p: IOParams) -> [UInt8]? {
 /// Native-order result of an own decoder.
 struct IOOwnImage {
     var mat: IOMat
-    var kind: String   // "pnm", "sr", "hdr"
+    var kind: String   // "pnm", "sr", "hdr", "bmp", "exr"
 }
 
-func ioDecodeOwn(_ d: Data) -> IOOwnImage? {
+func ioDecodeOwn(_ d: Data, tooLarge: inout Bool) -> IOOwnImage? {
     let b = [UInt8](d)
     guard b.count >= 4 else { return nil }
+    if b[0] == 0x42 && b[1] == 0x4D { return ioDecodeBMP(b, tooLarge: &tooLarge) }
+    if b[0] == 0x76 && b[1] == 0x2F && b[2] == 0x31 && b[3] == 0x01 { return ioDecodeEXR(b, tooLarge: &tooLarge) }
     if b[0] == 0x59 && b[1] == 0xA6 && b[2] == 0x6A && b[3] == 0x95 { return ioDecodeSun(b) }
     if b[0] == 0x50, (b[1] >= 0x31 && b[1] <= 0x37) || b[1] == 0x66 || b[1] == 0x46 { return ioDecodePNM(b) }
     if b.count > 10, b[0] == 0x23, b[1] == 0x3F { return ioDecodeHDR(b) }
+    return nil
+}
+
+/// Native BMP decoder for uncompressed 8/24/32-bit BI_RGB & 32-bit BI_BITFIELDS (avoids macOS 15/26 ImageIO V4 BGRA gaps).
+private func ioDecodeBMP(_ b: [UInt8], tooLarge: inout Bool) -> IOOwnImage? {
+    guard b.count >= 54, b[0] == 0x42, b[1] == 0x4D else { return nil }
+    @inline(__always) func u16(_ o: Int) -> Int { Int(b[o]) | (Int(b[o + 1]) << 8) }
+    @inline(__always) func u32(_ o: Int) -> UInt32 {
+        UInt32(b[o]) | (UInt32(b[o + 1]) << 8) | (UInt32(b[o + 2]) << 16) | (UInt32(b[o + 3]) << 24)
+    }
+    let pixelOffset = Int64(u32(10))
+    let dibSize = Int(u32(14))
+    guard dibSize >= 40, b.count >= 14 + dibSize else { return nil }
+    let w = Int64(Int32(bitPattern: u32(18)))
+    let rawH = Int64(Int32(bitPattern: u32(22)))
+    let topDown = rawH < 0
+    let h = rawH < 0 ? -rawH : rawH
+    guard w > 0, h > 0 else { return nil }
+    if w > Int64(ioMaxImagePixels) || h > Int64(ioMaxImagePixels) || w * h > Int64(ioMaxImagePixels) {
+        tooLarge = true
+        return nil
+    }
+    let planes = u16(26), bpp = u16(28), comp = u32(30)
+    guard planes == 1, comp == 0 || comp == 3 else { return nil }
+    let wi = Int(w), hi = Int(h)
+
+    if bpp == 8, comp == 0 {
+        var colors = Int(u32(46))
+        if colors == 0 { colors = 256 }
+        let palStart = 14 + dibSize
+        guard colors > 0, colors <= 256, palStart + colors * 4 <= b.count else { return nil }
+        let rowBytes = ((wi * 8 + 31) / 32) * 4
+        guard pixelOffset >= 0, pixelOffset + Int64(rowBytes) * h <= Int64(b.count) else { return nil }
+        var isGray = true
+        for i in 0..<colors {
+            let p = palStart + i * 4
+            if !(b[p] == b[p + 1] && b[p + 1] == b[p + 2]) { isGray = false; break }
+        }
+        let pix = Int(pixelOffset)
+        if isGray {
+            let out = IOMat(width: wi, height: hi, channels: 1, depth: .u8)
+            out.bytes.withUnsafeMutableBufferPointer { dst in
+                for y in 0..<hi {
+                    let sy = topDown ? y : (hi - 1 - y)
+                    let sOff = pix + sy * rowBytes
+                    let dOff = y * wi
+                    for x in 0..<wi {
+                        let idx = min(Int(b[sOff + x]), colors - 1)
+                        dst[dOff + x] = b[palStart + idx * 4]
+                    }
+                }
+            }
+            return IOOwnImage(mat: out, kind: "bmp")
+        }
+        let out = IOMat(width: wi, height: hi, channels: 3, depth: .u8)
+        out.bytes.withUnsafeMutableBufferPointer { dst in
+            for y in 0..<hi {
+                let sy = topDown ? y : (hi - 1 - y)
+                let sOff = pix + sy * rowBytes
+                let dOff = y * wi * 3
+                for x in 0..<wi {
+                    let idx = min(Int(b[sOff + x]), colors - 1)
+                    let p = palStart + idx * 4
+                    dst[dOff + x * 3 + 0] = b[p]
+                    dst[dOff + x * 3 + 1] = b[p + 1]
+                    dst[dOff + x * 3 + 2] = b[p + 2]
+                }
+            }
+        }
+        return IOOwnImage(mat: out, kind: "bmp")
+    }
+
+    if bpp == 24, comp == 0 {
+        let rowBytes = ((wi * 24 + 31) / 32) * 4
+        guard pixelOffset >= 0, pixelOffset + Int64(rowBytes) * h <= Int64(b.count) else { return nil }
+        let pix = Int(pixelOffset)
+        let out = IOMat(width: wi, height: hi, channels: 3, depth: .u8)
+        out.bytes.withUnsafeMutableBufferPointer { dst in
+            b.withUnsafeBufferPointer { src in
+                for y in 0..<hi {
+                    let sy = topDown ? y : (hi - 1 - y)
+                    memcpy(dst.baseAddress! + y * wi * 3, src.baseAddress! + pix + sy * rowBytes, wi * 3)
+                }
+            }
+        }
+        return IOOwnImage(mat: out, kind: "bmp")
+    }
+
+    if bpp == 32 {
+        var rMask: UInt32 = 0x00FF_0000, gMask: UInt32 = 0x0000_FF00, bMask: UInt32 = 0x0000_00FF, aMask: UInt32 = 0
+        if comp == 3 {
+            guard b.count >= 66 else { return nil }
+            rMask = u32(54); gMask = u32(58); bMask = u32(62)
+            aMask = dibSize >= 56 && b.count >= 70 ? u32(66) : 0
+        } else if dibSize >= 56 && b.count >= 70 {
+            // BI_RGB 32-bit without explicit bitfields omits alpha in OpenCV unless V4/V5 non-zero alpha mask is checked.
+            aMask = 0
+        }
+        guard rMask == 0x00FF_0000, gMask == 0x0000_FF00, bMask == 0x0000_00FF,
+              aMask == 0 || aMask == 0xFF00_0000 else { return nil }
+        let ch = aMask == 0xFF00_0000 ? 4 : 3
+        let rowBytes = wi * 4
+        guard pixelOffset >= 0, pixelOffset + Int64(rowBytes) * h <= Int64(b.count) else { return nil }
+        let pix = Int(pixelOffset)
+        let out = IOMat(width: wi, height: hi, channels: ch, depth: .u8)
+        out.bytes.withUnsafeMutableBufferPointer { dst in
+            if ch == 4 {
+                b.withUnsafeBufferPointer { src in
+                    for y in 0..<hi {
+                        let sy = topDown ? y : (hi - 1 - y)
+                        memcpy(dst.baseAddress! + y * wi * 4, src.baseAddress! + pix + sy * rowBytes, wi * 4)
+                    }
+                }
+            } else {
+                for y in 0..<hi {
+                    let sy = topDown ? y : (hi - 1 - y)
+                    let sOff = pix + sy * rowBytes
+                    let dOff = y * wi * 3
+                    for x in 0..<wi {
+                        dst[dOff + x * 3 + 0] = b[sOff + x * 4 + 0]
+                        dst[dOff + x * 3 + 1] = b[sOff + x * 4 + 1]
+                        dst[dOff + x * 3 + 2] = b[sOff + x * 4 + 2]
+                    }
+                }
+            }
+        }
+        return IOOwnImage(mat: out, kind: "bmp")
+    }
+
     return nil
 }
 

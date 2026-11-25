@@ -472,7 +472,8 @@ private func ioBMPHasGrayPalette(_ d: Data) -> Bool {
 /// the caller reports an error instead of "not an image". Nothing is allocated for such a file.
 func ioDecode(_ data: Data, flags: Int32, tooLarge: inout Bool, index: Int = 0) -> IOMat? {
     if index == 0 {
-        if let own = ioDecodeOwn(data) { return ioFinishOwn(own, flags: flags) }
+        if let own = ioDecodeOwn(data, tooLarge: &tooLarge) { return ioFinishOwn(own, flags: flags) }
+        if tooLarge { return nil }
         // a file that claims one of the formats we parse ourselves but fails our (strict) parser is refused, not retried by ImageIO
         let h = [UInt8](data.prefix(3))
         if h.count == 3, (h[0] == 0x50 && ((h[1] >= 0x31 && h[1] <= 0x37) || h[1] == 0x66 || h[1] == 0x46) && (h[2] == 10 || h[2] == 32 || h[2] == 9 || h[2] == 13))
@@ -586,7 +587,7 @@ private func ioFinishOwn(_ own: IOOwnImage, flags: Int32) -> IOMat? {
     } else if (flags & ioFlagAnyColor) != 0 {
         m = m.channels == 1 ? m : ioDropAlpha(m)
     } else {
-        m = ioToGray(m, kind: .cv15)
+        m = ioToGray(m, kind: own.kind == "bmp" ? .cv14 : .cv15)
     }
     let scale = (flags & 64) != 0 ? 8 : ((flags & 32) != 0 ? 4 : ((flags & 16) != 0 ? 2 : 1))
     return ioReduce(m, scale: scale, jpeg: false)

@@ -2,6 +2,7 @@
 // NONE / ZIPS / ZIP (IMWRITE_EXR_COMPRESSION 0 / 2 / 3; other codes fall back to ZIP). ImageIO's EXR encoder stores half
 // floats only, so full 32-bit output needs this writer. Layout per the OpenEXR file-layout specification (public).
 
+import Compression
 import Foundation
 
 func ioEncodeEXR(_ img: SRImage, _ p: IOParams) -> [UInt8]? {
@@ -84,4 +85,194 @@ func ioEncodeEXR(_ img: SRImage, _ p: IOParams) -> [UInt8]? {
         out += payload
     }
     return out
+}
+
+/// Native scanline OpenEXR decoder (NONE/ZIPS/ZIP, HALF/FLOAT) so macOS 15 ImageIO cannot degrade 1-channel Y to uint8.
+func ioDecodeEXR(_ b: [UInt8], tooLarge: inout Bool) -> IOOwnImage? {
+    guard b.count >= 12, b[0] == 0x76, b[1] == 0x2F, b[2] == 0x31, b[3] == 0x01 else { return nil }
+    @inline(__always) func u32(_ o: Int) -> UInt32 {
+        UInt32(b[o]) | (UInt32(b[o + 1]) << 8) | (UInt32(b[o + 2]) << 16) | (UInt32(b[o + 3]) << 24)
+    }
+    @inline(__always) func i32(_ o: Int) -> Int32 { Int32(bitPattern: u32(o)) }
+    @inline(__always) func u64(_ o: Int) -> UInt64 {
+        UInt64(u32(o)) | (UInt64(u32(o + 4)) << 32)
+    }
+
+    let version = u32(4)
+    // Only single-part scanline OpenEXR (version 2, flags == 0)
+    guard (version & 0xFF) == 2, (version & ~0xFF) == 0 else { return nil }
+
+    var cur = 8
+    func readCStr(limit: Int = 256) -> String? {
+        let start = cur
+        let stop = min(b.count, cur + limit)
+        while cur < stop && b[cur] != 0 { cur += 1 }
+        guard cur < stop else { return nil }
+        let s = String(decoding: b[start..<cur], as: UTF8.self)
+        cur += 1
+        return s
+    }
+
+    struct EXRChannel { let name: String; let pixelType: Int }
+    var channels: [EXRChannel] = []
+    var comp = -1
+    var xMin: Int64 = 0, yMin: Int64 = 0, xMax: Int64 = -1, yMax: Int64 = -1
+    var hasBox = false
+
+    while cur < b.count {
+        if b[cur] == 0 { cur += 1; break }
+        guard let attrName = readCStr(), let attrType = readCStr(), cur + 4 <= b.count else { return nil }
+        let attrLen = Int(i32(cur))
+        cur += 4
+        guard attrLen >= 0, cur + attrLen <= b.count else { return nil }
+        let body = cur
+        if attrName == "channels" && attrType == "chlist" {
+            var c = body
+            let end = body + attrLen
+            while c < end {
+                if b[c] == 0 { c += 1; break }
+                let ns = c
+                while c < end && b[c] != 0 { c += 1 }
+                guard c < end else { return nil }
+                let cname = String(decoding: b[ns..<c], as: UTF8.self)
+                c += 1
+                guard c + 16 <= end else { return nil }
+                let ptype = Int(Int32(bitPattern: UInt32(b[c]) | (UInt32(b[c + 1]) << 8) | (UInt32(b[c + 2]) << 16) | (UInt32(b[c + 3]) << 24)))
+                let xs = UInt32(b[c + 8]) | (UInt32(b[c + 9]) << 8) | (UInt32(b[c + 10]) << 16) | (UInt32(b[c + 11]) << 24)
+                let ys = UInt32(b[c + 12]) | (UInt32(b[c + 13]) << 8) | (UInt32(b[c + 14]) << 16) | (UInt32(b[c + 15]) << 24)
+                guard (ptype == 1 || ptype == 2), xs == 1, ys == 1 else { return nil }
+                channels.append(EXRChannel(name: cname, pixelType: ptype))
+                c += 16
+            }
+        } else if attrName == "compression" && attrType == "compression" && attrLen == 1 {
+            comp = Int(b[body])
+        } else if attrName == "dataWindow" && attrType == "box2i" && attrLen == 16 {
+            xMin = Int64(i32(body)); yMin = Int64(i32(body + 4))
+            xMax = Int64(i32(body + 8)); yMax = Int64(i32(body + 12))
+            hasBox = true
+        }
+        cur += attrLen
+    }
+
+    guard hasBox, xMax >= xMin, yMax >= yMin else { return nil }
+    let w64 = xMax - xMin + 1, h64 = yMax - yMin + 1
+    guard w64 > 0, h64 > 0 else { return nil }
+    if w64 > Int64(ioMaxImagePixels) || h64 > Int64(ioMaxImagePixels) || w64 * h64 > Int64(ioMaxImagePixels) {
+        tooLarge = true
+        return nil
+    }
+    guard comp == 0 || comp == 2 || comp == 3, !channels.isEmpty else { return nil }
+
+    let outMap: [Int]
+    if channels.count == 1 && (channels[0].name == "Y" || channels[0].name == "Z") {
+        outMap = [0]
+    } else if let bi = channels.firstIndex(where: { $0.name == "B" }),
+              let gi = channels.firstIndex(where: { $0.name == "G" }),
+              let ri = channels.firstIndex(where: { $0.name == "R" }) {
+        if let ai = channels.firstIndex(where: { $0.name == "A" }) {
+            outMap = [bi, gi, ri, ai]
+        } else {
+            outMap = [bi, gi, ri]
+        }
+    } else {
+        return nil
+    }
+
+    let w = Int(w64), h = Int(h64), outCh = outMap.count
+    let linesPerBlock = comp == 3 ? 16 : 1
+    let nBlocks = (h + linesPerBlock - 1) / linesPerBlock
+    guard cur + nBlocks * 8 <= b.count else { return nil }
+    let tableEnd = cur + nBlocks * 8
+
+    let bytesPerLine = channels.reduce(0) { $0 + w * ($1.pixelType == 1 ? 2 : 4) }
+    var chOffsets = [Int](repeating: 0, count: channels.count)
+    do {
+        var off = 0
+        for ci in 0..<channels.count {
+            chOffsets[ci] = off
+            off += w * (channels[ci].pixelType == 1 ? 2 : 4)
+        }
+    }
+
+    let out = IOMat(width: w, height: h, channels: outCh, depth: .f32)
+    var scratch = [UInt8]()
+
+    for blk in 0..<nBlocks {
+        let off64 = u64(cur + blk * 8)
+        guard off64 >= UInt64(tableEnd), off64 <= UInt64(b.count - 8) else { return nil }
+        let off = Int(off64)
+        let rowY = Int64(i32(off)) - yMin
+        let packedSize = Int(i32(off + 4))
+        guard rowY >= 0, rowY < h64, packedSize >= 0, off + 8 + packedSize <= b.count else { return nil }
+        let lines = min(linesPerBlock, h - Int(rowY))
+        let rawSize = lines * bytesPerLine
+        let payloadStart = off + 8
+
+        var useScratch = false
+        if comp != 0 && packedSize < rawSize {
+            // EXR ZIP/ZIPS wraps raw deflate inside a 2-byte zlib header + 4-byte adler32 trailer
+            guard packedSize >= 6 else { return nil }
+            if scratch.count < rawSize * 2 { scratch = [UInt8](repeating: 0, count: rawSize * 2) }
+            let ok = scratch.withUnsafeMutableBufferPointer { dst in
+                b.withUnsafeBufferPointer { src in
+                    let tPtr = dst.baseAddress!
+                    let dec = compression_decode_buffer(
+                        tPtr, rawSize,
+                        src.baseAddress! + payloadStart + 2, packedSize - 6,
+                        nil, COMPRESSION_ZLIB
+                    )
+                    guard dec == rawSize else { return false }
+                    if rawSize > 1 {
+                        for i in 1..<rawSize {
+                            tPtr[i] = UInt8(truncatingIfNeeded: Int(tPtr[i]) + Int(tPtr[i - 1]) - 128)
+                        }
+                    }
+                    let uPtr = dst.baseAddress! + rawSize
+                    let half1 = (rawSize + 1) / 2
+                    for i in 0..<rawSize {
+                        uPtr[i] = (i & 1) == 0 ? tPtr[i >> 1] : tPtr[half1 + (i >> 1)]
+                    }
+                    return true
+                }
+            }
+            guard ok else { return nil }
+            useScratch = true
+        } else {
+            guard packedSize == rawSize else { return nil }
+        }
+
+        out.bytes.withUnsafeMutableBytes { outRaw in
+            let dstF = outRaw.bindMemory(to: Float.self).baseAddress!
+            let decodeBlock: (UnsafePointer<UInt8>) -> Void = { base in
+                for l in 0..<lines {
+                    let lineBase = base + l * bytesPerLine
+                    let dstRow = dstF + (Int(rowY) + l) * w * outCh
+                    for (oc, ci) in outMap.enumerated() {
+                        let cBase = lineBase + chOffsets[ci]
+                        let isHalf = channels[ci].pixelType == 1
+                        if isHalf {
+                            for x in 0..<w {
+                                var bits: UInt16 = 0
+                                memcpy(&bits, cBase + x * 2, 2)
+                                dstRow[x * outCh + oc] = Float(Float16(bitPattern: bits))
+                            }
+                        } else {
+                            for x in 0..<w {
+                                var v: Float = 0
+                                memcpy(&v, cBase + x * 4, 4)
+                                dstRow[x * outCh + oc] = v
+                            }
+                        }
+                    }
+                }
+            }
+            if useScratch {
+                scratch.withUnsafeBufferPointer { sb in decodeBlock(sb.baseAddress! + rawSize) }
+            } else {
+                b.withUnsafeBufferPointer { src in decodeBlock(src.baseAddress! + payloadStart) }
+            }
+        }
+    }
+
+    return IOOwnImage(mat: out, kind: "exr")
 }
