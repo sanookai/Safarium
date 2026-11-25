@@ -676,16 +676,37 @@ TOOLS = [
                 "start": {"type": "number", "minimum": 0, "description": "Virtual clock start time in seconds."},
                 "codec": {
                     "type": "string",
-                    "enum": ["h264", "hevc", "hevc-alpha", "prores4444"],
-                    "description": "Hardware codec (hevc-alpha and prores4444 require .mov output).",
+                    "enum": [
+                        "h264",
+                        "hevc",
+                        "hevc-alpha",
+                        "hevc-10bit",
+                        "hevc-422-10",
+                        "hevc-444-10",
+                        "prores-proxy",
+                        "prores-lt",
+                        "prores422",
+                        "prores422hq",
+                        "prores4444",
+                        "prores4444xq",
+                    ],
+                    "description": "Hardware codec (alpha, ProRes, and 10-bit 4:2:2/4:4:4 codecs support .mov output).",
                 },
-                "bitrate": {"type": "integer", "minimum": 100000, "description": "Target video bitrate in bps (mutually exclusive with quality)."},
-                "quality": {"type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Quality factor 0.0..1.0 (mutually exclusive with bitrate)."},
+                "bitrate": {"type": "integer", "minimum": 100000, "description": "Target video bitrate in bps (mutually exclusive with quality/cqf)."},
+                "quality": {"type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Quality factor 0.0..1.0 (mutually exclusive with bitrate/cqf)."},
+                "cqf": {"type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Wave 9 VideoToolbox Constant Quality Factor 0.0..1.0 (HEVC/10-bit)."},
+                "spatial_aq": {"type": "boolean", "description": "Enable Wave 9 Spatial Adaptive QP + Perceptual Quality Optimization."},
+                "high_quality": {"type": "boolean", "description": "Enable Wave 9 Supremacy quality preset (SpatialAQ + LookAhead + VBV)."},
+                "hdr": {
+                    "type": "string",
+                    "enum": ["sdr", "hdr10", "hlg", "dv84", "apple-log", "apple-log2"],
+                    "description": "Wave 9 color/HDR mastering profile (dv84 attaches dynamic Dolby Vision 8.4 metadata).",
+                },
                 "transparent": {"type": "boolean", "description": "Render with transparent background (requires alpha codec)."},
                 "pixel_format": {
                     "type": "string",
-                    "enum": ["bgra", "nv12-vimage", "nv12-left"],
-                    "description": "Pixel format pipeline.",
+                    "enum": ["bgra", "nv12-vimage", "nv12-left", "p010", "p210", "p410"],
+                    "description": "Pixel format pipeline (p010/p210/p410 for 10-bit Bayer-dithered HEVC).",
                 },
                 "snapshot_quality": {
                     "type": "string",
@@ -707,6 +728,141 @@ TOOLS = [
                 },
             },
             "required": ["input_html", "output_path", "width", "height", "fps", "frames"],
+            "additionalProperties": False,
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "analyze_shots",
+        "description": (
+            "Run Wave 9 native GPU/Metal shot-cut, spatial/temporal complexity, and gradient banding-risk "
+            "analysis to plan per-shot adaptive bitrate (Safarium Mini-CAE) without FFmpeg."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "input_path": {"type": "string", "description": "Path to input video file to analyze."},
+                "scene_threshold": {"type": "number", "exclusiveMinimum": 0.0, "maximum": 1.0, "description": "Shot-cut sensitivity threshold (0, 1]. Default 0.32."},
+                "sample_fps": {"type": "number", "exclusiveMinimum": 0.0, "maximum": 60.0, "description": "Analysis sampling rate in fps. Default 2.0."},
+                "timeout_sec": {
+                    "type": "integer",
+                    "minimum": MIN_TIMEOUT_SEC,
+                    "maximum": MAX_TIMEOUT_SEC,
+                    "description": "Maximum timeout in seconds (default 180, max 1800).",
+                },
+            },
+            "required": ["input_path"],
+            "additionalProperties": False,
+        },
+        "annotations": READONLY_ANNOTATIONS,
+    },
+    {
+        "name": "transcode_supremacy",
+        "description": (
+            "Wave 9 Apple Silicon native hardware transcode: 10-bit HEVC (4:2:0/4:2:2/4:4:4) & 6 ProRes tiers, "
+            "SpatialAQ, LookAhead, ConstantQualityFactor (CQF), True 2-Pass VTMultiPassStorage, Safarium Mini-CAE "
+            "per-shot adaptive + multi-engine parallel encoding, Dolby Vision 8.4/HDR10/HLG/Apple Log, and "
+            "zero-copy VTFrameProcessor temporal denoise / optical-flow retiming."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "input_path": {"type": "string", "description": "Path to source video file."},
+                "output_path": {"type": "string", "description": "Destination .mp4 or .mov path."},
+                "codec": {
+                    "type": "string",
+                    "enum": [
+                        "h264",
+                        "hevc",
+                        "hevc-alpha",
+                        "hevc-10bit",
+                        "hevc-422-10",
+                        "hevc-444-10",
+                        "prores-proxy",
+                        "prores-lt",
+                        "prores422",
+                        "prores422hq",
+                        "prores4444",
+                        "prores4444xq",
+                    ],
+                    "description": "Target native Apple hardware codec. Default 'hevc-10bit'.",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["fast", "balanced", "high-quality", "cqf", "2pass", "mini-cae"],
+                    "description": "Wave 9 encoding mode. Default 'high-quality'.",
+                },
+                "bitrate": {"type": "integer", "minimum": 100000, "description": "Target video bitrate in bps."},
+                "cqf": {"type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Constant Quality Factor (0.0..1.0) for CQF mode."},
+                "vbv_max_bitrate": {"type": "integer", "minimum": 100000, "description": "Constrained VBR peak bitrate cap in bps."},
+                "vbv_buffer_sec": {"type": "number", "exclusiveMinimum": 0.0, "maximum": 30.0, "description": "VBV buffer window in seconds."},
+                "spatial_aq": {"type": "boolean", "description": "Enable/disable Spatial Adaptive QP + Perceptual Quality Optimization."},
+                "lookahead": {"type": "integer", "minimum": 0, "maximum": 60, "description": "VideoToolbox LookAhead frames (ignored in 2-pass mode)."},
+                "engines": {"type": "integer", "minimum": 1, "maximum": 4, "description": "Parallel Media Engine chunks for mini-cae mode (1..4)."},
+                "denoise": {"type": "boolean", "description": "Enable zero-copy VTTemporalNoiseFilter pre-encode denoising."},
+                "denoise_strength": {"type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Temporal denoise strength (0.0..1.0)."},
+                "retime_fps": {"type": "number", "exclusiveMinimum": 0.0, "maximum": 240.0, "description": "Optical-flow VTFrameRateConversion target fps."},
+                "hdr": {
+                    "type": "string",
+                    "enum": ["sdr", "hdr10", "hlg", "dv84", "apple-log", "apple-log2"],
+                    "description": "HDR/color mastering profile.",
+                },
+                "audio_codec": {
+                    "type": "string",
+                    "enum": ["copy", "aac-max", "he-aac", "he-aac-v2", "alac", "opus", "apac", "pcm16", "pcm24", "pcm32f"],
+                    "description": "Audio mastering codec or 'copy' passthrough.",
+                },
+                "overwrite": {"type": "boolean", "description": "Allow overwriting existing output_path. Default false."},
+                "timeout_sec": {
+                    "type": "integer",
+                    "minimum": MIN_TIMEOUT_SEC,
+                    "maximum": MAX_TIMEOUT_SEC,
+                    "description": "Maximum timeout in seconds (default 600, max 1800).",
+                },
+            },
+            "required": ["input_path", "output_path"],
+            "additionalProperties": False,
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "audio_encode",
+        "description": (
+            "Encode audio using native Apple AudioToolbox mastering codecs: AAC-LC (AVAudioQuality.max), "
+            "HE-AAC v1/v2, ALAC lossless, native Opus, APAC Spatial Audio, and 16/24/32f PCM (0% FFmpeg)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "input_path": {"type": "string", "description": "Path to source audio or video file."},
+                "output_path": {"type": "string", "description": "Destination audio path (.m4a, .caf, .wav, .mov)."},
+                "codec": {
+                    "type": "string",
+                    "enum": ["aac-max", "he-aac", "he-aac-v2", "alac", "opus", "apac", "pcm16", "pcm24", "pcm32f"],
+                    "description": "Target native AudioToolbox codec. Default 'aac-max'.",
+                },
+                "bitrate": {"type": "integer", "minimum": 16000, "maximum": 1024000, "description": "Target audio bitrate in bps (for lossy codecs)."},
+                "sample_rate": {"type": "integer", "minimum": 8000, "maximum": 192000, "description": "Target sample rate in Hz (e.g. 48000)."},
+                "channels": {"type": "integer", "minimum": 1, "maximum": 16, "description": "Target channel count (e.g. 2)."},
+                "overwrite": {"type": "boolean", "description": "Allow overwriting existing output_path. Default false."},
+                "timeout_sec": {
+                    "type": "integer",
+                    "minimum": MIN_TIMEOUT_SEC,
+                    "maximum": MAX_TIMEOUT_SEC,
+                    "description": "Maximum timeout in seconds (default 300, max 1800).",
+                },
+            },
+            "required": ["input_path", "output_path"],
             "additionalProperties": False,
         },
         "annotations": {
@@ -952,12 +1108,21 @@ def _handle_tool_call(name, arguments, *, progress_token=None, negotiated_versio
 
             if arguments.get("bitrate") is not None and arguments.get("quality") is not None:
                 raise ValueError("'bitrate' and 'quality' are mutually exclusive")
+            if arguments.get("cqf") is not None and (arguments.get("bitrate") is not None or arguments.get("quality") is not None):
+                raise ValueError("'cqf' is mutually exclusive with 'bitrate' and 'quality'")
 
+            allowed_codecs = {
+                "h264", "hevc", "hevc-alpha", "hevc-10bit", "hevc-422-10", "hevc-444-10",
+                "prores-proxy", "prores-lt", "prores422", "prores422hq", "prores4444", "prores4444xq",
+            }
+            mov_only_codecs = {
+                "hevc-alpha", "prores-proxy", "prores-lt", "prores422", "prores422hq", "prores4444", "prores4444xq",
+            }
             codec = None
             if arguments.get("codec") is not None:
-                codec = _validate_enum(arguments["codec"], "codec", {"h264", "hevc", "hevc-alpha", "prores4444"})
+                codec = _validate_enum(arguments["codec"], "codec", allowed_codecs)
                 ext = os.path.splitext(output_path)[1].lower()
-                if codec in ("hevc-alpha", "prores4444") and ext != ".mov":
+                if codec in mov_only_codecs and ext != ".mov":
                     raise ValueError(f"codec '{codec}' requires a '.mov' output_path")
 
             argv = [
@@ -986,10 +1151,19 @@ def _handle_tool_call(name, arguments, *, progress_token=None, negotiated_versio
                 argv.extend(["--bitrate", str(_validate_int(arguments["bitrate"], "bitrate", lo=100000))])
             if arguments.get("quality") is not None:
                 argv.extend(["--quality", str(_validate_number(arguments["quality"], "quality", lo=0.0, hi=1.0))])
+            if arguments.get("cqf") is not None:
+                argv.extend(["--cqf", str(_validate_number(arguments["cqf"], "cqf", lo=0.0, hi=1.0))])
+            if _validate_bool(arguments.get("spatial_aq", False), "spatial_aq"):
+                argv.append("--spatial-aq")
+            if _validate_bool(arguments.get("high_quality", False), "high_quality"):
+                argv.append("--high-quality")
+            if arguments.get("hdr") is not None:
+                hdr = _validate_enum(arguments["hdr"], "hdr", {"sdr", "hdr10", "hlg", "dv84", "apple-log", "apple-log2"})
+                argv.extend(["--hdr", hdr])
             if _validate_bool(arguments.get("transparent", False), "transparent"):
                 argv.append("--transparent")
             if arguments.get("pixel_format") is not None:
-                pf = _validate_enum(arguments["pixel_format"], "pixel_format", {"bgra", "nv12-vimage", "nv12-left"})
+                pf = _validate_enum(arguments["pixel_format"], "pixel_format", {"bgra", "nv12-vimage", "nv12-left", "p010", "p210", "p410"})
                 argv.extend(["--pixel-format", pf])
             if arguments.get("snapshot_quality") is not None:
                 sq = _validate_enum(arguments["snapshot_quality"], "snapshot_quality", {"fast", "sharp"})
@@ -1016,6 +1190,115 @@ def _handle_tool_call(name, arguments, *, progress_token=None, negotiated_versio
 
             exe = _require_render_bin()
             res = _run_subprocess(exe, argv, timeout_sec=timeout_sec, progress_token=progress_token)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "analyze_shots":
+            in_path = _validate_path(arguments.get("input_path"), "input_path", must_exist=True)
+            timeout_sec = _validate_timeout(arguments, 180)
+            argv = ["forge", "analyze-shots", in_path, "--json-errors"]
+            if arguments.get("scene_threshold") is not None:
+                argv.extend([
+                    "--scene-threshold",
+                    str(_validate_number(arguments["scene_threshold"], "scene_threshold", exclusive_lo=0.0, hi=1.0)),
+                ])
+            if arguments.get("sample_fps") is not None:
+                argv.extend([
+                    "--sample-fps",
+                    str(_validate_number(arguments["sample_fps"], "sample_fps", exclusive_lo=0.0, hi=60.0)),
+                ])
+            exe = _require_render_bin()
+            res = _run_subprocess(exe, argv, timeout_sec=timeout_sec)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "transcode_supremacy":
+            in_path = _validate_path(arguments.get("input_path"), "input_path", must_exist=True)
+            overwrite = _validate_bool(arguments.get("overwrite", False), "overwrite")
+            out_path = _validate_path(
+                arguments.get("output_path"), "output_path", must_not_exist=not overwrite, parent_must_exist=True
+            )
+            timeout_sec = _validate_timeout(arguments, 600)
+            allowed_codecs = {
+                "h264", "hevc", "hevc-alpha", "hevc-10bit", "hevc-422-10", "hevc-444-10",
+                "prores-proxy", "prores-lt", "prores422", "prores422hq", "prores4444", "prores4444xq",
+            }
+            codec = _validate_enum(arguments.get("codec", "hevc-10bit"), "codec", allowed_codecs)
+            mode = _validate_enum(
+                arguments.get("mode", "high-quality"),
+                "mode",
+                {"fast", "balanced", "high-quality", "cqf", "2pass", "mini-cae"},
+            )
+            argv = [
+                "forge", "transcode", in_path,
+                "--output", out_path,
+                "--codec", codec,
+                "--mode", mode,
+                "--progress", "jsonl",
+                "--json-errors",
+            ]
+            if arguments.get("bitrate") is not None:
+                argv.extend(["--bitrate", str(_validate_int(arguments["bitrate"], "bitrate", lo=100000))])
+            if arguments.get("cqf") is not None:
+                argv.extend(["--cqf", str(_validate_number(arguments["cqf"], "cqf", lo=0.0, hi=1.0))])
+            if arguments.get("vbv_max_bitrate") is not None:
+                argv.extend(["--vbv-max-bitrate", str(_validate_int(arguments["vbv_max_bitrate"], "vbv_max_bitrate", lo=100000))])
+            if arguments.get("vbv_buffer_sec") is not None:
+                argv.extend(["--vbv-buffer-sec", str(_validate_number(arguments["vbv_buffer_sec"], "vbv_buffer_sec", exclusive_lo=0.0, hi=30.0))])
+            if arguments.get("spatial_aq") is not None:
+                argv.append("--spatial-aq" if _validate_bool(arguments["spatial_aq"], "spatial_aq") else "--no-spatial-aq")
+            if arguments.get("lookahead") is not None:
+                argv.extend(["--lookahead", str(_validate_int(arguments["lookahead"], "lookahead", lo=0, hi=60))])
+            if arguments.get("engines") is not None:
+                argv.extend(["--engines", str(_validate_int(arguments["engines"], "engines", lo=1, hi=4))])
+            if _validate_bool(arguments.get("denoise", False), "denoise"):
+                argv.append("--denoise")
+            if arguments.get("denoise_strength") is not None:
+                argv.extend(["--denoise-strength", str(_validate_number(arguments["denoise_strength"], "denoise_strength", lo=0.0, hi=1.0))])
+            if arguments.get("retime_fps") is not None:
+                argv.extend(["--retime-fps", str(_validate_number(arguments["retime_fps"], "retime_fps", exclusive_lo=0.0, hi=240.0))])
+            if arguments.get("hdr") is not None:
+                hdr = _validate_enum(arguments["hdr"], "hdr", {"sdr", "hdr10", "hlg", "dv84", "apple-log", "apple-log2"})
+                argv.extend(["--hdr", hdr])
+            if arguments.get("audio_codec") is not None:
+                acodec = _validate_enum(
+                    arguments["audio_codec"],
+                    "audio_codec",
+                    {"copy", "aac-max", "he-aac", "he-aac-v2", "alac", "opus", "apac", "pcm16", "pcm24", "pcm32f"},
+                )
+                argv.extend(["--audio-codec", acodec])
+            if overwrite:
+                argv.append("--overwrite")
+            exe = _require_render_bin()
+            res = _run_subprocess(exe, argv, timeout_sec=timeout_sec, progress_token=progress_token)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "audio_encode":
+            in_path = _validate_path(arguments.get("input_path"), "input_path", must_exist=True)
+            overwrite = _validate_bool(arguments.get("overwrite", False), "overwrite")
+            out_path = _validate_path(
+                arguments.get("output_path"), "output_path", must_not_exist=not overwrite, parent_must_exist=True
+            )
+            timeout_sec = _validate_timeout(arguments, 300)
+            acodec = _validate_enum(
+                arguments.get("codec", "aac-max"),
+                "codec",
+                {"aac-max", "he-aac", "he-aac-v2", "alac", "opus", "apac", "pcm16", "pcm24", "pcm32f"},
+            )
+            argv = [
+                "forge", "audio", "encode", in_path,
+                "--output", out_path,
+                "--codec", acodec,
+                "--json-errors",
+            ]
+            if arguments.get("bitrate") is not None:
+                argv.extend(["--bitrate", str(_validate_int(arguments["bitrate"], "bitrate", lo=16000, hi=1024000))])
+            if arguments.get("sample_rate") is not None:
+                argv.extend(["--sample-rate", str(_validate_int(arguments["sample_rate"], "sample_rate", lo=8000, hi=192000))])
+            if arguments.get("channels") is not None:
+                argv.extend(["--channels", str(_validate_int(arguments["channels"], "channels", lo=1, hi=16))])
+            if overwrite:
+                argv.append("--overwrite")
+            exe = _require_render_bin()
+            res = _run_subprocess(exe, argv, timeout_sec=timeout_sec)
             return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
 
         if name == "verify_media":

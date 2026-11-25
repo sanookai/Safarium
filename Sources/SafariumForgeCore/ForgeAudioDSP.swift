@@ -827,6 +827,7 @@ public final class ForgeStreamingAudioSink {
                 AVSampleRateKey: sampleRate,
                 AVNumberOfChannelsKey: channels,
                 AVEncoderBitRateKey: bitrate,
+                AVEncoderAudioQualityKey: AVAudioQuality.max.rawValue,
             ]
             let inp = AVAssetWriterInput(mediaType: .audio, outputSettings: aac, sourceFormatHint: fmt.formatDescription)
             inp.expectsMediaDataInRealTime = false

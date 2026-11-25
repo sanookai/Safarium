@@ -11,7 +11,8 @@ struct WAVRange {
     var aacBitrate: Int { channels == 1 ? 96_000 : 160_000 }
     var aacSettings: [String: Any] {
         [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: Int(rate),
-         AVNumberOfChannelsKey: Int(channels), AVEncoderBitRateKey: aacBitrate]
+         AVNumberOfChannelsKey: Int(channels), AVEncoderBitRateKey: aacBitrate,
+         AVEncoderAudioQualityKey: AVAudioQuality.max.rawValue]
     }
 
     init(url: URL, options o: Options) throws {

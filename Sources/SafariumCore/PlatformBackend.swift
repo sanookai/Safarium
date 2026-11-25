@@ -219,7 +219,8 @@ public struct AppleMacOSBackend:
 
     public func supportsCodec(_ codec: VideoCodec) -> Bool {
         switch codec {
-        case .h264, .hevc, .hevcAlpha, .proRes422, .proRes4444:
+        case .h264, .hevc, .hevc10, .hevc42210, .hevc44410, .hevcAlpha,
+             .proRes422Proxy, .proRes422LT, .proRes422, .proRes422HQ, .proRes4444, .proRes4444XQ:
             return true
         }
     }

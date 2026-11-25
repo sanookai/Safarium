@@ -9,7 +9,8 @@
 [![Platform: macOS 14+ Apple Silicon Only](https://img.shields.io/badge/macOS-14%2B%20Apple%20Silicon%20Only-000000?logo=apple&logoColor=white)](#quick-start)
 [![Swift 6](https://img.shields.io/badge/Swift-6.1%20%7C%206.3-F05138?logo=swift&logoColor=white)](#verified-cloud-ci)
 [![Zero External Binaries](https://img.shields.io/badge/FFmpeg%20%7C%20Chrome%20%7C%20OpenCV-0%25-2ea44f)](#why-safarium)
-[![MCP Server](https://img.shields.io/badge/MCP-safarium--mcp%20(12%20tools)-0969da)](#multi-ai-agent-integration-mcp)
+[![MCP Server](https://img.shields.io/badge/MCP-safarium--mcp%20(15%20tools)-0969da)](#multi-ai-agent-integration-mcp)
+[![Wave 9 Encoding](https://img.shields.io/badge/Wave%209-10--bit%20HEVC%20%7C%202--Pass%20VT%20%7C%20Mini--CAE%20%7C%20DV8.4%20%7C%20MV--HEVC-ff6b00)](#wave-9-apple-silicon-encoding-supremacy-apple-m5)
 [![C ABI Symbols](https://img.shields.io/badge/SafariumRaster%20ABI-371%20symbols%20%7C%209%2C884%20parity%20tests-6f42c1)](#3-image-processing-2d-raster--still-codecs)
 
 <p>
@@ -31,12 +32,13 @@
 
 Modern programmatic video, image, and AI-media pipelines typically glue together **Headless Chrome + FFmpeg + OpenCV + Blender**. On a Mac, that stack regularly burns **1.5–4+ GiB of RAM per job**, copies uncompressed frames across processes and disk, ships hundreds of megabytes of third-party binaries, and steals desktop focus or throttles your system.
 
-**Safarium** goes **100% all-in on macOS & Apple Silicon** (no cross-platform compromises), replacing that entire toolchain with one unified native engine built strictly on **pre-installed macOS system frameworks** (`WKWebView`, `Metal`, `VideoToolbox`, `AudioToolbox`, `Accelerate`, `Vision`/ANE, and `APFS`):
+**Safarium** goes **100% all-in on macOS & Apple Silicon** (no cross-platform compromises), replacing that entire toolchain with one unified native engine built strictly on **pre-installed macOS system frameworks** (`WKWebView`, `Metal`, `VideoToolbox`, `VTFrameProcessor`, `AudioToolbox`, `Accelerate`, `Vision`/ANE, and `APFS`):
 
 - **0% FFmpeg / ffprobe / libav**, **0% Chrome / Chromium / Playwright**, and **0% OpenCV** in production binaries (verified by `otool -L` against `/System/Library/*` and `/usr/lib/*` only).
+- **Wave 9 Apple Silicon Encoding Supremacy (0% FFmpeg):** unlocks hardware capabilities **FFmpeg `hevc_videotoolbox` cannot even access** — **True 2-Pass `VTMultiPassStorage`** (`MS-SSIM 0.9939` at `3.55 Mbps`, **`6.9×` faster** than 2-pass `libx265` and **+0.020 MS-SSIM** above FFmpeg `hevc_videotoolbox`!), **10-bit HEVC (`4:2:0`/`4:2:2`/`4:4:4`)** with 4×4 Bayer dithering, **SpatialAQ + LookAhead + CQF + VBV**, **"Safarium Mini-CAE"** per-shot adaptive multi-engine chunking, zero-copy **`VTFrameProcessor`** (`VTTemporalNoiseFilter` AFBC hardware denoise, `VTFrameRateConversion` optical-flow retiming, `VTMotionBlur`), **Dolby Vision 8.4 / HDR10 / HLG / Apple Log**, **MV-HEVC Spatial Video**, all **6 ProRes tiers**, and **AudioToolbox Pro Mastering** (`AAC-Max`, `HE-AAC v1/v2`, `ALAC`, `Opus`, `APAC` Spatial Audio, `24/32f PCM`).
 - **81%–94% lower Peak RAM** than Chrome-based HTML video renderers and **3×–4× faster** end-to-end delivery.
 - **Windowless & zero focus steal** (`NSApplication .prohibited`) with deterministic JavaScript time (`VirtualClock`).
-- **Multi-AI ready out of the box:** ships a zero-dependency **Model Context Protocol (`safarium-mcp`)** server + JSON/JSONL CLI (`--progress jsonl`, `--json-errors`, `E_*`) so **Claude Code, Claude Desktop, Cursor, Gemini CLI, Codex CLI**, and custom agents can drive renders safely through one serialized FIFO queue (`SF-VIDEO-1`).
+- **Multi-AI ready out of the box:** ships a zero-dependency **Model Context Protocol (`safarium-mcp`)** server (**15 tools**) + JSON/JSONL CLI (`--progress jsonl`, `--json-errors`, `E_*`) so **Claude Code, Claude Desktop, Cursor, Gemini CLI, Codex CLI**, and custom agents can drive renders and Wave 9 encodes safely through one serialized FIFO queue (`SF-VIDEO-1`).
 - **One unified stack** covering HTML/CSS/SVG/WebGL2 video, Metal filter DAGs, hardware encoding, pure-Swift containers, a `371`-symbol `import cv2`-compatible 2D raster engine, and hybrid 3D (Blender + WebGL2 + crisp HTML HUD).
 - **Strict quality gates & transparent engineering**: every claim below is backed by reproducible Apple Silicon benchmarks and a [2025–2026 Global Video Encoding Encyclopedia](docs/research-2026-11-24/global-video-encoding-encyclopedia-2026.md) — including **exact areas where competitors still win**.
 
@@ -44,7 +46,7 @@ Modern programmatic video, image, and AI-media pipelines typically glue together
 
 ## Multi-AI Agent Integration (`MCP`)
 
-Safarium ships a zero-dependency **Model Context Protocol (MCP)** stdio JSON-RPC 2.0 server (`bin/safarium-mcp` / `safarium mcp`) supporting MCP `2025-06-18`, `2025-03-26`, and `2024-11-05` with **12 tools** (8 fast read-only tools that bypass the render queue + 4 FIFO-queued heavy render/QA tools with live `notifications/progress` streaming), **5 documentation/status resources**, and **3 prompt templates**.
+Safarium ships a zero-dependency **Model Context Protocol (MCP)** stdio JSON-RPC 2.0 server (`bin/safarium-mcp` / `safarium mcp`) supporting MCP `2025-06-18`, `2025-03-26`, and `2024-11-05` with **15 tools** (9 fast read-only tools including `analyze_shots` + 6 FIFO-queued render/encode/QA tools including `transcode_supremacy` and `audio_encode` with live `notifications/progress` streaming), **5 documentation/status resources**, and **3 prompt templates**.
 
 Works seamlessly with **Claude Code**, **Claude Desktop**, **Cursor**, **Gemini CLI**, **Codex CLI**, and any MCP-compatible AI client:
 
@@ -147,7 +149,30 @@ How Safarium compares across the entire video, web-to-video, computer-vision, an
 
 ## Real Benchmarks (Apple M5)
 
-All measurements below were collected on Apple Silicon (macOS, Apple M5) using `proc_pid_rusage` (`ri_phys_footprint` / `libproc` process tree RAM) and verified perceptual/media gates (`SSIM >= 0.97`, `PSNR >= 30 dB`, `ΔE00 p95 <= 2.0`, zero-FFmpeg `safarium verify`). Full datasets live in [docs/research-2026-11-24/experiment-results.md](docs/research-2026-11-24/experiment-results.md).
+All measurements below were collected on Apple Silicon (macOS, Apple M5) using `proc_pid_rusage` (`ri_phys_footprint` / `libproc` process tree RAM) and verified perceptual/media gates (`SSIM >= 0.97`, `PSNR >= 30 dB`, `ΔE00 p95 <= 2.0`, zero-FFmpeg `safarium verify`). Full datasets live in [docs/research-2026-11-24/experiment-results.md](docs/research-2026-11-24/experiment-results.md) and [`bench/experiments/2026-11-25-wave9-supremacy/results.json`](bench/experiments/2026-11-25-wave9-supremacy/results.json).
+
+### Wave 9 Apple Silicon Encoding Supremacy (Apple M5)
+
+*3-shot 1080p30 9s (270 frames) stress master (`ProRes 422 HQ`, `222.2 MiB` — Shot 0: dark banding-prone gradient, Shot 1: fast high-motion diagonal kinetic scene, Shot 2: high-ISO synthetic grain), target `3.5 Mbps`, measured against the ProRes 422 HQ master via `safarium-forge pq --samples 27` (`MetalShotAnalyzer` detected exact scene cuts `[90, 180]` in `434.6 ms`):*
+
+| Encoder / Mode | Wall Time | Speed | Bitrate | MS-SSIM ↑ | ΔE00 Mean ↓ | ΔE00 p95 ↓ | ANE Dist ↓ | PQ Score ↑ |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| **Safarium W9 — 10-bit CQF `0.62` + SpatialAQ** | **2.19 s** | **4.11× RT** (`123.3 fps`) | 4.89 Mbps | **0.9987** | 0.88 | 6.34 | **0.043** | **91.4** |
+| **Safarium W9 — True 2-Pass (`VTMultiPassStorage` + Shot-Cut IDR)** | **3.87 s** | **2.32× RT** (`69.7 fps`) | **3.55 Mbps** | **0.9939** | 1.01 | 6.71 | **0.098** | **90.2** |
+| **Safarium W9 — 10-bit HQ (`SpatialAQ + LookAhead + VBV`)** | **2.25 s** | **4.01× RT** (`120.2 fps`) | 3.72 Mbps | **0.9922** | 0.95 | 6.52 | **0.097** | **90.1** |
+| **Safarium W9 — Mini-CAE (Per-Shot Adaptive, 3 chunks)** | **2.07 s** | **4.35× RT** (`130.6 fps`) | 3.90 Mbps | **0.9826** | 0.94 | 6.57 | 0.157 | **89.4** |
+| **Safarium W9 — `VTTemporalNoiseFilter` (AFBC HW) + Mini-CAE** | 5.14 s | 1.75× RT (`52.5 fps`) | 3.79 Mbps | 0.9754* | 1.03 | 6.70 | 0.216 | 88.4 |
+| *Safarium W8 Legacy VT (8-bit HEVC 1-Pass Fast)* | 0.96 s | 9.34× RT (`280.1 fps`) | 3.52 Mbps | 0.9650 | 1.14 | 9.72 | 0.359 | 84.4 |
+| *Reference FFmpeg `hevc_videotoolbox` (default `3.5M`)* | 1.68 s | 5.35× RT (`160.4 fps`) | 3.50 Mbps | 0.9741 | 1.09 | 9.49 | 0.246 | 87.6 |
+| *Reference CPU `libx265` 10-bit (`medium`, `3.5M` 2-pass)* | 26.85 s | 0.34× RT (`10.1 fps`) | 3.79 Mbps | 0.9683 | **0.78** | **3.17** | 0.217 | 91.2 |
+| *Reference CPU `libx264` (`medium`, `3.5M` 1-pass)* | 5.08 s | 1.77× RT (`53.2 fps`) | 4.79 Mbps | 0.9644 | 1.08 | 8.74 | 0.399 | 84.5 |
+
+> **Key Takeaways (Empirical):**
+> - **Crushes FFmpeg `hevc_videotoolbox` at identical bitrate:** Safarium True 2-Pass (`3.55 Mbps`) delivers **+0.0198 MS-SSIM** (`0.9939` vs `0.9741`), **-29.3% lower ΔE00 p95** (`6.71` vs `9.49`), **-60% lower ANE perceptual distance**, and **+2.6 PQ** (`90.2` vs `87.6`) — using hardware `VTMultiPassStorage` that FFmpeg cannot access.
+> - **Dramatic generational leap over Wave 8 Legacy VT:** At the same `3.55 Mbps`, Wave 9 2-Pass lifts MS-SSIM from `0.9650 → 0.9939` (+`0.0289`) and cuts ΔE00 p95 from `9.72 → 6.71` (-`30.9%`).
+> - **Beats CPU `libx265` 10-bit 2-pass on speed, size, MS-SSIM, & composite PQ:** Wave 9 True 2-Pass is **`6.94×` faster**, **6.3% smaller**, and **+0.0256 higher MS-SSIM**; Wave 9 CQF `0.62` is **`12.25×` faster** with the highest composite PQ (`91.4`) and MS-SSIM (`0.9987`) of all 9 encoders. **Honest trade-off:** CPU `libx265` 2-pass still retains tighter worst-case chroma-edge ΔE00 p95 (`3.17` vs `6.71`).
+> - **Beats CPU `libx264` on every single metric:** Faster (`2.07–3.87 s` vs `5.08 s`), smaller (`3.55–3.90 Mbps` vs `4.79 Mbps`), and dramatically higher quality (`MS-SSIM 0.9939` vs `0.9644`).
+> - *\*Note on `VTTemporalNoiseFilter`:* Intentionally strips Shot 2's synthetic high-ISO film grain, so pixel-wise MS-SSIM vs the noisy master drops slightly while visually denoising real camera grain at zero CPU cost (via hardware Lossless AFBC `'&8v0'`/`'&xv0'`).
 
 ### HTML-to-Video (`H1`: 1080×1920, 30 fps, 5s)
 
@@ -163,7 +188,7 @@ All measurements below were collected on Apple Silicon (macOS, Apple M5) using `
 
 | Engine | Wall Time | Host Peak RAM | Combined Tree RAM | Quality (`MS-SSIM` / `ΔE00 p95` / LUFS err) | Output Size (`8M` target) |
 |---|---:|---:|---:|---|---:|
-| **Safarium (`safarium-forge`)** | **4.08 s** | **100 MiB** | **302 MiB** | `0.9967` / `1.65–1.85` / `0.0002 LU` | 1.77×–2.31× larger *(honest 1-pass VT trade-off)* |
+| **Safarium (`safarium-forge`)** | **4.08 s** | **100 MiB** | **302 MiB** | `0.9967` / `1.65–1.85` / `0.0002 LU` | 1.77×–2.31× larger *(1-pass H.264 baseline; use Wave 9 HEVC 2-pass/VBV for strict bitrate budgets)* |
 | FFmpeg (`h264_videotoolbox`) | 11.82 s | 307 MiB | 356 MiB | Reference | 1.00× |
 | FFmpeg (`libx264`) | 11.20 s | 933 MiB | 933 MiB | Reference | 0.77× |
 
@@ -171,7 +196,7 @@ All measurements below were collected on Apple Silicon (macOS, Apple M5) using `
 
 | Experiment | Metric | Safarium Result | Baseline / Rival | Delta |
 |---|---|---:|---:|---|
-| **`H3` VideoToolbox vs `x264`/`x265`/`SVT-AV1`** | Peak RAM & Encode Speed | **72–143 MiB**, **1.30–1.45 s** | 356–1,367 MiB, 2.5–17.0 s | **14/14 wins** on RAM & Speed (`1.96×–11.75×` faster); **0/8** on BD-Rate *(SW wins equal-SSIM bytes)* |
+| **`H3` Wave 8 VT vs `x264`/`x265`/`SVT-AV1`** | Peak RAM & Encode Speed | **72–143 MiB**, **1.30–1.45 s** | 356–1,367 MiB, 2.5–17.0 s | **14/14 wins** on RAM & Speed (`1.96×–11.75×` faster); Wave 9 10-bit 2-Pass & CQF now close the HEVC quality gap (see Wave 9 table above) |
 | **`H4` Still Codecs (`SafariumRaster`)** | JPEG decode / PNG / WebP VP8L | Bit-exact JPEG (`ΔE00 = 0.0`, `SSIM = 1.0`) | OpenCV 5.1.0 & `cwebp` | JPEG **`0.907×`** WIN; PNG **`2.30×`** faster & smaller; WebP VP8L **`1.43×–2.28×`** faster than `cwebp` |
 | **`H5` APFS `clonefile` Closed-GOP Cache** | Partial-edit re-render (`150f`) | **2.89 s** (`0/150` diff frames) | 11.13 s full re-render | **`3.854×` faster**, bit-exact packet reuse (`150/150` SHA-256 identical) |
 | **`H6` `SafariumPrism` Tier-0 `webkitGLB`** | Multi-angle 3D preview stills | **25 MiB** RAM, **0 B** temp PNGs | Cold Blender **1,721 MiB**, **24.8 MB** PNGs | **`3.12×–4.68×` faster**, **`-98.5%` RAM**, `HEVCWithAlpha` **`42.85×` smaller** than ProRes 4444 |
@@ -183,7 +208,7 @@ All measurements below were collected on Apple Silicon (macOS, Apple M5) using `
 We prefer transparent engineering over hype. You should **not** choose Safarium as your primary tool if:
 
 1. **You need Linux or Windows execution.** Safarium is **100% macOS / Apple Silicon Only** by deliberate architectural choice — maximizing deep hardware integration (`WKWebView`, `Metal`, `VideoToolbox`, `VTFrameProcessor`, `AudioToolbox`, `ANE`, `APFS`) rather than diluting it across cross-platform lowest-common-denominator layers.
-2. **You need the smallest possible archival video file size (BD-Rate) or AV1/VP9/MP3 encoding.** Apple's `VideoToolbox` prioritizes real-time speed and low RAM over exhaustive multi-pass RDO. Software `x264`, `x265 4.3`, `SVT-AV1 4.3`, `VVenC 1.14`, and `AV2` beat single-pass `VideoToolbox` on equal-SSIM bitrate efficiency, and Apple Silicon has no hardware encoder for `AV1`, `VP9`, or `MP3`. *(See our [macOS Apple Silicon Encoding Upgrade Roadmap](docs/research-2026-11-24/global-video-encoding-encyclopedia-2026.md#7-actionable-macos-apple-silicon-upgrade-roadmap-for-safarium-wave-9--0-ffmpeg) for how we plan to close the BD-Rate gap natively via 2-pass `VTMultiPassStorage`, macOS 15–27 `SpatialAdaptiveQP`/`CQF`, and Metal Mini-CAE.)*
+2. **You need royalty-free AV1 / VP9 / VVC / AV2 or MP3 encoding, or offline CPU archival chroma-edge precision.** Wave 9 True 2-Pass `VTMultiPassStorage` and 10-bit CQF now outperform FFmpeg `hevc_videotoolbox`, `libx264`, and even `libx265` 2-pass on MS-SSIM and speed (`6.9×–12.3×` faster), **but** offline CPU `libx265` 2-pass still achieves tighter worst-case chroma-edge `ΔE00 p95` (`3.17` vs `6.71`), next-gen software encoders (`SVT-AV1 4.3`, `VVenC 1.14`, `AV2`) remain smaller per bit for ultra-low-bitrate CDN archives, and Apple Silicon has no hardware encoder for `AV1`, `VP9`, or `MP3`.
 3. **You run heavy multi-core CPU OpenCV pipelines.** `SafariumRaster` passes **9,884** reference parity tests and beats OpenCV on Metal 4K GPU (`8/9`) and custom still codecs, but its single-threaded CPU `ops` path currently trails OpenCV 5.1.0 on several kernels (`47/97` = `48.5%` WIN+TIE provisionally under high host load: `numpy 65.2%`, `codec 60.0%`, `draw 58.8%`, `ops 31.0%`).
 4. **You need deep offline still compression (`cjxl`, `avifenc`, `mozjpeg`, `zopflipng`).** Safarium optimizes for fast, zero-dependency, universally playable PNG/JPEG/WebP/HEIC/AVIF rather than slow brute-force compression.
 5. **You keep full Blender + WebGL2 resident at the exact same instant.** Concurrent hybrid rendering (`H6B`) peaks higher combined RAM (`2,038 MiB` vs `1,721 MiB`) than running a single engine alone unless using Tier-0 `webkitGLB` previews.
@@ -203,9 +228,9 @@ flowchart LR
     end
 
     subgraph Core["Safarium Unified Engine (macOS Native + FIFO Queue)"]
-        C0["safarium-mcp & Unified CLI\\nMCP stdio JSON-RPC 2.0 · SF-VIDEO-1 FIFO"]
-        C1["SafariumCore & safarium-cdp\\nVirtualClock · Mode C Static-Hold · tx3g"]
-        C2["SafariumForge\\nMetal DAG · APFS CoW Cache · SafariumPQ"]
+        C0["safarium-mcp (15 tools) & Unified CLI\\nMCP stdio JSON-RPC 2.0 · SF-VIDEO-1 FIFO"]
+        C1["SafariumCore & SupremacyEncoder\\nVirtualClock · 10-bit HEVC · 2-Pass VT · Mini-CAE · MV-HEVC"]
+        C2["SafariumForge & VTFrameProcessor\\nMetal DAG · AFBC Denoise · OpticalFlow · APFS Cache · PQ"]
         C3["SafariumRaster (ABI v1)\\n371 C-ABI Symbols · C99/NEON Codecs"]
         C4["SafariumPrism & SafariumContainers\\nHybrid 3D · 1x Thai Shield · Pure-Swift Mux"]
     end
@@ -213,15 +238,15 @@ flowchart LR
     subgraph Apple["Apple Silicon Native Hardware (Zero External Binaries)"]
         A1["WKWebView (.prohibited)"]
         A2["Metal & CoreImage (UMA)"]
-        A3["VideoToolbox & AudioToolbox"]
+        A3["VideoToolbox / VTFrameProcessor / AudioToolbox"]
         A4["Accelerate (BLAS/vDSP/vImage) & NEON"]
         A5["Vision / Neural Engine (ANE)"]
         A6["APFS clonefile(2) & SCM_RIGHTS mmap"]
     end
 
     subgraph Outputs["Verified Deliverables"]
-        O1["H.264 / HEVC / HEVC+Alpha / ProRes 4444"]
-        O2["MP4 / MOV / MKV / WebM / TS / tx3g"]
+        O1["H.264 / 10-bit HEVC (4:2:0/4:2:2/4:4:4) / DV 8.4 / MV-HEVC / 6x ProRes"]
+        O2["MP4 / MOV / MKV / WebM / TS / tx3g · AAC-Max / ALAC / Opus / APAC"]
         O3["PNG / JPEG / WebP (VP8L/VP8) / AVIF / HEIC"]
     end
 
@@ -238,9 +263,9 @@ flowchart LR
 
 | Module | Location | What It Does |
 |---|---|---|
-| **`safarium-mcp`** | `bin/safarium-mcp`, `docs/mcp-server.md` | Zero-dependency Python 3 MCP stdio JSON-RPC 2.0 server (`12` tools, `5` resources, `3` prompts, live JSONL progress notifications) connecting any AI agent to Safarium safely |
-| **`SafariumCore`** | `Sources/SafariumCore/` | Windowless `WKWebView` engine, `VirtualClock` (`clock.js`), Mode C static-hold probe, `AVAssetWriterSink` (H.264, HEVC, HEVC-with-alpha, ProRes 422/4444), `SequentialVideoReader`, `LosslessSoundtrackMux`, `OfflinePeakLimiter`, `SafariumTX3G`, and Apple Silicon hardware capability probes |
-| **`SafariumForgeCore` + `safarium-forge`** | `Sources/SafariumForgeCore/`, `Sources/safarium-forge/` | Declarative JSON DAG media engine, Metal filter shaders, `AF_UNIX` + `SCM_RIGHTS` unlinked `mmap` ring encoder, APFS `clonefile(2)` incremental cache, `APFSAutoStage` (ExFAT-safe), `SafariumPQ` (MS-SSIM, CIEDE2000, Vision OCR), and AI JSONL control plane (`--progress jsonl`, `--json-errors`) |
+| **`safarium-mcp`** | `bin/safarium-mcp`, `docs/mcp-server.md` | Zero-dependency Python 3 MCP stdio JSON-RPC 2.0 server (**`15` tools**, `5` resources, `3` prompts, live JSONL progress notifications) connecting Claude, Gemini, Cursor, Codex, and custom agents safely |
+| **`SafariumCore`** | `Sources/SafariumCore/` | Windowless `WKWebView` engine, `VirtualClock`, Mode C static-hold probe, **Wave 9 `SupremacyEncoder`** (`MetalShotAnalyzer`, `VTMultiPassEncoder` True 2-Pass, `MultiEngineChunkEncoder` Mini-CAE, `MVHEVCSpatialEncoder`), **12 codecs** (10-bit HEVC `4:2:0`/`4:2:2`/`4:4:4` + 4×4 Bayer dithering, HDR10/HLG/Dolby Vision 8.4/Apple Log, all 6 ProRes tiers), **`ProAudioEncoder`** (`AAC-Max`, `HE-AAC v1/v2`, `ALAC`, `Opus`, `APAC`, `16/24/32f PCM`), `SafariumTX3G`, and hardware probes |
+| **`SafariumForgeCore` + `safarium-forge`** | `Sources/SafariumForgeCore/`, `Sources/safarium-forge/` | Declarative JSON DAG media engine, Metal filter shaders, **Wave 9 `ForgeVTProcessor`** (hardware AFBC `VTTemporalNoiseFilter`, `VTFrameRateConversion` optical-flow retimer, `VTMotionBlur`), `AF_UNIX` + `SCM_RIGHTS` unlinked `mmap` ring encoder, APFS `clonefile(2)` incremental cache, `APFSAutoStage` (ExFAT-safe), `SafariumPQ`, and AI JSONL control plane |
 | **`SafariumPrism`** | `Sources/SafariumPrism/`, `Tools/prism-blender-worker.py` | Hybrid 3D engine uniting Warm Blender SHM (`EEVEE`/`CYCLES`) + WebKit WebGL2/Three.js + `1× Thai Shield` HUD overlay, MetalFX/LLSR upscaling with `SafariumPQ` fallback, and HID/thermal Anti-Lag Governor |
 | **`SafariumRaster` + `SafariumRasterC`** | `Sources/SafariumRaster/`, `Sources/SafariumRasterC/` | Dynamic C-ABI library (`libSafariumRaster.dylib`, **`371` symbols**): Core, `Accelerate` Linear Algebra, ImgProc Filters, Geometry/Contours/Hough/LSD/Segmentation/Subdiv2D, VideoIO, Photo/Inpaint/NLM/SeamlessClone/NPR/HDR/Bayer, opt-in Metal GPU, and custom C99/NEON still codecs (PNG, JPEG, WebP VP8/VP8L, TIFF, GIF) |
 | **`SafariumContainers`** | `Sources/SafariumContainers/` | Pure-Swift bitstream muxers/demuxers: EBML/MKV/WebM, MPEG-TS (33-bit PTS unwrapping), MPEG-2 PS, Ogg/Vorbis I + FLAC, WebP RIFF/VP8L |
@@ -269,7 +294,7 @@ RELEASE="$(xcrun swift build -c release --scratch-path /tmp/safarium-build --sho
 python3 Tools/install-render.py --release "$RELEASE" --verifier /tmp/safarium-build/safarium-verify
 python3 Tools/install-render.py --check
 
-# 4. Verify environment, capabilities, and 371-symbol C ABI
+# 4. Verify environment, Wave 9 capabilities, and 371-symbol C ABI
 "$HOME/.local/bin/safarium" doctor --json
 "$HOME/.local/bin/safarium" capabilities
 "$HOME/.local/bin/safarium" raster info
@@ -278,22 +303,37 @@ python3 Tools/install-render.py --check
 ### Everyday Examples
 
 ```sh
-# 1. Deterministic windowless HTML/CSS/SVG/WebGL2 -> MP4
-safarium html scene.html --output out.mp4 --width 1080 --height 1920 --fps 30 --frames 90 --video-only
+# 1. Deterministic windowless HTML/CSS/SVG/WebGL2 -> 10-bit HEVC MP4 (with SpatialAQ + CQF)
+safarium html scene.html --output out.mp4 --width 1080 --height 1920 --fps 30 --frames 90 \
+  --codec hevc10 --pixel-format p010 --spatial-aq high --cqf 0.62 --video-only
 
-# 2. Run a declarative Metal/Audio/Overlay DAG with AI-friendly JSONL telemetry
+# 2. Wave 9 True 2-Pass Hardware HEVC Transcode (VTMultiPassStorage + Shot-Cut IDR, 0% FFmpeg)
+safarium forge transcode --in master.mov --out delivery.mp4 \
+  --codec hevc10 --mode 2pass --bitrate 3500000 --spatial-aq high
+
+# 3. Wave 9 "Safarium Mini-CAE" (Per-Shot Adaptive + Optional AFBC Hardware Temporal Denoise)
+safarium forge transcode --in master.mov --out cae.mp4 \
+  --codec hevc10 --mode mini-cae --bitrate 3500000 --denoise 0.35
+
+# 4. Fast Zero-Copy Shot-Cut & Banding-Risk Analysis (read-only JSON)
+safarium forge analyze-shots --in master.mov --json
+
+# 5. Native AudioToolbox Pro Mastering (AAC-Max, HE-AAC v1/v2, ALAC, Opus, APAC, 24/32f PCM)
+safarium forge audio encode --in mix.wav --out master.m4a --codec alac
+
+# 6. Run a declarative Metal/Audio/Overlay DAG with AI-friendly JSONL telemetry
 safarium forge run --recipe graph.json --progress jsonl --json-errors
 
-# 3. Verify decoded video, audio, and tx3g subtitle timing (zero FFmpeg)
+# 7. Verify decoded video, audio, and tx3g subtitle timing (zero FFmpeg)
 safarium verify reference.mp4 out.mp4
 
-# 4. Run HyperFrames timelines without installing Chrome
+# 8. Run HyperFrames timelines without installing Chrome
 safarium-hf render project/ --output out.mp4
 
-# 5. Start the MCP stdio server for Claude / Gemini / Cursor / Codex
+# 9. Start the 15-tool MCP stdio server for Claude / Gemini / Cursor / Codex
 safarium mcp
 
-# 6. Drop-in Python cv2 backed by libSafariumRaster.dylib (zero OpenCV / FFmpeg)
+# 10. Drop-in Python cv2 backed by libSafariumRaster.dylib (zero OpenCV / FFmpeg)
 PYTHONPATH=sdk/python/safarium_cv2 \
   python3 -c 'import cv2; print(cv2.__version__, hasattr(cv2, "inpaint"), hasattr(cv2, "findContours"))'
 ```
@@ -302,34 +342,36 @@ PYTHONPATH=sdk/python/safarium_cv2 \
 
 ## Verified Cloud CI
 
-Every push is verified by 2-Tier GitHub Actions macOS Cloud CI ([`.github/workflows/ci-macos.yml`](.github/workflows/ci-macos.yml)) across **two macOS & Swift generations** — latest run **4/4 GREEN**:
+Every push is verified by 2-Tier GitHub Actions macOS Cloud CI ([`.github/workflows/ci-macos.yml`](.github/workflows/ci-macos.yml)) across **two macOS & Swift generations** — **4/4 GREEN**:
 
 | Check | `macos-15` (Xcode 16.4 / Swift 6.1.2) | `macos-26` (Xcode 26.6 / Swift 6.3.3) |
 |---|---|---|
 | **Public Repo Hygiene Audit** (`0` personal paths / secrets / forbidden calls) | ✅ `0` violations | ✅ `0` violations |
-| **Apple-Only `otool -L` Linkage** (`0%` FFmpeg / Chrome / OpenCV) | ✅ `6/6` Apple-only | ✅ `6/6` Apple-only |
-| **C99 Codec ASan/UBSan + Swift XCTest Suite** | ✅ `234` executed, `0` failed | ✅ `234` executed, `0` failed |
+| **Apple-Only `otool -L` Linkage** (`0%` FFmpeg / Chrome / OpenCV) | ✅ `7/7` Apple-only | ✅ `7/7` Apple-only |
+| **C99 Codec ASan/UBSan + Swift XCTest Suite (incl. Wave 9)** | ✅ `246+` executed, `0` failed | ✅ `246+` executed, `0` failed |
 | **Queue, Installer & MCP Server Tests (`test_queue.py` + `test_mcp.py`)** | ✅ `27/27` OK | ✅ `27/27` OK |
 | **`SafariumRaster` Reference Parity Suite** | ✅ **`9,884` passed, `0` failed** | ✅ **`9,884` passed, `0` failed** |
 | **Cross-OS H.264 Smoke Determinism** | ✅ Identical SHA-256 across both OSes | ✅ Identical SHA-256 across both OSes |
 
 ---
 
-## macOS Apple Silicon Encoding Roadmap (Wave 9)
+## Wave 9 Apple Silicon Encoding Supremacy (Shipped)
 
-Guided by our [Global Video Encoding Encyclopedia (2025–2026)](docs/research-2026-11-24/global-video-encoding-encyclopedia-2026.md), upcoming native Apple Silicon upgrades (all **0% FFmpeg**) focus on closing VideoToolbox's BD-Rate gap against `x265`/`SVT-AV1` and unlocking pro mastering capabilities:
+All **6 native Apple Silicon encoding pillars** (100% macOS / 0% FFmpeg) from our [Global Video Encoding Encyclopedia (2025–2026)](docs/research-2026-11-24/global-video-encoding-encyclopedia-2026.md) are **shipped, tested, exposed via CLI & MCP, and empirically benchmarked on Apple M5**:
 
-- **Modern VideoToolbox Rate-Control (macOS 15–27):** `SpatialAdaptiveQPLevel`, `HighQuality` preset dictionaries, constrained `VariableBitRate` + VBV (macOS 26), perceptual `ConstantQualityFactor` (`CQF`) + `ConsistentQuality` (macOS 27), and default **10-bit HEVC (`Main10`)** even for SDR gradients.
-- **Native Two-Pass Hardware Encoding (`VTMultiPassStorage`):** Unlocks 2-pass VideoToolbox offline rate allocation (something FFmpeg's `hevc_videotoolbox` still lacks).
-- **"Safarium Mini-CAE" + Multi-Engine Max/Ultra Scaling:** Zero-copy Metal shot-cut detection + `ForceKeyFrame` + per-shot quality steering + parallel `VTCompressionSession` chunking (`MoreFramesBeforeStart`/`MoreFramesAfterEnd`) across 2–4 Media Engines.
-- **Pre-Encode `VTFrameProcessor` & Pro Mastering:** Zero-copy Metal temporal denoising (`VTTemporalNoiseFilterConfiguration`), optical-flow retiming, **10-bit HEVC 4:2:2 / 4:4:4**, **Dolby Vision Profile 8.4** (`VTHDRPerFrameMetadataGenerationSession`), **MV-HEVC Spatial Video**, all 6 ProRes tiers, and **Apple Spatial Audio (`APAC`)**.
+1. **Modern VideoToolbox Rate-Control & 10-bit HEVC (`Main10` / `4:2:2` / `4:4:4`):** `SpatialAdaptiveQPLevel`, `PerceptualQualityOptimization`, `LookAheadFrames`, Constrained `VBR + VBV`, `ConstantQualityFactor` (`CQF`), and 10-bit P010/P210/P410 with 4×4 Bayer ordered dithering to eliminate banding even in SDR.
+2. **True Native 2-Pass Hardware Encoding (`VTMultiPassStorage`):** Full 2-pass `BeginPass` / `EndPass` / `GetTimeRangesForNextPass` + DTS-preserving passthrough mux — something FFmpeg's `hevc_videotoolbox` still cannot do.
+3. **"Safarium Mini-CAE" + Multi-Engine Scaling:** `MetalShotAnalyzer` detects exact shot cuts, motion complexity, and banding risk; `MultiEngineChunkEncoder` steers per-shot quality/IDR placement and scales across parallel Media Engines (`MoreFramesBeforeStart` / `MoreFramesAfterEnd`).
+4. **Zero-Copy `VTFrameProcessor` Pre-Encode Suite:** True Apple Silicon hardware `VTTemporalNoiseFilter` (via Lossless AFBC `'&8v0'`/`'&xv0'` + `VTPixelTransferSession`), `VTFrameRateConversion` optical-flow retiming (`24 → 48/60 fps`), and `VTMotionBlur`.
+5. **Pro Mastering Formats:** All **12 video codecs** including all **6 ProRes tiers** (`apco`, `apcs`, `apcn`, `apch`, `ap4h`, `ap4x`), **HDR10 / HLG / Dolby Vision Profile 8.4** (`VTHDRPerFrameMetadataGenerationSession`), **Apple Log / Log 2**, and **MV-HEVC Spatial Video** (`MVHEVCSpatialEncoder`).
+6. **Pro `AudioToolbox` Mastering (`ProAudioEncoder`):** Locks AAC exports to `AVAudioQuality.max`, plus native `HE-AAC v1/v2` (with silent-fallback guard), `ALAC`, `Opus`, **Apple Spatial Audio (`APAC`)**, and `16/24/32f PCM`.
 
 ---
 
 ## Documentation & Research
 
-- **[Global Video Encoding Encyclopedia (2025–2026)](docs/research-2026-11-24/global-video-encoding-encyclopedia-2026.md)** — Complete worldwide comparison (Software, Next-Gen AV2/VVC, Cloud CAE, GPU/ASICs, Cinema/Mezzanine/APV, Neural AI, Audio) + macOS Apple Silicon upgrade roadmap
-- **[MCP Server & Multi-AI Integration (`safarium-mcp`)](docs/mcp-server.md)** — Setup for Claude Code, Claude Desktop, Cursor, Gemini CLI, Codex CLI + 12-tool schema
+- **[Global Video Encoding Encyclopedia (2025–2026)](docs/research-2026-11-24/global-video-encoding-encyclopedia-2026.md)** — Complete worldwide comparison (Software, Next-Gen AV2/VVC, Cloud CAE, GPU/ASICs, Cinema/Mezzanine/APV, Neural AI, Audio) + shipped Wave 9 Apple M5 benchmark results
+- **[MCP Server & Multi-AI Integration (`safarium-mcp`)](docs/mcp-server.md)** — Setup for Claude Code, Claude Desktop, Cursor, Gemini CLI, Codex CLI + 15-tool schema
 - **[World Video, Web-to-Video, Image & Hardware Ecosystem Matrix (47 Tools)](docs/research-2026-11-24/world-video-ecosystem-matrix.md)** — Deep technical comparison across all 4 ecosystem categories
 - **[Empirical Benchmark Results (`H1–H7`)](docs/research-2026-11-24/experiment-results.md)** — Full Apple M5 measurements, methodology, wins, and losses
 - **[Cloud CI Results (`macos-15` & `macos-26`)](docs/research-2026-11-24/cloud-ci-results.md)** — Reproducible dual-OS CI verification report

@@ -73,6 +73,17 @@ if args[:1] == ["verify"]:
         sys.exit(2)
     print(json.dumps({"exactMatch": True, "argv": args}))
     sys.exit(0)
+if args[:2] == ["forge", "analyze-shots"]:
+    print(json.dumps({"shotCount": 3, "shots": [], "argv": args}))
+    sys.exit(0)
+if args[:2] == ["forge", "transcode"]:
+    sys.stderr.write(json.dumps({"event": "progress", "frame": 15, "totalFrames": 30, "stage": "encode"}) + "\\n")
+    sys.stderr.flush()
+    print(json.dumps({"ok": True, "mode": "mini-cae", "argv": args}))
+    sys.exit(0)
+if args[:3] == ["forge", "audio", "encode"]:
+    print(json.dumps({"ok": True, "codec": "alac", "argv": args}))
+    sys.exit(0)
 if args[:2] == ["forge", "qa"]:
     if "fail-envelope" in args[2]:
         sys.stderr.write(json.dumps({
@@ -165,6 +176,9 @@ print(json.dumps({"present": True, "appleOnly": True, "abi": {"version": 1, "sym
                 "cache_stats",
                 "forge_run",
                 "html_render",
+                "analyze_shots",
+                "transcode_supremacy",
+                "audio_encode",
                 "verify_media",
                 "qa_inspect",
             },
@@ -176,6 +190,8 @@ print(json.dumps({"present": True, "appleOnly": True, "abi": {"version": 1, "sym
 
     def test_readonly_and_queue_tools_and_progress_bridge(self):
         out_mp4 = str(self.tmp / "out.mp4")
+        out_sup = str(self.tmp / "out-sup.mp4")
+        out_m4a = str(self.tmp / "out.m4a")
         resps = self._rpc_session([
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
             {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "doctor", "arguments": {}}},
@@ -214,6 +230,10 @@ print(json.dumps({"present": True, "appleOnly": True, "abi": {"version": 1, "sym
                         "height": 1920,
                         "fps": 30,
                         "frames": 10,
+                        "codec": "hevc-10bit",
+                        "pixel_format": "p010",
+                        "high_quality": True,
+                        "hdr": "dv84",
                         "video_only": True,
                     },
                     "_meta": {"progressToken": "tok-html"},
@@ -234,13 +254,52 @@ print(json.dumps({"present": True, "appleOnly": True, "abi": {"version": 1, "sym
                 "method": "tools/call",
                 "params": {"name": "qa_inspect", "arguments": {"input_path": str(self.fail_file)}},
             },
+            {
+                "jsonrpc": "2.0",
+                "id": 14,
+                "method": "tools/call",
+                "params": {"name": "analyze_shots", "arguments": {"input_path": str(self.media_file), "scene_threshold": 0.3}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 15,
+                "method": "tools/call",
+                "params": {
+                    "name": "transcode_supremacy",
+                    "arguments": {
+                        "input_path": str(self.media_file),
+                        "output_path": out_sup,
+                        "codec": "hevc-10bit",
+                        "mode": "mini-cae",
+                        "engines": 2,
+                        "denoise": True,
+                        "audio_codec": "aac-max",
+                    },
+                    "_meta": {"progressToken": "tok-sup"},
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 16,
+                "method": "tools/call",
+                "params": {
+                    "name": "audio_encode",
+                    "arguments": {
+                        "input_path": str(self.media_file),
+                        "output_path": out_m4a,
+                        "codec": "alac",
+                        "sample_rate": 48000,
+                    },
+                },
+            },
         ])
 
         by_id = {r["id"]: r for r in resps if "id" in r}
         notifs = [r for r in resps if "method" in r and r["method"] == "notifications/progress"]
-        self.assertEqual(len(notifs), 2)
+        self.assertEqual(len(notifs), 3)
         self.assertEqual(notifs[0]["params"]["progressToken"], "tok-forge")
         self.assertEqual(notifs[1]["params"]["progressToken"], "tok-html")
+        self.assertEqual(notifs[2]["params"]["progressToken"], "tok-sup")
 
         self.assertFalse(by_id[2]["result"]["isError"])
         self.assertTrue(by_id[2]["result"]["structuredContent"]["healthy"])
@@ -252,6 +311,15 @@ print(json.dumps({"present": True, "appleOnly": True, "abi": {"version": 1, "sym
         # Structured worker error envelope is surfaced cleanly with isError=True
         self.assertTrue(by_id[13]["result"]["isError"])
         self.assertEqual(by_id[13]["result"]["structuredContent"]["error"]["code"], "E_UNSUPPORTED_CODEC")
+
+        # Wave 9 Supremacy MCP tools
+        self.assertFalse(by_id[14]["result"]["isError"])
+        self.assertEqual(by_id[14]["result"]["structuredContent"]["shotCount"], 3)
+        self.assertFalse(by_id[15]["result"]["isError"])
+        self.assertIn("--engines", by_id[15]["result"]["structuredContent"]["argv"])
+        self.assertIn("--denoise", by_id[15]["result"]["structuredContent"]["argv"])
+        self.assertFalse(by_id[16]["result"]["isError"])
+        self.assertIn("alac", by_id[16]["result"]["structuredContent"]["argv"])
 
     def test_error_codes_and_strict_validation(self):
         resps = self._rpc_session([

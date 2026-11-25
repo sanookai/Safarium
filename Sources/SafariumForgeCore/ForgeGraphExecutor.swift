@@ -1114,7 +1114,7 @@ public enum ForgeGraphExecutor {
         prefix: String
     ) async throws -> URL {
         // Build MP4/MOV intermediate with audio + tx3g if needed
-        let baseExt = (primaryCodec == .proRes422 || primaryCodec == .proRes4444 || container == "mov") ? "mov" : "mp4"
+        let baseExt = (primaryCodec.fileType == .mov || container == "mov") ? "mov" : "mp4"
         var mp4OrMov = videoOnlyURL
 
         if let fragSec = fragmentIntervalSeconds, fragSec > 0, (container == "mp4" || container == "fmp4") {
@@ -2168,6 +2168,10 @@ public enum ForgeGraphExecutor {
             let stride = CVPixelBufferGetBytesPerRow(srcBGRA)
             try SafariumAccelerate.convertRawBGRAToNV12BT709Left(
                 bgra: base, bgraBytesPerRow: stride, into: dstPB, width: width, height: height
+            )
+        case .p010, .p210, .p410:
+            try AVAssetWriterSink.convertBGRAPixelBufferTo10Bit(
+                srcBGRA, into: dstPB, pixelFormat: pixelFormat
             )
         }
     }

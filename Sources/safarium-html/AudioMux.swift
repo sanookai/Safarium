@@ -28,12 +28,7 @@ enum PublishedAssetCheck {
         }
         try await checkRange(video[0], "video")
         let formats = try await video[0].load(.formatDescriptions)
-        let expectedSubtype: CMVideoCodecType = switch o.codec {
-        case .h264: kCMVideoCodecType_H264
-        case .hevc, .hevcAlpha: kCMVideoCodecType_HEVC
-        case .proRes422: kCMVideoCodecType_AppleProRes422
-        case .proRes4444: kCMVideoCodecType_AppleProRes4444
-        }
+        let expectedSubtype: CMVideoCodecType = (o.codec == .hevcAlpha) ? kCMVideoCodecType_HEVC : o.codec.cmCodecType
         guard formats.count == 1, let f = formats.first, CMFormatDescriptionGetMediaSubType(f) == expectedSubtype else {
             throw WorkerError("expected a single \(o.codec) video format")
         }

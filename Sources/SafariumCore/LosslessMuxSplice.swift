@@ -347,6 +347,7 @@ public enum ClosedGOPStitcher {
                 AVSampleRateKey: Int(ff.sampleRate.rounded()),
                 AVNumberOfChannelsKey: ch,
                 AVEncoderBitRateKey: aacBitrate ?? defaultRate,
+                AVEncoderAudioQualityKey: AVAudioQuality.max.rawValue,
             ]
             guard writer.canApply(outputSettings: aSettings, forMediaType: .audio) else {
                 throw SafariumError.encode("Apple AAC encoder cannot encode WAV format \(ff.sampleRate) Hz \(ch) ch")

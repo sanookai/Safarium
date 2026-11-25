@@ -4,18 +4,19 @@ import SafariumCore
 
 let usage = """
 Usage: safarium-html INPUT.html --output FILE.(mp4|mov) --width W --height H --fps N --frames N
-                    [--start SECONDS] [--bitrate BPS | --quality 0..1]
-                    [--codec h264|hevc|hevc-alpha|prores4444] [--transparent]
-                    [--pixel-format bgra|nv12-vimage|nv12-left] [--snapshot-quality fast|sharp]
-                    [--low-ram] [--static-hold-probe] [--hash] [--json]
+                    [--start SECONDS] [--bitrate BPS | --quality 0..1 | --cqf 0..1]
+                    [--codec h264|hevc|hevc-10bit|hevc-422-10bit|hevc-444-10bit|hevc-alpha|prores422-proxy|prores422-lt|prores422|prores422-hq|prores4444|prores4444-xq]
+                    [--transparent] [--hdr sdr|hdr10|hlg|dv84|apple-log|apple-log2]
+                    [--pixel-format bgra|nv12-vimage|nv12-left|p010|p210|p410] [--snapshot-quality fast|sharp]
+                    [--low-ram | --high-quality] [--spatial-aq] [--static-hold-probe] [--hash] [--json]
                     [--progress jsonl] [--json-errors]
                     [--subtitles FILE.srt [--subtitle-lang ISO639-2]]
                     (--video-only | --audio WAV [--audio-start SECONDS])
 
 Render one trusted, local .html/.htm page with local assets in a single-pass AVAssetWriter.
-BT.709 colorimetry, one CSS pixel per output pixel. Even dimensions (max 8192 per side,
+BT.709 (or BT.2020 HDR) colorimetry, one CSS pixel per output pixel. Even dimensions (max 8192 per side,
 33554432 pixels); positive integer fps/frame count. --bitrate is the average bitrate target
-(default 20000000 for h264/hevc). Use .mp4 for h264/hevc, .mov for hevc-alpha/prores4444.
+(default 20000000 for h264/hevc). Use .mp4 for h264/hevc/hevc-10bit, .mov for 4:2:2/4:4:4/alpha/ProRes.
 Output must be new and its parent directory must exist.
 
 Page time is start + i/fps (default start 0); output PTS is i/fps. Static HTML,
@@ -26,8 +27,8 @@ Embedded video/documents, custom video hooks and network assets are unsupported.
 
 Choose --video-only for an intentionally silent movie, or --audio for one authoritative
 soundtrack. HTML/Web Audio playback, clip edits, gain and effects are never mixed.
-Use a prepared PCM RIFF/WAVE (8/16/24/32-bit integer or 32-bit float). AAC-LC keeps
-the source rate and channels. Legacy unlabelled PCM means centered mono or ordered
+Use a prepared PCM RIFF/WAVE (8/16/24/32-bit integer or 32-bit float). AAC-LC uses
+AVAudioQuality.max and keeps the source rate and channels. Legacy unlabelled PCM means centered mono or ordered
 front L/R stereo. Extensible WAV must declare front center (0x04) or front L/R
 (0x03); other/unspecified speaker assignments are rejected. The AAC output layout
 is checked before publication. AAC targets 96000 bit/s mono or 160000 bit/s stereo;
@@ -44,12 +45,15 @@ struct WorkerError: Error, CustomStringConvertible {
 struct Options {
     let input: URL, output: URL
     let width: Int, height: Int, fps: Int, frames: Int
-    let bitrate: Int?, quality: Double?
+    let bitrate: Int?, quality: Double?, cqf: Double?
     let codec: VideoCodec
     let transparent: Bool
     let pixelFormat: SinkPixelFormat
+    let colorMastering: ColorMasteringProfile
     let snapshotQuality: SnapshotQuality
     let lowRam: Bool
+    let highQuality: Bool
+    let spatialAQ: Bool
     let staticHoldProbe: Bool
     let hashFrames: Bool
     let jsonOutput: Bool
@@ -68,13 +72,16 @@ struct Options {
             throw WorkerError("expected a local INPUT.html; see --help")
         }
         var i = 1, seen = Set<String>()
-        var w: Int?, h: Int?, rate: Int?, count: Int?, bps: Int?, qual: Double?
+        var w: Int?, h: Int?, rate: Int?, count: Int?, bps: Int?, qual: Double?, cqfVal: Double?
         var out: String?, wav: String?, srt: String?, srtLang: String?
         var selectedCodec: VideoCodec = .h264
         var isTransparent = false
         var pixFmt: SinkPixelFormat? = nil
+        var mastering: ColorMasteringProfile = .sdrBT709
         var snapQual: SnapshotQuality = .fast
         var isLowRam = false
+        var isHighQuality = false
+        var isSpatialAQ = false
         var isStaticHoldProbe = false
         var isHashFrames = false
         var isJsonOutput = false
@@ -113,12 +120,23 @@ struct Options {
                     throw WorkerError("--quality needs a finite number in (0, 1]")
                 }
                 qual = q
+            case "--cqf":
+                guard let c = Double(try value()), c.isFinite, c > 0, c <= 1.0 else {
+                    throw WorkerError("--cqf needs a finite number in (0, 1]")
+                }
+                cqfVal = c
             case "--codec":
                 let raw = try value()
-                guard let c = VideoCodec.parseCLI(raw), c != .proRes422 else {
-                    throw WorkerError("unknown --codec '\(raw)'; expected h264, hevc, hevc-alpha, or prores4444")
+                guard let c = VideoCodec.parseCLI(raw) else {
+                    throw WorkerError("unknown --codec '\(raw)'; expected h264, hevc, hevc-10bit, hevc-422-10bit, hevc-444-10bit, hevc-alpha, or prores*")
                 }
                 selectedCodec = c
+            case "--hdr":
+                let raw = try value()
+                guard let m = ColorMasteringProfile.parseCLI(raw) else {
+                    throw WorkerError("unknown --hdr '\(raw)'; expected sdr, hdr10, hlg, dv84, apple-log, or apple-log2")
+                }
+                mastering = m
             case "--transparent":
                 isTransparent = true
             case "--pixel-format":
@@ -127,10 +145,17 @@ struct Options {
                 case "bgra": pixFmt = .bgra
                 case "nv12-vimage": pixFmt = .nv12vImage
                 case "nv12-left": pixFmt = .nv12Left
-                default: throw WorkerError("unknown --pixel-format '\(raw)'; expected bgra, nv12-vimage, or nv12-left")
+                case "p010": pixFmt = .p010
+                case "p210": pixFmt = .p210
+                case "p410": pixFmt = .p410
+                default: throw WorkerError("unknown --pixel-format '\(raw)'; expected bgra, nv12-vimage, nv12-left, p010, p210, or p410")
                 }
             case "--low-ram":
                 isLowRam = true
+            case "--high-quality":
+                isHighQuality = true
+            case "--spatial-aq":
+                isSpatialAQ = true
             case "--static-hold-probe":
                 isStaticHoldProbe = true
             case "--hash":
@@ -169,12 +194,13 @@ struct Options {
         }
         guard silent != (wav != nil) else { throw WorkerError("choose exactly one of --video-only or --audio WAV") }
         guard at == nil || wav != nil else { throw WorkerError("--audio-start requires --audio WAV") }
-        guard bps == nil || qual == nil else { throw WorkerError("use either --bitrate or --quality, not both") }
+        let rateModes = (bps != nil ? 1 : 0) + (qual != nil ? 1 : 0) + (cqfVal != nil ? 1 : 0)
+        guard rateModes <= 1 else { throw WorkerError("use only one of --bitrate, --quality, or --cqf") }
         if isTransparent && !selectedCodec.hasAlpha {
-            throw WorkerError("--transparent requires an alpha codec (hevc-alpha or prores4444)")
+            throw WorkerError("--transparent requires an alpha codec (hevc-alpha, prores4444, or prores4444-xq)")
         }
-        let resolvedPixFmt = pixFmt ?? ((isTransparent || selectedCodec.hasAlpha) ? .bgra : .nv12Left)
-        if (resolvedPixFmt == .nv12vImage || resolvedPixFmt == .nv12Left) && (isTransparent || selectedCodec.hasAlpha) {
+        let resolvedPixFmt = pixFmt ?? ((isTransparent || selectedCodec.hasAlpha) ? .bgra : selectedCodec.defaultPixelFormat)
+        if resolvedPixFmt != .bgra && (isTransparent || selectedCodec.hasAlpha) {
             throw WorkerError("--pixel-format \(resolvedPixFmt.rawValue) cannot be used with alpha/transparent output")
         }
         if srtLang != nil && srt == nil {
@@ -198,7 +224,7 @@ struct Options {
             }
         }
         input = try file(first, ["html", "htm"])
-        output = try file(out, [selectedCodec.fileExtension])
+        output = try file(out, selectedCodec.fileExtension == "mp4" ? ["mp4", "mov"] : ["mov"])
         audio = try wav.map { try file($0, ["wav"]) }
         subtitles = try srt.map { try file($0, ["srt"]) }
         if let lang = srtLang {
@@ -212,12 +238,14 @@ struct Options {
         }
         width = w; height = h; fps = rate; frames = count
         codec = selectedCodec; transparent = isTransparent
-        pixelFormat = resolvedPixFmt; snapshotQuality = snapQual
-        lowRam = isLowRam; staticHoldProbe = isStaticHoldProbe
+        pixelFormat = resolvedPixFmt; colorMastering = mastering
+        snapshotQuality = snapQual
+        lowRam = isLowRam; highQuality = isHighQuality; spatialAQ = isSpatialAQ
+        staticHoldProbe = isStaticHoldProbe
         hashFrames = isHashFrames; jsonOutput = isJsonOutput
         jsonErrors = isJsonErrors; progressJSONL = isProgressJSONL
-        quality = qual
-        bitrate = bps ?? (qual == nil && selectedCodec != .proRes4444 ? 20_000_000 : nil)
+        quality = qual; cqf = cqfVal
+        bitrate = bps ?? (qual == nil && cqfVal == nil && !selectedCodec.isProRes ? 20_000_000 : nil)
         start = t; audioStart = at ?? t
         try readable(input)
         if let audio { try readable(audio) }

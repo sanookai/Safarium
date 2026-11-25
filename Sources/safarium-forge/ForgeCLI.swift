@@ -47,13 +47,15 @@ Commands:
   pipe-encode   --width W --height H --fps N [--pix-fmt rgb24|bgr24|rgba|bgra] [--vflip] [--codec h264|hevc|hevc-alpha|prores4444] [--bitrate BPS] [--quality Q] -o <primary> [--primary-audio-codec aac|pcm_s16le|copy] [--inline-sheet <png> --sheet-cols C --sheet-rows R --tile-width W] [--secondary <sec> --secondary-codec h264 --secondary-bg '#000000'] [--audio <wav|m4a>] [--subtitles <srt> --lang tha] [--max-frames N] [--no-closed-gop] [--overwrite]
   seq-encode    [--dir <dir> | --glob <pattern> | --list <file>] -o <out.(mp4|mov)> [--fps 24] [--width W --height H] [--codec h264|hevc|hevc-alpha|prores4444] [--bitrate BPS] [--quality Q] [--audio <path>] [--inline-sheet <png> --sheet-cols 6 --sheet-rows 4 --tile-width 320] [--decode-ahead 3] [--overwrite]
   batch-dom     --manifest <manifest.json> [--font-dir <dir>] [--overwrite]
-  transcode     <input> -o <out.(mp4|mov)> [--codec h264|hevc|hevc-alpha|prores4444] [--max-bytes N | --bitrate BPS | --quality Q] [--audio-bitrate 128000] [--width W --height H --fps N] [--overwrite]
+  transcode     <input> -o <out.(mp4|mov)> [--codec h264|hevc|hevc-10bit|hevc-422-10bit|hevc-444-10bit|hevc-alpha|prores*] [--mode fast|balanced|high-quality|cqf|2pass|mini-cae] [--cqf 0..1] [--bitrate BPS | --max-bytes N | --quality Q] [--vbv-max-bitrate BPS --vbv-buffer-sec 4] [--spatial-aq|--no-spatial-aq] [--lookahead 16] [--two-pass] [--mini-cae] [--engines auto|1|2|4] [--denoise [--denoise-strength 0.5]] [--retime-fps N] [--hdr sdr|hdr10|hlg|dv84|apple-log|apple-log2] [--audio-codec aac|he-aac|he-aac-v2|alac|opus|apac|pcm16|pcm24|pcm32f] [--audio-bitrate 128000] [--width W --height H --fps N] [--overwrite]
+  spatial-encode --left <L.(mp4|mov)> --right <R.(mp4|mov)> -o <out.mov> [--bitrate 12000000] [--10bit] [--hdr sdr|hdr10|hlg|dv84] [--fov 63.4] [--baseline-mm 64] [--disparity 0] [--audio-codec aac|apac] [--overwrite]
+  analyze-shots <input> [--cut-mad 26.0] [--cut-hist 0.28] [--min-shot-frames 12]
   prism         <capabilities|sync-ir|preview-stills|render-web|render-blender|composite> [options]
   daemon        --socket <uds-path> [--idle-timeout 20] [--cache-root <dir>] [--no-pq-preload]
   ring-encode   --socket <uds-path> [--idle-timeout 30]
   cache         <hash|store|lookup|stats|prune> [options]
   ab-gallery    --manifest <manifest.json> -o <gallery.html> [--overwrite]
-  capabilities  Report Apple Silicon VT/AudioToolbox/ImageIO/Metal/ANE/APFS capabilities and OS walls
+  capabilities  Report Apple Silicon VT/AudioToolbox/ImageIO/Metal/ANE/VTFrameProcessor/APFS capabilities and OS walls
   version       Print safarium-forge version
 
 Run `safarium-forge <command> --help` for subcommand options.
@@ -69,6 +71,7 @@ private let subcommandHelp: [String: String] = [
     "image": "Usage: safarium-forge image <input-image-or-video> -o <out.(webp|avif|heic|heics|png|jpg)> [--quality 0.80] [--fps N] [--frames N] [--loop N] [--start S] [--overwrite]",
     "audio": """
     Usage: safarium-forge audio <action> [options]
+      encode        <input> -o <out.(m4a|mp4|mov|caf|wav)> --codec aac|he-aac|he-aac-v2|alac|opus|apac|pcm16|pcm24|pcm32f [--bitrate BPS] [--sr 48000] [--channels 2] [--overwrite]
       process       <input> -o <out.(wav|m4a)> [--eq mode:freq[:q[:gainDB]] ...] [--comp-thresh DB] [--comp-ratio R] [--gain DB] [--lufs DB] [--peak-dbtp DB] [--sr N] [--channels 1|2] [--bitrate BPS] [--overwrite]
       crossfade     <first> <second> -o <out.(wav|m4a)> [--duration S] [--curve eqpower|tri] [--sr N] [--channels 1|2] [--overwrite]
       silence-trim  <input> -o <out.(wav|m4a)> [--threshold-db -42] [--padding 0.05] [--sr N] [--channels 1|2] [--overwrite]
@@ -85,7 +88,9 @@ private let subcommandHelp: [String: String] = [
     "pipe-encode": "Usage: safarium-forge pipe-encode --width W --height H --fps N [--pix-fmt rgb24|bgr24|rgba|bgra] [--vflip] [--codec h264|hevc|hevc-alpha|prores4444] [--bitrate BPS] [--quality Q] -o <primary> [--primary-audio-codec aac|pcm_s16le|copy] [--inline-sheet <png> --sheet-cols 6 --sheet-rows 4 --tile-width 320] [--secondary <sec> --secondary-codec h264 --secondary-bg '#000000' --secondary-bitrate BPS --secondary-quality Q] [--audio <wav|m4a>] [--subtitles <srt> --lang tha] [--max-frames N] [--no-closed-gop] [--overwrite]",
     "seq-encode": "Usage: safarium-forge seq-encode [--dir <dir> | --glob <pattern> | --list <file>] -o <out.(mp4|mov)> [--fps 24] [--width W] [--height H] [--codec h264|hevc|hevc-alpha|prores4444] [--bitrate 8000000] [--quality Q] [--audio <path>] [--inline-sheet <png> --sheet-cols 6 --sheet-rows 4 --tile-width 320] [--decode-ahead 3] [--overwrite]",
     "batch-dom": "Usage: safarium-forge batch-dom --manifest <manifest.json> [--font-dir <dir>] [--overwrite]",
-    "transcode": "Usage: safarium-forge transcode <input> -o <out.(mp4|mov)> [--codec h264|hevc|hevc-alpha|prores4444] [--max-bytes N | --bitrate BPS | --quality Q] [--audio-bitrate 128000] [--width W --height H --fps N] [--overwrite]",
+    "transcode": "Usage: safarium-forge transcode <input> -o <out.(mp4|mov)> [--codec h264|hevc|hevc-10bit|hevc-422-10bit|hevc-444-10bit|hevc-alpha|prores*] [--mode fast|balanced|high-quality|cqf|2pass|mini-cae] [--cqf 0..1] [--max-bytes N | --bitrate BPS | --quality Q] [--vbv-max-bitrate BPS --vbv-buffer-sec 4] [--spatial-aq|--no-spatial-aq] [--lookahead 16] [--two-pass] [--mini-cae] [--engines auto|1|2|4] [--denoise [--denoise-strength 0.5]] [--retime-fps N] [--hdr sdr|hdr10|hlg|dv84|apple-log|apple-log2] [--audio-codec aac|he-aac|he-aac-v2|alac|opus|apac|pcm16|pcm24|pcm32f] [--audio-bitrate 128000] [--width W --height H --fps N] [--overwrite]",
+    "spatial-encode": "Usage: safarium-forge spatial-encode --left <L.(mp4|mov)> --right <R.(mp4|mov)> -o <out.mov> [--bitrate 12000000] [--10bit] [--hdr sdr|hdr10|hlg|dv84] [--fov 63.4] [--baseline-mm 64] [--disparity 0] [--audio-codec aac|apac] [--overwrite]",
+    "analyze-shots": "Usage: safarium-forge analyze-shots <input> [--cut-mad 26.0] [--cut-hist 0.28] [--min-shot-frames 12]",
     "prism": """
     Usage: safarium-forge prism <action> [options]
       capabilities
@@ -182,7 +187,7 @@ private func withPlayableVideoURL<T>(inputURL: URL, _ body: (URL) async throws -
 
 private func parseCodec(_ raw: String, flag: String = "--codec") throws -> VideoCodec {
     guard let codec = VideoCodec.parseCLI(raw) else {
-        throw CLIUsageError("unsupported \(flag) '\(raw)' (expected h264|hevc|hevc-alpha|prores422|prores4444)")
+        throw CLIUsageError("unsupported \(flag) '\(raw)' (expected h264|hevc|hevc-10bit|hevc-422-10bit|hevc-444-10bit|hevc-alpha|prores422-proxy|prores422-lt|prores422|prores422-hq|prores4444|prores4444-xq)")
     }
     return codec
 }
@@ -914,13 +919,59 @@ private func parseEQSpec(_ spec: String) throws -> ForgeBiquadSection {
 private func runAudioCommand(_ args: [String], progressEmitter: SafariumProgressEmitter? = nil) async throws -> Data {
     try checkSubcommandHelp(args, command: "audio")
     guard let action = args.first else {
-        throw CLIUsageError("audio requires action: process|crossfade|silence-trim|waveform|synth|split-mp3")
+        throw CLIUsageError("audio requires action: encode|process|crossfade|silence-trim|waveform|synth|split-mp3")
     }
     let rest = Array(args.dropFirst())
     progressEmitter?.emitStart(stage: "audio_\(action)")
 
     func executeAudioAction() async throws -> Data {
     switch action {
+    case "encode":
+        var inputPath: String?
+        var outputPath: String?
+        var codec: SafariumAudioCodec = .aacMax
+        var sampleRate = 48_000
+        var channels = 2
+        var bitrate: Int?
+        var overwrite = false
+        var i = 0
+        while i < rest.count {
+            let a = rest[i]
+            switch a {
+            case "-o", "--output", "--out": outputPath = try nextValue(rest, index: &i, flag: a)
+            case "--codec":
+                let raw = try nextValue(rest, index: &i, flag: a)
+                guard let parsed = SafariumAudioCodec.parseCLI(raw) else {
+                    throw CLIUsageError("unsupported --codec '\(raw)' (expected aac|he-aac|he-aac-v2|alac|opus|apac|pcm16|pcm24|pcm32f)")
+                }
+                codec = parsed
+            case "--sr", "--sample-rate":
+                sampleRate = try parseInt(try nextValue(rest, index: &i, flag: a), flag: a)
+            case "--channels":
+                channels = try parseInt(try nextValue(rest, index: &i, flag: a), flag: a)
+            case "--bitrate":
+                bitrate = try parseInt(try nextValue(rest, index: &i, flag: a), flag: a)
+            case "--overwrite": overwrite = true
+            default:
+                if a.hasPrefix("-") { throw CLIUsageError("unknown option for audio encode: \(a)") }
+                if inputPath == nil { inputPath = a } else { throw CLIUsageError("unexpected arg: \(a)") }
+            }
+            i += 1
+        }
+        guard let inputPath, let outputPath else {
+            throw CLIUsageError("audio encode requires <input> and -o <output>")
+        }
+        let rep = try await ProAudioEncoder.transcode(
+            inputURL: URL(fileURLWithPath: inputPath),
+            outputURL: URL(fileURLWithPath: outputPath),
+            codec: codec,
+            sampleRate: sampleRate,
+            channels: channels,
+            bitrate: bitrate,
+            overwrite: overwrite
+        )
+        return try encodeJSON(rep)
+
     case "process":
         var inputPath: String?
         var outputPath: String?
@@ -1759,6 +1810,9 @@ private struct CapabilitiesReport: Codable {
     let imageIO: ImageIOSupportSummary
     let metal: MetalCapabilitySummary
     let aneVisionAvailable: Bool
+    let appleSiliconSupremacy: AppleSiliconMediaEngineInfo
+    let vtFrameProcessor: ForgeVTProcessorCapabilities
+    let proAudio: ProAudioCapabilities
     let volumes: [ForgeVolumeCapabilities]
     let osWalls: [String]
 }
@@ -1767,30 +1821,55 @@ private func runCapabilitiesCommand(_ args: [String]) throws -> Data {
     try checkSubcommandHelp(args, command: "capabilities")
     MediaCompatBridge.registerSupplementalDecoders()
 
+    let supremacyInfo = AppleSiliconMediaEngineInfo.probe()
+    let vtProcCaps = ForgeVTProcessorCapabilities.probe()
+    let proAudioCaps = ProAudioEncoder.probeCapabilities()
+
     let vtEntries: [(String, String, String?)] = [
-        ("h264", "avc1", "Hardware decode & encode"),
-        ("hevc", "hvc1", "Hardware decode & encode"),
+        ("h264", "avc1", "Hardware decode & encode (1-pass, CQF, Constrained VBR+VBV, 2-pass VTMultiPassStorage)"),
+        ("hevc", "hvc1", "Hardware 8-bit Main decode & encode (+ SpatialAQ, LookAhead, Mini-CAE, 2-pass)"),
+        ("hevc-10bit", "hvc1", "Hardware 10-bit Main10 (P010 + 4x4 Bayer dithering, HDR10/HLG/Dolby Vision 8.4)"),
+        ("hevc-422-10bit", "hvc1", "Hardware 10-bit 4:2:2 (P210) mastering profile in .mov"),
+        ("hevc-444-10bit", "hvc1", "Hardware 10-bit 4:4:4 (P410) zero-chroma-subsampling mastering in .mov"),
         ("hevc-alpha", "muxa", "Premultiplied alpha HEVC in .mov"),
-        ("prores4444", "ap4h", "ProRes 4444 straight alpha in .mov (fourCC ap4h / pr44)"),
+        ("mv-hevc", "hvc1", "Hardware Spatial Video MV-HEVC stereo left+right in .mov (Apple Vision Pro)"),
+        ("prores422-proxy", "apco", "Apple ProRes 422 Proxy in .mov"),
+        ("prores422-lt", "apcs", "Apple ProRes 422 LT in .mov"),
+        ("prores422", "apcn", "Apple ProRes 422 Standard in .mov"),
+        ("prores422-hq", "apch", "Apple ProRes 422 HQ in .mov"),
+        ("prores4444", "ap4h", "Apple ProRes 4444 straight alpha in .mov"),
+        ("prores4444-xq", "ap4x", "Apple ProRes 4444 XQ 12-bit mastering in .mov"),
         ("vp9", "vp09", "Hardware decode unlocked via VTRegisterSupplementalVideoDecoderIfAvailable + 12B vpcC FullBox; no VT encode"),
         ("av1", "av01", "Hardware decode on Apple Silicon; no VT stream encode"),
     ]
     let videoToolbox = vtEntries.map { name, fourCC, note in
-        CodecSupportEntry(
+        let hwEnc: Bool
+        switch name {
+        case "hevc-10bit": hwEnc = supremacyInfo.hardwareHEVC10Bit
+        case "hevc-422-10bit": hwEnc = supremacyInfo.hardwareHEVC42210Bit
+        case "hevc-444-10bit": hwEnc = supremacyInfo.hardwareHEVC44410Bit
+        case "mv-hevc": hwEnc = supremacyInfo.mvHEVCStereo
+        default: hwEnc = MediaCompatBridge.supportsHardwareEncode(fourCC: fourCC)
+        }
+        return CodecSupportEntry(
             name: name,
             fourCC: fourCC,
             hardwareDecode: MediaCompatBridge.supportsHardwareDecode(fourCC: fourCC),
-            hardwareEncode: MediaCompatBridge.supportsHardwareEncode(fourCC: fourCC),
+            hardwareEncode: hwEnc,
             notes: note
         )
     }
 
     let audioToolbox: [AudioSupportEntry] = [
-        AudioSupportEntry(format: "aac", decode: true, encode: true, notes: "AudioToolbox AAC LC in .mp4/.m4a/.mov/.ts/.mkv"),
+        AudioSupportEntry(format: "aac", decode: true, encode: proAudioCaps.aacMaxQuality, notes: "AudioToolbox AAC-LC with AVAudioQuality.max (kAudioConverterQuality_Max)"),
+        AudioSupportEntry(format: "he-aac", decode: true, encode: proAudioCaps.heAACv1, notes: "AudioToolbox HE-AAC v1 (SBR, 32-96 kbps)"),
+        AudioSupportEntry(format: "he-aac-v2", decode: true, encode: proAudioCaps.heAACv2, notes: "AudioToolbox HE-AAC v2 (SBR+PS stereo 24-64 kbps, with AudioSpecificConfig fallback check)"),
+        AudioSupportEntry(format: "alac", decode: true, encode: proAudioCaps.alac, notes: "Apple Lossless Audio Codec (24-bit bit-exact lossless)"),
+        AudioSupportEntry(format: "caf_opus", decode: true, encode: proAudioCaps.opus, notes: "Native AudioToolbox Opus decode & encode in .caf/.mp4"),
+        AudioSupportEntry(format: "apac", decode: proAudioCaps.apacSpatial, encode: proAudioCaps.apacSpatial, notes: "Apple Positional Audio Codec (macOS 26+ Spatial Audio for MV-HEVC/visionOS)"),
         AudioSupportEntry(format: "pcm_wav", decode: true, encode: true, notes: "16/24-bit integer & Float32 PCM"),
         AudioSupportEntry(format: "mp3", decode: true, encode: false, notes: "AudioToolbox decode + lossless AudioFile packet split; no MP3 encoder"),
         AudioSupportEntry(format: "flac", decode: true, encode: false, notes: "ExtAudioFile/AVAudioFile decode to Float32 PCM"),
-        AudioSupportEntry(format: "caf_opus", decode: true, encode: false, notes: "ExtAudioFile decode .caf/.mp4 Opus to Float32 PCM"),
         AudioSupportEntry(format: "ogg_vorbis", decode: true, encode: false, notes: "Pure-Swift + vDSP Ogg Vorbis I streaming decode in SafariumContainers"),
         AudioSupportEntry(format: "ogg_flac", decode: true, encode: false, notes: "Pure-Swift Ogg page unwrap + AudioToolbox FLAC decode"),
         AudioSupportEntry(format: "ogg_opus", decode: false, encode: false, notes: "Unsupported container by Apple AudioToolbox (OSStatus 'fmt?')"),
@@ -1852,6 +1931,9 @@ private func runCapabilitiesCommand(_ args: [String]) throws -> Data {
         imageIO: imageIO,
         metal: metal,
         aneVisionAvailable: AppleMacOSBackend.current.supportsANE,
+        appleSiliconSupremacy: supremacyInfo,
+        vtFrameProcessor: vtProcCaps,
+        proAudio: proAudioCaps,
         volumes: volumes,
         osWalls: osWalls
     )
@@ -3057,12 +3139,72 @@ private func runTranscodeCommand(_ args: [String], progressEmitter: SafariumProg
     var targetHeight: Int?
     var targetFPS: Int?
     var overwrite = false
+
+    // Wave 9 Supremacy options
+    var supremacyMode: SupremacyEncodeMode?
+    var cqfValue: Double?
+    var vbvMaxBitrate: Int?
+    var vbvBufferSec: Double = 4.0
+    var spatialAQ: Bool?
+    var lookAheadFrames: Int?
+    var parallelEngines: Int?
+    var enableDenoise = false
+    var denoiseStrength: Float = 0.5
+    var retimeFPS: Double?
+    var hdrMastering: ColorMasteringProfile?
+    var proAudioCodec: SafariumAudioCodec?
+
     var i = 0
     while i < args.count {
         let a = args[i]
         switch a {
         case "-o", "--output", "--out": outputPath = try nextValue(args, index: &i, flag: a)
         case "--codec": codec = try parseCodec(try nextValue(args, index: &i, flag: a))
+        case "--mode":
+            let raw = try nextValue(args, index: &i, flag: a)
+            guard let m = SupremacyEncodeMode.parseCLI(raw) else {
+                throw CLIUsageError("unsupported --mode '\(raw)' (expected fast|balanced|high-quality|cqf|2pass|mini-cae)")
+            }
+            supremacyMode = m
+        case "--two-pass", "--2pass": supremacyMode = .twoPass
+        case "--mini-cae", "--cae": supremacyMode = .miniCAE
+        case "--cqf":
+            let v = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+            guard v > 0 && v <= 1.0 else { throw CLIUsageError("--cqf must be in (0, 1]") }
+            cqfValue = v
+            if supremacyMode == nil { supremacyMode = .cqf }
+        case "--vbv-max-bitrate": vbvMaxBitrate = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--vbv-buffer-sec": vbvBufferSec = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--spatial-aq": spatialAQ = true
+        case "--no-spatial-aq": spatialAQ = false
+        case "--lookahead": lookAheadFrames = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--engines":
+            let raw = try nextValue(args, index: &i, flag: a).lowercased()
+            if raw == "auto" {
+                parallelEngines = nil
+            } else {
+                let n = try parseInt(raw, flag: a)
+                guard (1...4).contains(n) else { throw CLIUsageError("--engines must be auto or 1..4") }
+                parallelEngines = n
+            }
+        case "--denoise": enableDenoise = true
+        case "--denoise-strength":
+            enableDenoise = true
+            let s = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+            denoiseStrength = Float(min(1.0, max(0.0, s)))
+        case "--retime-fps": retimeFPS = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--hdr":
+            let raw = try nextValue(args, index: &i, flag: a)
+            guard let m = ColorMasteringProfile.parseCLI(raw) else {
+                throw CLIUsageError("unsupported --hdr '\(raw)' (expected sdr|hdr10|hlg|dv84|apple-log|apple-log2)")
+            }
+            hdrMastering = m
+        case "--audio-codec":
+            let raw = try nextValue(args, index: &i, flag: a)
+            guard let ac = SafariumAudioCodec.parseCLI(raw) else {
+                throw CLIUsageError("unsupported --audio-codec '\(raw)' (expected aac|he-aac|he-aac-v2|alac|opus|apac|pcm16|pcm24|pcm32f)")
+            }
+            proAudioCodec = ac
         case "--max-bytes":
             let raw = try nextValue(args, index: &i, flag: a)
             guard let v = Int64(raw), v > 0 else {
@@ -3088,6 +3230,104 @@ private func runTranscodeCommand(_ args: [String], progressEmitter: SafariumProg
     let inURL = URL(fileURLWithPath: inputPath)
     let outURL = URL(fileURLWithPath: outputPath)
     try SafeFilePublisher.assertRegularReadableFile(inURL)
+
+    // Wave 9 Optical-Flow Retiming fast path (VTFrameRateConversionConfiguration)
+    if let rFPS = retimeFPS, supremacyMode == nil, !enableDenoise {
+        return try await withPlayableVideoURL(inputURL: inURL) { playableURL in
+            let rep = try await OpticalFlowRetimer.retime(
+                inputURL: playableURL,
+                outputURL: outURL,
+                targetFPS: rFPS,
+                codec: codec,
+                bitrate: explicitBitrate ?? 8_000_000,
+                overwrite: overwrite
+            )
+            return try encodeJSON(rep)
+        }
+    }
+
+    // Wave 9 Apple Silicon Supremacy path (CQF, Constrained VBR+VBV, True 2-Pass, Mini-CAE, Multi-Engine, Temporal Denoise, HDR/DV8.4, 10-bit HEVC, Pro Audio)
+    let wantSupremacy = (
+        supremacyMode != nil ||
+        cqfValue != nil ||
+        vbvMaxBitrate != nil ||
+        spatialAQ != nil ||
+        lookAheadFrames != nil ||
+        parallelEngines != nil ||
+        enableDenoise ||
+        hdrMastering != nil ||
+        proAudioCodec != nil ||
+        codec == .hevc10 || codec == .hevc42210 || codec == .hevc44410
+    ) && (maxBytes == nil && targetWidth == nil && targetHeight == nil && targetFPS == nil && quality == nil)
+
+    if wantSupremacy {
+        return try await withPlayableVideoURL(inputURL: inURL) { playableURL in
+            var encodeSourceURL = playableURL
+            let tmpRetimeDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("safarium-retime-\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: tmpRetimeDir) }
+            if let rFPS = retimeFPS {
+                try FileManager.default.createDirectory(at: tmpRetimeDir, withIntermediateDirectories: true)
+                let retimedURL = tmpRetimeDir.appendingPathComponent("retimed.mov")
+                _ = try await OpticalFlowRetimer.retime(
+                    inputURL: playableURL,
+                    outputURL: retimedURL,
+                    targetFPS: rFPS,
+                    codec: .proRes422HQ,
+                    overwrite: true
+                )
+                encodeSourceURL = retimedURL
+            }
+
+            let mode = supremacyMode ?? (cqfValue != nil ? .cqf : .highQuality)
+            let cfg = SupremacyTranscodeConfig(
+                codec: codec,
+                mode: mode,
+                bitrate: explicitBitrate ?? 6_000_000,
+                maxBitrate: vbvMaxBitrate,
+                vbvBufferSeconds: vbvBufferSec,
+                cqf: cqfValue ?? 0.55,
+                spatialAdaptiveQP: spatialAQ ?? true,
+                lookAheadFrames: lookAheadFrames ?? 16,
+                colorMastering: hdrMastering ?? .sdrBT709,
+                parallelEngines: parallelEngines,
+                audioCodec: proAudioCodec,
+                audioBitrate: audioBitrate,
+                overwrite: overwrite
+            )
+
+            var denoiseSession: TemporalDenoiseSession?
+            if enableDenoise {
+                let asset = AVURLAsset(url: encodeSourceURL)
+                if let vt = try? await asset.loadTracks(withMediaType: .video).first,
+                   let nat = try? await vt.load(.naturalSize) {
+                    let w = max(2, Int(abs(nat.width).rounded()))
+                    let h = max(2, Int(abs(nat.height).rounded()))
+                    let pixFmt: OSType = codec.defaultPixelFormat.is10Bit
+                        ? kCVPixelFormatType_32BGRA
+                        : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+                    denoiseSession = try? TemporalDenoiseSession(
+                        width: w,
+                        height: h,
+                        pixelFormat: pixFmt,
+                        strength: denoiseStrength
+                    )
+                }
+            }
+            defer { denoiseSession?.end() }
+
+            let preproc: ((CVPixelBuffer, CMTime, Bool) throws -> CVPixelBuffer)? = denoiseSession.map { ds in
+                { pb, pts, isCut in try ds.process(pb, pts: pts, isSceneCut: isCut) }
+            }
+            let report = try await VTMultiPassEncoder.encode(
+                inputURL: encodeSourceURL,
+                outputURL: outURL,
+                config: cfg,
+                framePreprocessor: preproc
+            )
+            return try encodeJSON(report)
+        }
+    }
 
     return try await withPlayableVideoURL(inputURL: inURL) { playableURL in
         let stage = try APFSAutoStage.makeSession(for: outURL, overwrite: overwrite)
@@ -3246,6 +3486,107 @@ private func runTranscodeCommand(_ args: [String], progressEmitter: SafariumProg
     }
 }
 
+private func runSpatialEncodeCommand(_ args: [String]) async throws -> Data {
+    try checkSubcommandHelp(args, command: "spatial-encode")
+    var leftPath: String?
+    var rightPath: String?
+    var outputPath: String?
+    var bitrate = 12_000_000
+    var tenBit = false
+    var hdr: ColorMasteringProfile = .sdrBT709
+    var fov = 63.4
+    var baselineMM = 64.0
+    var disparity: Int32 = 0
+    var heroLeft = true
+    var audioCodec: SafariumAudioCodec?
+    var overwrite = false
+    var i = 0
+    while i < args.count {
+        let a = args[i]
+        switch a {
+        case "--left": leftPath = try nextValue(args, index: &i, flag: a)
+        case "--right": rightPath = try nextValue(args, index: &i, flag: a)
+        case "-o", "--output", "--out": outputPath = try nextValue(args, index: &i, flag: a)
+        case "--bitrate": bitrate = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--10bit": tenBit = true
+        case "--hdr":
+            let raw = try nextValue(args, index: &i, flag: a)
+            guard let m = ColorMasteringProfile.parseCLI(raw) else {
+                throw CLIUsageError("unsupported --hdr '\(raw)'")
+            }
+            hdr = m
+        case "--fov": fov = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--baseline-mm": baselineMM = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--disparity": disparity = Int32(try parseInt(try nextValue(args, index: &i, flag: a), flag: a))
+        case "--hero-right": heroLeft = false
+        case "--audio-codec":
+            let raw = try nextValue(args, index: &i, flag: a)
+            guard let ac = SafariumAudioCodec.parseCLI(raw) else {
+                throw CLIUsageError("unsupported --audio-codec '\(raw)'")
+            }
+            audioCodec = ac
+        case "--overwrite": overwrite = true
+        default:
+            throw CLIUsageError("unknown option for spatial-encode: \(a)")
+        }
+        i += 1
+    }
+    guard let leftPath, let rightPath, let outputPath else {
+        throw CLIUsageError("spatial-encode requires --left <L>, --right <R>, and -o <output.mov>")
+    }
+    let cfg = MVHEVCEncodeConfig(
+        bitrate: bitrate,
+        tenBit: tenBit,
+        colorMastering: hdr,
+        horizontalFOVDegrees: fov,
+        baselineMillimeters: baselineMM,
+        disparityAdjustment: disparity,
+        heroLeftEye: heroLeft,
+        audioCodec: audioCodec,
+        overwrite: overwrite
+    )
+    let rep = try await MVHEVCSpatialEncoder.encodeStereo(
+        leftURL: URL(fileURLWithPath: leftPath),
+        rightURL: URL(fileURLWithPath: rightPath),
+        outputURL: URL(fileURLWithPath: outputPath),
+        config: cfg
+    )
+    return try encodeJSON(rep)
+}
+
+private func runAnalyzeShotsCommand(_ args: [String]) async throws -> Data {
+    try checkSubcommandHelp(args, command: "analyze-shots")
+    var inputPath: String?
+    var cutMAD = 26.0
+    var cutHist = 0.28
+    var minShotFrames = 12
+    var i = 0
+    while i < args.count {
+        let a = args[i]
+        switch a {
+        case "--cut-mad": cutMAD = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--cut-hist": cutHist = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--min-shot-frames": minShotFrames = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        default:
+            if a.hasPrefix("-") { throw CLIUsageError("unknown option for analyze-shots: \(a)") }
+            if inputPath == nil { inputPath = a } else { throw CLIUsageError("unexpected arg: \(a)") }
+        }
+        i += 1
+    }
+    guard let inputPath else {
+        throw CLIUsageError("analyze-shots requires <input>")
+    }
+    let rep = try await withPlayableVideoURL(inputURL: URL(fileURLWithPath: inputPath)) { playable in
+        try await MetalShotAnalyzer.analyze(
+            inputURL: playable,
+            cutThresholdMAD: cutMAD,
+            cutThresholdHist: cutHist,
+            minShotFrames: max(1, minShotFrames)
+        )
+    }
+    return try encodeJSON(rep)
+}
+
 private func runABGalleryCommand(_ args: [String]) async throws -> Data {
     try checkSubcommandHelp(args, command: "ab-gallery")
     var manifestPath: String?
@@ -3395,6 +3736,12 @@ private struct SafariumForgeCLI {
             case "transcode":
                 let out = try await runTranscodeCommand(rest, progressEmitter: progressEmitter)
                 FileHandle.standardOutput.write(out)
+            case "spatial-encode":
+                let out = try await runSpatialEncodeCommand(rest)
+                FileHandle.standardOutput.write(out)
+            case "analyze-shots":
+                let out = try await runAnalyzeShotsCommand(rest)
+                FileHandle.standardOutput.write(out)
             case "prism":
                 let out = try await runPrismCommand(rest, progressEmitter: progressEmitter)
                 FileHandle.standardOutput.write(out)
@@ -3437,13 +3784,5 @@ private struct SafariumForgeCLI {
 }
 
 private extension VideoCodec {
-    var cliName: String {
-        switch self {
-        case .h264: return "h264"
-        case .hevc: return "hevc"
-        case .hevcAlpha: return "hevc-alpha"
-        case .proRes422: return "prores422"
-        case .proRes4444: return "prores4444"
-        }
-    }
+    var cliName: String { cliDisplayName }
 }

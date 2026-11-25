@@ -9,7 +9,7 @@ Zero-dependency **Model Context Protocol (MCP)** `stdio` JSON-RPC 2.0 server (`b
 
 ---
 
-## Exposed Tools (12)
+## Exposed Tools (15)
 
 ### Fast Read-Only Tools (FIFO Bypass — Instant)
 
@@ -17,19 +17,22 @@ Zero-dependency **Model Context Protocol (MCP)** `stdio` JSON-RPC 2.0 server (`b
 |---|---|
 | `doctor` | Environment, worker, Apple-only `otool -L`, and queue health audit |
 | `status` | Live SF-VIDEO-1 FIFO queue status, active ticket, waiting jobs, and thermal state |
-| `capabilities` | Hardware capabilities (Metal GPU, ANE, VideoToolbox codecs, APFS `clonefile`, OS walls) |
+| `capabilities` | Hardware capabilities (Metal GPU, ANE, Media Engines, all 12 VideoToolbox codecs, VTFrameProcessor, AudioToolbox, APFS `clonefile`) |
 | `raster_info` | `libSafariumRaster.dylib` path, Apple-only linkage, ABI version, and symbol count |
 | `forge_schema` | Machine-readable JSON schemas (`all`, `recipe`, `subcommands`, `errors`) |
 | `forge_validate` | Validate a Forge recipe file or inline JSON object (with optional `--dry-run`) |
 | `probe_media` | Native AVFoundation media inspection (codecs, resolution, fps, duration, colorimetry) |
 | `cache_stats` | APFS copy-on-write incremental scene/shot cache statistics |
+| `analyze_shots` | Wave 9 Metal/GPU shot-cut, spatial/temporal complexity, and gradient banding-risk analyzer (Safarium Mini-CAE planner) |
 
-### Heavy Render & QA Tools (SF-VIDEO-1 FIFO Serialized)
+### Heavy Render, Encode & QA Tools (SF-VIDEO-1 FIFO Serialized)
 
 | Tool | Purpose |
 |---|---|
 | `forge_run` | Run a declarative SafariumForge JSON DAG recipe (`--progress jsonl`, `--json-errors`) |
-| `html_render` | Render HTML/CSS/SVG/WebGL2 deterministically via windowless `WKWebView` + `VideoToolbox` |
+| `html_render` | Render HTML/CSS/SVG/WebGL2 deterministically via windowless `WKWebView` + `VideoToolbox` (all 12 codecs, 10-bit P010/P210/P410, CQF, SpatialAQ, Dolby Vision 8.4/HDR10/HLG) |
+| `transcode_supremacy` | Wave 9 Apple Silicon hardware transcode: 10-bit HEVC (`4:2:0`/`4:2:2`/`4:4:4`), 6 ProRes tiers, SpatialAQ + LookAhead + VBV, CQF, **True 2-Pass `VTMultiPassStorage`**, **Mini-CAE** multi-engine adaptive encoding, zero-copy `VTFrameProcessor` denoise/retime, and HDR mastering |
+| `audio_encode` | Wave 9 Apple AudioToolbox mastering encoder (`aac-max`, `he-aac`, `he-aac-v2`, `alac`, `opus`, `apac`, `pcm16/24/32f`) |
 | `verify_media` | Zero-FFmpeg AVFoundation inspection or reference-vs-candidate parity comparison |
 | `qa_inspect` | Scene-cut/silence detection, perceptual MS-SSIM/CIEDE2000 comparison, Vision Thai OCR, and contact sheets |
 

@@ -12,29 +12,143 @@ public protocol FrameSink: AnyObject {
     func finish() async throws
 }
 
-public enum VideoCodec: String, CustomStringConvertible, Sendable {
-    case h264, hevc, hevcAlpha, proRes422, proRes4444
+public enum VideoCodec: String, CustomStringConvertible, Sendable, CaseIterable {
+    case h264
+    case hevc
+    case hevc10
+    case hevc42210
+    case hevc44410
+    case hevcAlpha
+    case proRes422Proxy
+    case proRes422LT
+    case proRes422
+    case proRes422HQ
+    case proRes4444
+    case proRes4444XQ
+
     public var description: String { rawValue }
+
+    public var isProRes: Bool {
+        switch self {
+        case .proRes422Proxy, .proRes422LT, .proRes422, .proRes422HQ, .proRes4444, .proRes4444XQ:
+            return true
+        default:
+            return false
+        }
+    }
+
+    public var isHEVC: Bool {
+        switch self {
+        case .hevc, .hevc10, .hevc42210, .hevc44410, .hevcAlpha:
+            return true
+        default:
+            return false
+        }
+    }
+
+    public var is10Bit: Bool {
+        switch self {
+        case .hevc10, .hevc42210, .hevc44410,
+             .proRes422Proxy, .proRes422LT, .proRes422, .proRes422HQ, .proRes4444, .proRes4444XQ:
+            return true
+        default:
+            return false
+        }
+    }
+
     public var avCodec: AVVideoCodecType {
         switch self {
         case .h264: return .h264
-        case .hevc: return .hevc
+        case .hevc, .hevc10, .hevc42210, .hevc44410: return .hevc
         case .hevcAlpha: return .hevcWithAlpha
+        case .proRes422Proxy: return .proRes422Proxy
+        case .proRes422LT: return .proRes422LT
         case .proRes422: return .proRes422
+        case .proRes422HQ: return .proRes422HQ
         case .proRes4444: return .proRes4444
+        case .proRes4444XQ: return AVVideoCodecType(rawValue: "ap4x")
         }
     }
-    public var fileType: AVFileType { (self == .h264 || self == .hevc) ? .mp4 : .mov }
-    public var fileExtension: String { (self == .h264 || self == .hevc) ? "mp4" : "mov" }
-    public var hasAlpha: Bool { self == .hevcAlpha || self == .proRes4444 }
+
+    public var cmCodecType: CMVideoCodecType {
+        switch self {
+        case .h264: return kCMVideoCodecType_H264
+        case .hevc, .hevc10, .hevc42210, .hevc44410: return kCMVideoCodecType_HEVC
+        case .hevcAlpha: return kCMVideoCodecType_HEVCWithAlpha
+        case .proRes422Proxy: return kCMVideoCodecType_AppleProRes422Proxy
+        case .proRes422LT: return kCMVideoCodecType_AppleProRes422LT
+        case .proRes422: return kCMVideoCodecType_AppleProRes422
+        case .proRes422HQ: return kCMVideoCodecType_AppleProRes422HQ
+        case .proRes4444: return kCMVideoCodecType_AppleProRes4444
+        case .proRes4444XQ: return kCMVideoCodecType_AppleProRes4444XQ
+        }
+    }
+
+    public var defaultProfileLevel: String? {
+        switch self {
+        case .hevc10: return kVTProfileLevel_HEVC_Main10_AutoLevel as String
+        case .hevc42210: return "HEVC_Main42210_AutoLevel"
+        case .hevc44410: return "HEVC_Main44410_AutoLevel"
+        default: return nil
+        }
+    }
+
+    public var fileType: AVFileType {
+        switch self {
+        case .h264, .hevc, .hevc10: return .mp4
+        case .hevc42210, .hevc44410, .hevcAlpha,
+             .proRes422Proxy, .proRes422LT, .proRes422, .proRes422HQ, .proRes4444, .proRes4444XQ:
+            return .mov
+        }
+    }
+
+    public var fileExtension: String { fileType == .mp4 ? "mp4" : "mov" }
+
+    public var hasAlpha: Bool {
+        self == .hevcAlpha || self == .proRes4444 || self == .proRes4444XQ
+    }
+
+    public var defaultPixelFormat: SinkPixelFormat {
+        switch self {
+        case .hevcAlpha, .proRes4444, .proRes4444XQ: return .bgra
+        case .hevc10: return .p010
+        case .hevc42210: return .p210
+        case .hevc44410: return .p410
+        default: return .nv12Left
+        }
+    }
+
+    public var cliDisplayName: String {
+        switch self {
+        case .h264: return "h264"
+        case .hevc: return "hevc"
+        case .hevc10: return "hevc-10bit"
+        case .hevc42210: return "hevc-422-10bit"
+        case .hevc44410: return "hevc-444-10bit"
+        case .hevcAlpha: return "hevc-alpha"
+        case .proRes422Proxy: return "prores422-proxy"
+        case .proRes422LT: return "prores422-lt"
+        case .proRes422: return "prores422"
+        case .proRes422HQ: return "prores422-hq"
+        case .proRes4444: return "prores4444"
+        case .proRes4444XQ: return "prores4444-xq"
+        }
+    }
 
     public static func parseCLI(_ s: String) -> VideoCodec? {
         switch s.lowercased() {
-        case "h264": return .h264
-        case "hevc": return .hevc
-        case "hevc-alpha", "hevcalpha": return .hevcAlpha
-        case "prores422": return .proRes422
-        case "prores4444": return .proRes4444
+        case "h264", "avc", "avc1": return .h264
+        case "hevc", "h265", "hvc1": return .hevc
+        case "hevc-10bit", "hevc10", "h265-10bit", "main10": return .hevc10
+        case "hevc-422-10bit", "hevc-422-10", "hevc42210", "hevc422", "hevc-422": return .hevc42210
+        case "hevc-444-10bit", "hevc-444-10", "hevc44410", "hevc444", "hevc-444": return .hevc44410
+        case "hevc-alpha", "hevcalpha", "hevc_alpha", "muxa": return .hevcAlpha
+        case "prores422-proxy", "prores422proxy", "prores-proxy", "prores_proxy", "apco": return .proRes422Proxy
+        case "prores422-lt", "prores422lt", "prores-lt", "prores_lt", "apcs": return .proRes422LT
+        case "prores422", "prores-422", "prores_422", "apcn": return .proRes422
+        case "prores422-hq", "prores422hq", "prores-hq", "prores_hq", "apch": return .proRes422HQ
+        case "prores4444", "prores-4444", "prores_4444", "ap4h": return .proRes4444
+        case "prores4444-xq", "prores4444xq", "prores-xq", "prores_xq", "ap4x": return .proRes4444XQ
         default: return nil
         }
     }
@@ -44,9 +158,172 @@ public enum SinkPixelFormat: String, Sendable {
     case bgra
     case nv12vImage
     case nv12Left
+    /// 10-bit 4:2:0 bi-planar video range (`x420` / P010LE).
+    case p010
+    /// 10-bit 4:2:2 bi-planar video range (`x422` / P210LE).
+    case p210
+    /// 10-bit 4:4:4 bi-planar video range (`x444` / P410LE).
+    case p410
+
+    public var isSubsampled420: Bool {
+        self == .nv12vImage || self == .nv12Left || self == .p010
+    }
+
+    public var isSubsampled422: Bool {
+        self == .p210
+    }
+
+    public var is10Bit: Bool {
+        self == .p010 || self == .p210 || self == .p410
+    }
+
+    public var cvPixelFormat: OSType {
+        switch self {
+        case .bgra: return kCVPixelFormatType_32BGRA
+        case .nv12vImage, .nv12Left: return kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        case .p010: return kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+        case .p210: return kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
+        case .p410: return kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange
+        }
+    }
 }
 
-/// Hardware encoder and buffer-pool tuning profile.
+/// Video color mastering & HDR transfer pipeline tag.
+public enum ColorMasteringProfile: String, Codable, Sendable, CaseIterable {
+    case sdrBT709 = "sdr"
+    case hdr10PQ = "hdr10"
+    case hlgBT2100 = "hlg"
+    case dolbyVision84 = "dv84"
+    case appleLog = "apple-log"
+    case appleLog2 = "apple-log2"
+
+    public var isHDR: Bool { self != .sdrBT709 }
+
+    public var isBT2020: Bool { self != .sdrBT709 }
+
+    public var avColorProperties: [String: Any] {
+        switch self {
+        case .sdrBT709:
+            return [
+                AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
+                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
+                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
+            ]
+        case .hdr10PQ:
+            return [
+                AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_2020,
+                AVVideoTransferFunctionKey: AVVideoTransferFunction_SMPTE_ST_2084_PQ,
+                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_2020,
+            ]
+        case .hlgBT2100, .dolbyVision84:
+            return [
+                AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_2020,
+                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_2100_HLG,
+                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_2020,
+            ]
+        case .appleLog, .appleLog2:
+            return [
+                AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_2020,
+                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_2100_HLG,
+                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_2020,
+            ]
+        }
+    }
+
+    public func tagPixelBuffer(_ pb: CVPixelBuffer) {
+        switch self {
+        case .sdrBT709:
+            CVBufferSetAttachment(pb, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)
+            CVBufferSetAttachment(pb, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2, .shouldPropagate)
+            CVBufferSetAttachment(pb, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate)
+        case .hdr10PQ:
+            CVBufferSetAttachment(pb, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_2020, .shouldPropagate)
+            CVBufferSetAttachment(pb, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ, .shouldPropagate)
+            CVBufferSetAttachment(pb, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_2020, .shouldPropagate)
+        case .hlgBT2100, .dolbyVision84:
+            CVBufferSetAttachment(pb, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_2020, .shouldPropagate)
+            CVBufferSetAttachment(pb, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_2100_HLG, .shouldPropagate)
+            CVBufferSetAttachment(pb, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_2020, .shouldPropagate)
+        case .appleLog:
+            CVBufferSetAttachment(pb, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_2020, .shouldPropagate)
+            CVBufferSetAttachment(pb, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_2100_HLG, .shouldPropagate)
+            CVBufferSetAttachment(pb, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_2020, .shouldPropagate)
+            CVBufferSetAttachment(pb, "LogTransferFunction" as CFString, "com.apple.rec2020.apple-log" as CFString, .shouldPropagate)
+        case .appleLog2:
+            CVBufferSetAttachment(pb, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_2020, .shouldPropagate)
+            CVBufferSetAttachment(pb, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_2100_HLG, .shouldPropagate)
+            CVBufferSetAttachment(pb, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_2020, .shouldPropagate)
+            CVBufferSetAttachment(pb, "LogTransferFunction" as CFString, "com.apple.apple-wide-gamut.apple-log" as CFString, .shouldPropagate)
+        }
+        CVBufferSetAttachment(pb, kCVImageBufferChromaLocationTopFieldKey, kCVImageBufferChromaLocation_Left, .shouldPropagate)
+    }
+
+    public static func parseCLI(_ s: String) -> ColorMasteringProfile? {
+        switch s.lowercased() {
+        case "sdr", "bt709", "rec709": return .sdrBT709
+        case "hdr10", "pq", "st2084": return .hdr10PQ
+        case "hlg", "bt2100": return .hlgBT2100
+        case "dv84", "dolby-vision", "dolbyvision", "dv": return .dolbyVision84
+        case "apple-log", "applelog": return .appleLog
+        case "apple-log2", "applelog2": return .appleLog2
+        default: return nil
+        }
+    }
+}
+
+/// Constrained VBR + VBV rate-control configuration (macOS 26+ VideoToolbox, falls back to AverageBitRate on macOS 14-15).
+public struct ConstrainedVBRConfig: Sendable, Equatable {
+    public var targetBitrate: Int
+    public var maxBitrate: Int
+    public var bufferDurationSeconds: Double
+    public var initialDelayPercentage: Double
+
+    public init(
+        targetBitrate: Int,
+        maxBitrate: Int? = nil,
+        bufferDurationSeconds: Double = 4.0,
+        initialDelayPercentage: Double = 90.0
+    ) {
+        self.targetBitrate = max(64_000, targetBitrate)
+        self.maxBitrate = max(self.targetBitrate, maxBitrate ?? Int(Double(self.targetBitrate) * 1.5))
+        self.bufferDurationSeconds = max(0.5, bufferDurationSeconds)
+        self.initialDelayPercentage = min(100.0, max(10.0, initialDelayPercentage))
+    }
+}
+
+/// Wrapper around macOS 15+ `VTHDRPerFrameMetadataGenerationSession` for live Dolby Vision Profile 8.4 dynamic metadata.
+public final class HDRDynamicMetadataGenerator: @unchecked Sendable {
+    private let sessionRef: AnyObject?
+
+    public init(fps: Float) {
+        #if compiler(>=6.0)
+        if #available(macOS 15.0, *) {
+            self.sessionRef = try? VTHDRPerFrameMetadataGenerationSession(
+                framesPerSecond: max(1.0, fps),
+                hdrFormats: [.dolbyVision]
+            )
+        } else {
+            self.sessionRef = nil
+        }
+        #else
+        self.sessionRef = nil
+        #endif
+    }
+
+    public var isAvailable: Bool { sessionRef != nil }
+
+    @discardableResult
+    public func attach(to pixelBuffer: CVPixelBuffer, sceneChange: Bool = false) -> Bool {
+        #if compiler(>=6.0)
+        if #available(macOS 15.0, *), let session = sessionRef as? VTHDRPerFrameMetadataGenerationSession {
+            return (try? session.attachMetadata(to: pixelBuffer, sceneChange: sceneChange)) != nil
+        }
+        #endif
+        return false
+    }
+}
+
+/// Hardware encoder and buffer-pool tuning profile (Wave 9 macOS 15-27 Apple Silicon unlocked).
 public struct EncoderProfile: Sendable {
     public var allowFrameReordering: Bool
     public var allowOpenGOP: Bool
@@ -57,6 +334,18 @@ public struct EncoderProfile: Sendable {
     public var maxKeyFrameIntervalDuration: Double?
     public var poolAllocationThreshold: Int?
     public var expectedSourceFrameRate: Int?
+    /// macOS 15+ `SpatialAdaptiveQPLevel`: `true` -> default (-1), `false` -> disabled (0), `nil` -> unset.
+    public var spatialAdaptiveQP: Bool?
+    /// Hardware perceptual quality optimization hint (`PerceptualQualityOptimization`) when supported.
+    public var perceptualQualityOptimization: Bool?
+    /// macOS 27+ `ConstantQualityFactor` (`0.0...1.0`); automatically falls back to `AVVideoQualityKey` on older macOS.
+    public var constantQualityFactor: Double?
+    /// macOS 26+ Constrained VBR + VBV rate control; automatically falls back to `AverageBitRate` on older macOS.
+    public var constrainedVBR: ConstrainedVBRConfig?
+    /// Color mastering & HDR metadata profile (defaults to SDR BT.709).
+    public var colorMastering: ColorMasteringProfile
+    /// Explicit VideoToolbox `ProfileLevel` string override (auto-populated for `hevc10`/`hevc42210`/`hevc44410`).
+    public var profileLevelOverride: String?
 
     public init(
         allowFrameReordering: Bool = true,
@@ -67,7 +356,13 @@ public struct EncoderProfile: Sendable {
         maxKeyFrameInterval: Int? = nil,
         maxKeyFrameIntervalDuration: Double? = nil,
         poolAllocationThreshold: Int? = nil,
-        expectedSourceFrameRate: Int? = nil
+        expectedSourceFrameRate: Int? = nil,
+        spatialAdaptiveQP: Bool? = nil,
+        perceptualQualityOptimization: Bool? = nil,
+        constantQualityFactor: Double? = nil,
+        constrainedVBR: ConstrainedVBRConfig? = nil,
+        colorMastering: ColorMasteringProfile = .sdrBT709,
+        profileLevelOverride: String? = nil
     ) {
         self.allowFrameReordering = allowFrameReordering
         self.allowOpenGOP = allowOpenGOP
@@ -78,6 +373,12 @@ public struct EncoderProfile: Sendable {
         self.maxKeyFrameIntervalDuration = maxKeyFrameIntervalDuration
         self.poolAllocationThreshold = poolAllocationThreshold
         self.expectedSourceFrameRate = expectedSourceFrameRate
+        self.spatialAdaptiveQP = spatialAdaptiveQP
+        self.perceptualQualityOptimization = perceptualQualityOptimization
+        self.constantQualityFactor = constantQualityFactor
+        self.constrainedVBR = constrainedVBR
+        self.colorMastering = colorMastering
+        self.profileLevelOverride = profileLevelOverride
     }
 
     public static let baseline = EncoderProfile()
@@ -91,6 +392,59 @@ public struct EncoderProfile: Sendable {
         prioritizeEncodingSpeed: true,
         poolAllocationThreshold: 2
     )
+
+    /// Wave 9 maximum-efficiency single-pass profile: B-frames + 16-frame lookahead + Spatial AQ + Perceptual Quality.
+    public static let supremacyQuality = EncoderProfile(
+        allowFrameReordering: true,
+        allowOpenGOP: true,
+        suggestedLookAheadFrameCount: 16,
+        maxFrameDelayCount: nil,
+        prioritizeEncodingSpeed: false,
+        spatialAdaptiveQP: true,
+        perceptualQualityOptimization: true
+    )
+
+    /// Wave 9 macOS 27 `ConstantQualityFactor` (`CQF`) + Spatial AQ + 8-frame lookahead profile.
+    public static func supremacyCQF(
+        _ factor: Double = 0.55,
+        colorMastering: ColorMasteringProfile = .sdrBT709
+    ) -> EncoderProfile {
+        EncoderProfile(
+            allowFrameReordering: true,
+            allowOpenGOP: true,
+            suggestedLookAheadFrameCount: 8,
+            maxFrameDelayCount: nil,
+            prioritizeEncodingSpeed: false,
+            spatialAdaptiveQP: true,
+            perceptualQualityOptimization: true,
+            constantQualityFactor: min(1.0, max(0.05, factor)),
+            colorMastering: colorMastering
+        )
+    }
+
+    /// Wave 9 macOS 26+ Constrained VBR + VBV + Spatial AQ + 16-frame lookahead profile.
+    public static func supremacyVBR(
+        targetBitrate: Int,
+        maxBitrate: Int? = nil,
+        bufferSeconds: Double = 4.0,
+        colorMastering: ColorMasteringProfile = .sdrBT709
+    ) -> EncoderProfile {
+        EncoderProfile(
+            allowFrameReordering: true,
+            allowOpenGOP: true,
+            suggestedLookAheadFrameCount: 16,
+            maxFrameDelayCount: nil,
+            prioritizeEncodingSpeed: false,
+            spatialAdaptiveQP: true,
+            perceptualQualityOptimization: true,
+            constrainedVBR: ConstrainedVBRConfig(
+                targetBitrate: targetBitrate,
+                maxBitrate: maxBitrate,
+                bufferDurationSeconds: bufferSeconds
+            ),
+            colorMastering: colorMastering
+        )
+    }
 }
 
 /// Mode C opt-in DOM/Canvas/WebGL/WAAPI/SMIL mutation probe for detecting static hold frames in HTML renders.
@@ -414,6 +768,7 @@ public final class AVAssetWriterSink: FrameSink {
     private let readyGate: InputReadyGate
     private let pixelFormat: SinkPixelFormat
     private let profile: EncoderProfile
+    private let hdrMetaGenerator: HDRDynamicMetadataGenerator?
     private var nv12Info: vImage_ARGBToYpCbCr?
     private var bgraScratch: [UInt8] = []
     private let scratchBandContext: CGContext?
@@ -423,20 +778,23 @@ public final class AVAssetWriterSink: FrameSink {
     private var finished = false
 
     /// - bitrate: average bits/s (H.264/HEVC); ignored for ProRes.
-    /// - quality: 0...1 constant quality (HEVC/HEVC-alpha); used instead of bitrate when set.
-    /// - pixelFormat: `.bgra`, `.nv12vImage`, or `.nv12Left`; defaults to `.bgra` when `codec.hasAlpha` else `.nv12Left` (Fix A 1-1-1 + Left siting).
-    /// - profile: encoder & pool backpressure settings (`.baseline` or `.lowRamClosedGOP`).
+    /// - quality: 0...1 quality (HEVC/HEVC-alpha/H.264); used instead of bitrate when set.
+    /// - pixelFormat: defaults to `codec.defaultPixelFormat` (`.bgra` for alpha/4444, `.p010`/`.p210`/`.p410` for 10-bit HEVC, `.nv12Left` for 8-bit).
+    /// - profile: encoder & pool backpressure settings (`.baseline`, `.lowRamClosedGOP`, `.supremacyQuality`, `.supremacyCQF(...)`, `.supremacyVBR(...)`).
     public init(url: URL, width: Int, height: Int, fps: Int, codec: VideoCodec,
                 bitrate: Int? = nil, quality: Double? = nil,
                 pixelFormat: SinkPixelFormat? = nil,
                 profile: EncoderProfile = .baseline,
                 encoderSpecification: [String: Any]? = nil) throws {
-        let resolvedPixelFormat = pixelFormat ?? (codec.hasAlpha ? .bgra : .nv12Left)
+        let resolvedPixelFormat = pixelFormat ?? codec.defaultPixelFormat
         guard width > 0, height > 0, width <= 8192, height <= 8192, width * height <= 33_554_432 else {
             throw SafariumError.encode("dimensions must be <= 8192 per side and 33554432 pixels, got \(width)x\(height)")
         }
-        if (resolvedPixelFormat == .nv12vImage || resolvedPixelFormat == .nv12Left) && (width % 2 != 0 || height % 2 != 0) {
+        if resolvedPixelFormat.isSubsampled420 && (width % 2 != 0 || height % 2 != 0) {
             throw SafariumError.encode("\(resolvedPixelFormat.rawValue) requires even dimensions, got \(width)x\(height)")
+        }
+        if resolvedPixelFormat.isSubsampled422 && (width % 2 != 0) {
+            throw SafariumError.encode("\(resolvedPixelFormat.rawValue) requires even width, got \(width)x\(height)")
         }
         if let b = bitrate, b <= 0 {
             throw SafariumError.encode("bitrate must be > 0")
@@ -444,13 +802,19 @@ public final class AVAssetWriterSink: FrameSink {
         if let q = quality, !q.isFinite || q <= 0 || q > 1.0 {
             throw SafariumError.encode("quality must be finite in (0, 1]")
         }
+        if let cqf = profile.constantQualityFactor, !cqf.isFinite || cqf <= 0 || cqf > 1.0 {
+            throw SafariumError.encode("constantQualityFactor must be finite in (0, 1]")
+        }
         guard let rate = Int32(exactly: fps), rate > 0 else { throw SafariumError.encode("fps must be a positive Int32") }
-        if (resolvedPixelFormat == .nv12vImage || resolvedPixelFormat == .nv12Left) && codec.hasAlpha {
+        if resolvedPixelFormat != .bgra && codec.hasAlpha {
             throw SafariumError.invalidState("\(resolvedPixelFormat.rawValue) pixel format does not support alpha codec \(codec)")
         }
         self.width = width; self.height = height; self.fps = rate
         self.pixelFormat = resolvedPixelFormat
         self.profile = profile
+        self.hdrMetaGenerator = (profile.colorMastering == .dolbyVision84)
+            ? HDRDynamicMetadataGenerator(fps: Float(fps))
+            : nil
         self.nv12Info = (resolvedPixelFormat == .nv12vImage) ? try Self.makeNV12Info() : nil
         self.scratchBandContext = (resolvedPixelFormat == .nv12Left) ? Self.makeScratchBandContext(width: width) : nil
 
@@ -462,11 +826,11 @@ public final class AVAssetWriterSink: FrameSink {
         )
         if let spec = encoderSpecification { requested[AVVideoEncoderSpecificationKey] = spec }
         // AVAssetWriterInput.init raises an uncatchable NSInvalidArgumentException when the encoder AVFoundation
-        // selects (e.g. software fallback while the HW encoder is busy) lacks a requested property. Validate first.
+        // selects (e.g. software fallback while the HW encoder is busy or older macOS SDK) lacks a requested property.
         let (settings, dropped) = try Self.resolveSupportedSettings(requested, writer: writer, codec: codec)
         droppedCompressionProperties = dropped
         if !dropped.isEmpty {
-            FileHandle.standardError.write(Data("safarium: warning: encoder for \(codec) does not support \(dropped.joined(separator: ", ")); dropped (encoded spec unchanged)\n".utf8))
+            FileHandle.standardError.write(Data("safarium: warning: encoder for \(codec) does not support \(dropped.joined(separator: ", ")); dropped/adapted (encoded spec unchanged)\n".utf8))
         }
         input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
         let exactScale = Self.exactTimeScale(fps: fps, fallback: rate)
@@ -487,17 +851,22 @@ public final class AVAssetWriterSink: FrameSink {
         readyGate = InputReadyGate(input: input, writer: writer)
     }
 
-    /// Compression properties dropped because the selected encoder rejects them (encoder hints only).
+    /// Compression properties dropped or adapted because the selected encoder/OS rejected them.
     public let droppedCompressionProperties: [String]
 
     /// Encoder hints that do not alter the encoded spec (rate/quality, GOP structure, colour, size): speed/latency
-    /// tuning only. Anything else unsupported is an error, never silently dropped.
+    /// & perceptual tuning only. Anything else unsupported is an error, never silently dropped.
     package static var droppableCompressionKeys: [String] {
-        var keys = [kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality as String]
+        var keys = [
+            "PerceptualQualityOptimization",
+            "SpatialAdaptiveQPLevel",
+            kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality as String,
+        ]
         #if compiler(>=6.0)
         if #available(macOS 15.0, *) { keys.append(kVTCompressionPropertyKey_SuggestedLookAheadFrameCount as String) }
         #endif
         keys.append(kVTCompressionPropertyKey_MaxFrameDelayCount as String)
+        keys.append("LogTransferFunction")
         return keys
     }
 
@@ -512,7 +881,8 @@ public final class AVAssetWriterSink: FrameSink {
         return keys
     }
 
-    /// Returns settings AVAssetWriterInput will accept (`canApply`), dropping only `droppableCompressionKeys`.
+    /// Returns settings AVAssetWriterInput will accept (`canApply`), gracefully adapting macOS 26/27 rate-control keys
+    /// on older OS releases and dropping only `droppableCompressionKeys`.
     package static func resolveSupportedSettings(
         _ settings: [String: Any], writer: AVAssetWriter, codec: VideoCodec,
         canApply: (([String: Any]) -> Bool)? = nil
@@ -521,6 +891,8 @@ public final class AVAssetWriterSink: FrameSink {
         var current = settings
         if check(current) { return (current, []) }
         var dropped: [String] = []
+
+        // First drop optional perceptual/speed hints.
         for key in droppableKeys(for: settings) {
             guard var props = current[AVVideoCompressionPropertiesKey] as? [String: Any], props[key] != nil else { continue }
             props[key] = nil
@@ -528,6 +900,30 @@ public final class AVAssetWriterSink: FrameSink {
             dropped.append(key)
             if check(current) { return (current, dropped) }
         }
+
+        // Adapt macOS 27 `ConstantQualityFactor` -> legacy `AVVideoQualityKey` if running on macOS 14-26.
+        if var props = current[AVVideoCompressionPropertiesKey] as? [String: Any],
+           let cqf = props["ConstantQualityFactor"] {
+            props["ConstantQualityFactor"] = nil
+            if props[AVVideoQualityKey] == nil { props[AVVideoQualityKey] = cqf }
+            current[AVVideoCompressionPropertiesKey] = props
+            dropped.append("ConstantQualityFactor->Quality")
+            if check(current) { return (current, dropped) }
+        }
+
+        // Adapt macOS 26 `VariableBitRate` + VBV -> `AVVideoAverageBitRateKey` if running on macOS 14-15.
+        if var props = current[AVVideoCompressionPropertiesKey] as? [String: Any],
+           let vbr = props["VariableBitRate"] {
+            props["VariableBitRate"] = nil
+            props["VBVMaxBitRate"] = nil
+            props["VBVBufferDuration"] = nil
+            props["VBVInitialDelayPercentage"] = nil
+            if props[AVVideoAverageBitRateKey] == nil { props[AVVideoAverageBitRateKey] = vbr }
+            current[AVVideoCompressionPropertiesKey] = props
+            dropped.append("VariableBitRate->AverageBitRate")
+            if check(current) { return (current, dropped) }
+        }
+
         throw SafariumError.encode("encoder for \(codec) rejects output settings even after dropping \(dropped)")
     }
 
@@ -541,8 +937,6 @@ public final class AVAssetWriterSink: FrameSink {
     }
 
     public static func exactTimeScale(fps: Int, fallback: Int32) -> Int32 {
-        // Preserve the conventional 600-tick grid when possible, but every frame boundary must be
-        // representable (e.g. 31 fps needs 1/31, not 19/600). Use the LCM when it fits CMTimeScale.
         var a = fps, b = 600
         while b != 0 { (a, b) = (b, a % b) }
         return Int32(exactly: (fps / a) * 600) ?? fallback
@@ -554,11 +948,26 @@ public final class AVAssetWriterSink: FrameSink {
     ) -> [String: Any] {
         var settings: [String: Any] = [AVVideoCodecKey: codec.avCodec, AVVideoWidthKey: width, AVVideoHeightKey: height]
         var props: [String: Any] = [:]
-        if codec != .proRes422 && codec != .proRes4444 {
-            if let q = quality { props[AVVideoQualityKey] = q }
-            else if codec == .hevcAlpha { props[AVVideoQualityKey] = 0.85 }
-            else if let b = bitrate { props[AVVideoAverageBitRateKey] = b }
+        if !codec.isProRes {
+            // Rate control priority: ConstantQualityFactor (macOS 27+) -> Constrained VBR (macOS 26+) -> legacy quality -> ABR.
+            if let cqf = profile.constantQualityFactor {
+                props["ConstantQualityFactor"] = cqf
+            } else if let vbr = profile.constrainedVBR {
+                props["VariableBitRate"] = vbr.targetBitrate
+                props["VBVMaxBitRate"] = vbr.maxBitrate
+                props["VBVBufferDuration"] = vbr.bufferDurationSeconds
+                props["VBVInitialDelayPercentage"] = vbr.initialDelayPercentage
+            } else if let q = quality {
+                props[AVVideoQualityKey] = q
+            } else if codec == .hevcAlpha {
+                props[AVVideoQualityKey] = 0.85
+            } else if let b = bitrate {
+                props[AVVideoAverageBitRateKey] = b
+            }
 
+            if let profLevel = profile.profileLevelOverride ?? codec.defaultProfileLevel {
+                props[AVVideoProfileLevelKey] = profLevel
+            }
             if let efr = profile.expectedSourceFrameRate {
                 props[AVVideoExpectedSourceFrameRateKey] = efr
             } else if profile.maxKeyFrameIntervalDuration == nil {
@@ -572,6 +981,12 @@ public final class AVAssetWriterSink: FrameSink {
             }
             if profile.prioritizeEncodingSpeed {
                 props[kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality as String] = true
+            }
+            if let aq = profile.spatialAdaptiveQP {
+                props["SpatialAdaptiveQPLevel"] = aq ? -1 : 0
+            }
+            if let pqo = profile.perceptualQualityOptimization {
+                props["PerceptualQualityOptimization"] = pqo
             }
             if let kfi = profile.maxKeyFrameInterval {
                 props[AVVideoMaxKeyFrameIntervalKey] = kfi
@@ -593,25 +1008,28 @@ public final class AVAssetWriterSink: FrameSink {
                 props[kVTCompressionPropertyKey_TargetQualityForAlpha as String] = quality ?? 0.90
                 props[kVTCompressionPropertyKey_AlphaChannelMode as String] = kVTAlphaChannelMode_PremultipliedAlpha
             }
+            if profile.colorMastering.isHDR {
+                props[kVTCompressionPropertyKey_HDRMetadataInsertionMode as String] = kVTHDRMetadataInsertionMode_Auto as String
+                if profile.colorMastering == .dolbyVision84 {
+                    props[kVTCompressionPropertyKey_PreserveDynamicHDRMetadata as String] = true
+                }
+                if profile.colorMastering == .appleLog {
+                    props["LogTransferFunction"] = "com.apple.rec2020.apple-log"
+                } else if profile.colorMastering == .appleLog2 {
+                    props["LogTransferFunction"] = "com.apple.apple-wide-gamut.apple-log"
+                }
+            }
         }
         if !props.isEmpty { settings[AVVideoCompressionPropertiesKey] = props }
-        // Tag the colour pipeline (BT.709 1-1-1).
-        settings[AVVideoColorPropertiesKey] = [
-            AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
-            AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
-            AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
-        ]
+        settings[AVVideoColorPropertiesKey] = profile.colorMastering.avColorProperties
         return settings
     }
 
     public static func pixelBufferAttributes(
         width: Int, height: Int, pixelFormat: SinkPixelFormat, allocationThreshold: Int? = nil
     ) -> [String: Any] {
-        let cvFormat: OSType = (pixelFormat == .nv12vImage || pixelFormat == .nv12Left)
-            ? kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-            : kCVPixelFormatType_32BGRA
         var attrs: [String: Any] = [
-            kCVPixelBufferPixelFormatTypeKey as String: cvFormat,
+            kCVPixelBufferPixelFormatTypeKey as String: pixelFormat.cvPixelFormat,
             kCVPixelBufferWidthKey as String: width,
             kCVPixelBufferHeightKey as String: height,
             kCVPixelBufferBytesPerRowAlignmentKey as String: 64,
@@ -674,19 +1092,173 @@ public final class AVAssetWriterSink: FrameSink {
         try writeNV12(frame, into: pb, width: width, height: height, info: &info, bgraScratch: &scratch)
     }
 
+    /// Converts 8-bit BGRA pixels into 10-bit bi-planar video-range YCbCr (`p010` 4:2:0, `p210` 4:2:2, or `p410` 4:4:4)
+    /// using BT.709 or BT.2020 matrix and subtle 4x4 Bayer ordered dithering to eliminate 8-bit gradient banding.
+    public static func convertBGRATo10BitBiPlanar(
+        bgra: UnsafeRawPointer,
+        bgraBytesPerRow: Int,
+        into pb: CVPixelBuffer,
+        width: Int,
+        height: Int,
+        pixelFormat: SinkPixelFormat,
+        colorMastering: ColorMasteringProfile = .sdrBT709
+    ) throws {
+        guard pixelFormat.is10Bit else {
+            throw SafariumError.encode("convertBGRATo10BitBiPlanar requires 10-bit pixelFormat, got \(pixelFormat)")
+        }
+        guard CVPixelBufferLockBaseAddress(pb, []) == kCVReturnSuccess else {
+            throw SafariumError.encode("failed to lock 10-bit destination pixel buffer")
+        }
+        defer { _ = CVPixelBufferUnlockBaseAddress(pb, []) }
+        guard let yBase = CVPixelBufferGetBaseAddressOfPlane(pb, 0),
+              let uvBase = CVPixelBufferGetBaseAddressOfPlane(pb, 1) else {
+            throw SafariumError.encode("missing 10-bit pixel buffer planes")
+        }
+        let yStride = CVPixelBufferGetBytesPerRowOfPlane(pb, 0) / 2
+        let uvStride = CVPixelBufferGetBytesPerRowOfPlane(pb, 1) / 2
+        let yPtr = yBase.assumingMemoryBound(to: UInt16.self)
+        let uvPtr = uvBase.assumingMemoryBound(to: UInt16.self)
+        let src = bgra.assumingMemoryBound(to: UInt8.self)
+
+        // ITU-R BT.709 vs BT.2020 limited-range 10-bit coefficients (Y in [64, 940], Cb/Cr in [64, 960], << 6 for P010/P210/P410 MSB layout).
+        let kr: Float = colorMastering.isBT2020 ? 0.2627 : 0.2126
+        let kb: Float = colorMastering.isBT2020 ? 0.0593 : 0.0722
+        let kg: Float = 1.0 - kr - kb
+        let yScale: Float = 876.0 / 255.0
+        let cScale: Float = 896.0 / 255.0
+        let cbNorm: Float = 0.5 / (1.0 - kb)
+        let crNorm: Float = 0.5 / (1.0 - kr)
+
+        // Subtle 4x4 Bayer ordered dither in [-0.5, +0.5) 10-bit steps to smooth 8-bit gradients cleanly.
+        let bayer4: [Float] = [
+            -0.46875,  0.03125, -0.34375,  0.15625,
+             0.28125, -0.21875,  0.40625, -0.09375,
+            -0.28125,  0.21875, -0.40625,  0.09375,
+             0.46875, -0.03125,  0.34375, -0.15625,
+        ]
+
+        @inline(__always)
+        func clamp10(_ v: Float) -> UInt16 {
+            let iv = Int(v.rounded())
+            let c = max(64, min(960, iv))
+            return UInt16(c << 6)
+        }
+
+        // Plane 0: Full-resolution 10-bit Y with ordered dithering.
+        for row in 0..<height {
+            let sRow = src.advanced(by: row * bgraBytesPerRow)
+            let dRow = yPtr.advanced(by: row * yStride)
+            let by = (row & 3) << 2
+            for x in 0..<width {
+                let off = x << 2
+                let b = Float(sRow[off])
+                let g = Float(sRow[off + 1])
+                let r = Float(sRow[off + 2])
+                let luma = kr * r + kg * g + kb * b
+                let dither = bayer4[by | (x & 3)]
+                let y10 = 64.0 + luma * yScale + dither
+                dRow[x] = clamp10(min(940.0, max(64.0, y10)))
+            }
+        }
+
+        // Plane 1: Interleaved 10-bit Cb/Cr according to chroma subsampling (4:2:0 / 4:2:2 / 4:4:4).
+        switch pixelFormat {
+        case .p010:
+            let ch = height / 2
+            let cw = width / 2
+            for cy in 0..<ch {
+                let r0 = src.advanced(by: (cy * 2) * bgraBytesPerRow)
+                let r1 = src.advanced(by: (cy * 2 + 1) * bgraBytesPerRow)
+                let uvRow = uvPtr.advanced(by: cy * uvStride)
+                for cx in 0..<cw {
+                    let x0 = (cx * 2) << 2
+                    let x1 = x0 + 4
+                    // Left-sited 4:2:0 average (2x2 box for stability).
+                    let b = (Float(r0[x0]) + Float(r0[x1]) + Float(r1[x0]) + Float(r1[x1])) * 0.25
+                    let g = (Float(r0[x0 + 1]) + Float(r0[x1 + 1]) + Float(r1[x0 + 1]) + Float(r1[x1 + 1])) * 0.25
+                    let r = (Float(r0[x0 + 2]) + Float(r0[x1 + 2]) + Float(r1[x0 + 2]) + Float(r1[x1 + 2])) * 0.25
+                    let luma = kr * r + kg * g + kb * b
+                    let cb = 512.0 + (b - luma) * cbNorm * cScale
+                    let cr = 512.0 + (r - luma) * crNorm * cScale
+                    uvRow[cx * 2] = clamp10(cb)
+                    uvRow[cx * 2 + 1] = clamp10(cr)
+                }
+            }
+        case .p210:
+            let cw = width / 2
+            for row in 0..<height {
+                let r0 = src.advanced(by: row * bgraBytesPerRow)
+                let uvRow = uvPtr.advanced(by: row * uvStride)
+                for cx in 0..<cw {
+                    let x0 = (cx * 2) << 2
+                    let x1 = x0 + 4
+                    let b = (Float(r0[x0]) + Float(r0[x1])) * 0.5
+                    let g = (Float(r0[x0 + 1]) + Float(r0[x1 + 1])) * 0.5
+                    let r = (Float(r0[x0 + 2]) + Float(r0[x1 + 2])) * 0.5
+                    let luma = kr * r + kg * g + kb * b
+                    let cb = 512.0 + (b - luma) * cbNorm * cScale
+                    let cr = 512.0 + (r - luma) * crNorm * cScale
+                    uvRow[cx * 2] = clamp10(cb)
+                    uvRow[cx * 2 + 1] = clamp10(cr)
+                }
+            }
+        case .p410:
+            for row in 0..<height {
+                let r0 = src.advanced(by: row * bgraBytesPerRow)
+                let uvRow = uvPtr.advanced(by: row * uvStride)
+                for x in 0..<width {
+                    let off = x << 2
+                    let b = Float(r0[off])
+                    let g = Float(r0[off + 1])
+                    let r = Float(r0[off + 2])
+                    let luma = kr * r + kg * g + kb * b
+                    let cb = 512.0 + (b - luma) * cbNorm * cScale
+                    let cr = 512.0 + (r - luma) * crNorm * cScale
+                    uvRow[x * 2] = clamp10(cb)
+                    uvRow[x * 2 + 1] = clamp10(cr)
+                }
+            }
+        default:
+            break
+        }
+        colorMastering.tagPixelBuffer(pb)
+    }
+
+    /// Converts a `CVPixelBuffer` (BGRA) into a 10-bit bi-planar `CVPixelBuffer` (`p010`/`p210`/`p410`).
+    public static func convertBGRAPixelBufferTo10Bit(
+        _ srcBGRA: CVPixelBuffer,
+        into dst10Bit: CVPixelBuffer,
+        pixelFormat: SinkPixelFormat,
+        colorMastering: ColorMasteringProfile = .sdrBT709
+    ) throws {
+        guard CVPixelBufferLockBaseAddress(srcBGRA, .readOnly) == kCVReturnSuccess else {
+            throw SafariumError.encode("failed to lock BGRA source pixel buffer")
+        }
+        defer { _ = CVPixelBufferUnlockBaseAddress(srcBGRA, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(srcBGRA) else {
+            throw SafariumError.encode("missing BGRA base address")
+        }
+        try convertBGRATo10BitBiPlanar(
+            bgra: base,
+            bgraBytesPerRow: CVPixelBufferGetBytesPerRow(srcBGRA),
+            into: dst10Bit,
+            width: CVPixelBufferGetWidth(dst10Bit),
+            height: CVPixelBufferGetHeight(dst10Bit),
+            pixelFormat: pixelFormat,
+            colorMastering: colorMastering
+        )
+    }
+
     public static func allocateStandalonePixelBuffer(
         width: Int, height: Int, pixelFormat: SinkPixelFormat
     ) throws -> CVPixelBuffer {
-        let cvFormat: OSType = (pixelFormat == .nv12vImage || pixelFormat == .nv12Left)
-            ? kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-            : kCVPixelFormatType_32BGRA
         let attrs: [String: Any] = [
             kCVPixelBufferBytesPerRowAlignmentKey as String: 64,
             kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any],
             kCVPixelBufferMetalCompatibilityKey as String: true,
         ]
         var pb: CVPixelBuffer?
-        let st = CVPixelBufferCreate(kCFAllocatorDefault, width, height, cvFormat, attrs as CFDictionary, &pb)
+        let st = CVPixelBufferCreate(kCFAllocatorDefault, width, height, pixelFormat.cvPixelFormat, attrs as CFDictionary, &pb)
         guard st == kCVReturnSuccess, let pb else {
             throw SafariumError.encode("CVPixelBufferCreate standalone failed (\(st))")
         }
@@ -707,14 +1279,42 @@ public final class AVAssetWriterSink: FrameSink {
         switch pixelFormat {
         case .bgra:
             try frame.draw(into: buf, width: width, height: height)
+            profile.colorMastering.tagPixelBuffer(buf)
         case .nv12vImage:
             guard var info = nv12Info else { throw SafariumError.invalidState("missing NV12 converter") }
             try Self.writeNV12(frame, into: buf, width: width, height: height, info: &info, bgraScratch: &bgraScratch)
             nv12Info = info
+            profile.colorMastering.tagPixelBuffer(buf)
         case .nv12Left:
             try SafariumAccelerate.convertBGRAToNV12BT709LeftBanded(
                 snapshot: frame, scratchBand: scratchBandContext, into: buf, width: width, height: height
             )
+            profile.colorMastering.tagPixelBuffer(buf)
+        case .p010, .p210, .p410:
+            let borrowed = try frame.borrowCanonicalBGRABytes(width: width, height: height) { raw, stride in
+                try Self.convertBGRATo10BitBiPlanar(
+                    bgra: raw, bgraBytesPerRow: stride, into: buf,
+                    width: width, height: height, pixelFormat: pixelFormat,
+                    colorMastering: profile.colorMastering
+                )
+                return true
+            } ?? false
+            if !borrowed {
+                let stride = width * 4
+                let needed = stride * height
+                if bgraScratch.count < needed { bgraScratch = [UInt8](repeating: 0, count: needed) }
+                try bgraScratch.withUnsafeMutableBytes { raw in
+                    try frame.drawBGRAInto(baseAddress: raw.baseAddress!, width: width, height: height, stride: stride)
+                    try Self.convertBGRATo10BitBiPlanar(
+                        bgra: raw.baseAddress!, bgraBytesPerRow: stride, into: buf,
+                        width: width, height: height, pixelFormat: pixelFormat,
+                        colorMastering: profile.colorMastering
+                    )
+                }
+            }
+        }
+        if let hdrMetaGenerator {
+            _ = hdrMetaGenerator.attach(to: buf, sceneChange: false)
         }
     }
 

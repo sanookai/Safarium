@@ -507,7 +507,7 @@ private final class PrismDualOutputSink {
                 height: height,
                 fps: fps,
                 codec: primaryCodec,
-                bitrate: primaryCodec == .proRes422 || primaryCodec == .proRes4444 ? nil : bitrate,
+                bitrate: primaryCodec.isProRes ? nil : bitrate,
                 quality: quality,
                 pixelFormat: pFmt,
                 profile: .lowRamClosedGOP
@@ -521,7 +521,7 @@ private final class PrismDualOutputSink {
                     height: height,
                     fps: fps,
                     codec: sCodec,
-                    bitrate: sCodec == .proRes422 || sCodec == .proRes4444 ? nil : bitrate,
+                    bitrate: sCodec.isProRes ? nil : bitrate,
                     quality: quality,
                     pixelFormat: sFmt!,
                     profile: .lowRamClosedGOP
@@ -670,6 +670,15 @@ private final class PrismDualOutputSink {
                     into: dstPB,
                     width: width,
                     height: height
+                )
+            case .p010, .p210, .p410:
+                try AVAssetWriterSink.convertBGRATo10BitBiPlanar(
+                    bgra: srcBase,
+                    bgraBytesPerRow: srcStride,
+                    into: dstPB,
+                    width: width,
+                    height: height,
+                    pixelFormat: pixelFormat
                 )
             }
         }

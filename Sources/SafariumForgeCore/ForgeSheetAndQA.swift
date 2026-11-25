@@ -1914,6 +1914,17 @@ public final class ForgeDualTeeSession {
                         bgra: raw.baseAddress!, bgraBytesPerRow: bgraStride, into: pb, width: w, height: h
                     )
                 }
+            case .p010, .p210, .p410:
+                try bgraScratch.withUnsafeBytes { raw in
+                    try AVAssetWriterSink.convertBGRATo10BitBiPlanar(
+                        bgra: raw.baseAddress!,
+                        bgraBytesPerRow: bgraStride,
+                        into: pb,
+                        width: w,
+                        height: h,
+                        pixelFormat: config.primaryPixelFormat
+                    )
+                }
             }
         }
 

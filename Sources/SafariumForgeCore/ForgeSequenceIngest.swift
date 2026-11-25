@@ -464,6 +464,17 @@ public enum ForgeSequenceIngest {
             nv12Info = info
         case .bgra:
             break
+        case .p010, .p210, .p410:
+            try await sink.append { dstPB in
+                try AVAssetWriterSink.convertBGRATo10BitBiPlanar(
+                    bgra: srcBase,
+                    bgraBytesPerRow: srcStride,
+                    into: dstPB,
+                    width: width,
+                    height: height,
+                    pixelFormat: pixelFormat
+                )
+            }
         }
     }
 

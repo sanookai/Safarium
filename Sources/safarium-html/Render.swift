@@ -302,16 +302,34 @@ func captureAndEncode(
 
     // Single-pass AVAssetWriter setup
     try? FileManager.default.removeItem(at: outputURL)
-    let writer = try AVAssetWriter(url: outputURL, fileType: o.codec.fileType)
+    let outFileType: AVFileType = outputURL.pathExtension.lowercased() == "mov" ? .mov : o.codec.fileType
+    let writer = try AVAssetWriter(url: outputURL, fileType: outFileType)
     guard let rate = Int32(exactly: o.fps) else { throw WorkerError("fps must fit Int32") }
     let exactScale = AVAssetWriterSink.exactTimeScale(fps: o.fps, fallback: rate)
     writer.movieTimeScale = exactScale
 
-    let encProfile: EncoderProfile = o.lowRam ? .lowRamClosedGOP : .baseline
-    let vSettings = AVAssetWriterSink.buildVideoSettings(
+    var encProfile: EncoderProfile
+    if let cqf = o.cqf {
+        encProfile = .supremacyCQF(cqf, colorMastering: o.colorMastering)
+    } else if o.highQuality {
+        encProfile = .supremacyQuality
+        encProfile.colorMastering = o.colorMastering
+    } else if o.lowRam {
+        encProfile = .lowRamClosedGOP
+        encProfile.colorMastering = o.colorMastering
+    } else {
+        encProfile = .baseline
+        encProfile.colorMastering = o.colorMastering
+    }
+    if o.spatialAQ {
+        encProfile.spatialAdaptiveQP = true
+        encProfile.perceptualQualityOptimization = true
+    }
+    let rawSettings = AVAssetWriterSink.buildVideoSettings(
         width: o.width, height: o.height, fps: o.fps,
         codec: o.codec, bitrate: o.bitrate, quality: o.quality, profile: encProfile
     )
+    let vSettings = try AVAssetWriterSink.resolveSupportedSettings(rawSettings, writer: writer, codec: o.codec).settings
     let vi = AVAssetWriterInput(mediaType: .video, outputSettings: vSettings)
     vi.mediaTimeScale = exactScale
     vi.expectsMediaDataInRealTime = false
@@ -326,6 +344,7 @@ func captureAndEncode(
     var nv12Info = o.pixelFormat == .nv12vImage ? try AVAssetWriterSink.makeNV12Info() : nil
     var bgraScratch: [UInt8] = []
     let scratchBand = (o.pixelFormat == .nv12Left) ? AVAssetWriterSink.makeScratchBandContext(width: o.width) : nil
+    let dvGen = (o.colorMastering == .dolbyVision84) ? HDRDynamicMetadataGenerator(fps: Float(o.fps)) : nil
 
     var chunks: PCMChunks?
     var ai: AVAssetWriterInput?
@@ -490,8 +509,28 @@ func captureAndEncode(
                     try SafariumAccelerate.convertBGRAToNV12BT709LeftBanded(
                         snapshot: frame, scratchBand: scratchBand, into: buf, width: o.width, height: o.height
                     )
+                case .p010, .p210, .p410:
+                    let rawBGRA = try frame.checkedBGRA()
+                    try rawBGRA.withUnsafeBytes { ptr in
+                        guard let base = ptr.baseAddress else { throw WorkerError("missing snapshot BGRA pointer") }
+                        try AVAssetWriterSink.convertBGRATo10BitBiPlanar(
+                            bgra: base,
+                            bgraBytesPerRow: o.width * 4,
+                            into: buf,
+                            width: o.width,
+                            height: o.height,
+                            pixelFormat: o.pixelFormat,
+                            colorMastering: o.colorMastering
+                        )
+                    }
                 case .bgra:
                     try frame.draw(into: buf, width: o.width, height: o.height)
+                }
+                if o.colorMastering != .sdrBT709 {
+                    o.colorMastering.tagPixelBuffer(buf)
+                }
+                if let dvGen {
+                    _ = dvGen.attach(to: buf, sceneChange: index == 0)
                 }
                 let pts = CMTime(value: Int64(index), timescale: rate)
                 let appended: Bool

@@ -261,6 +261,7 @@ private final class StreamingAudioSink {
                 AVSampleRateKey: sampleRate,
                 AVNumberOfChannelsKey: channels,
                 AVEncoderBitRateKey: bitrate,
+                AVEncoderAudioQualityKey: AVAudioQuality.max.rawValue,
             ]
             guard writer.canApply(outputSettings: aacSettings, forMediaType: .audio) else {
                 throw SafariumError.encode("Apple AAC cannot encode \(sampleRate) Hz \(channels) ch at \(bitrate) bps")

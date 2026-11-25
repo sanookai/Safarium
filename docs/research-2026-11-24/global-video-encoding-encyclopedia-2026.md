@@ -210,45 +210,54 @@ Apple Silicon's **Media Engine + VideoToolbox** is a fixed-function silicon ASIC
 
 ---
 
-## 7. Actionable macOS Apple Silicon Upgrade Roadmap for Safarium (Wave 9 — 0% FFmpeg!)
+## 7. Actionable macOS Apple Silicon Upgrade Roadmap for Safarium (Wave 9 — 0% FFmpeg!) — **SHIPPED & BENCHMARKED (2026-11-25)**
 
-Based on auditing Safarium's actual Swift codebase (`Sources/SafariumCore/FrameSink.swift`, `Sources/SafariumForgeCore/ForgeMetalFilters.swift`, `Sources/SafariumForgeCore/ForgeAudioDSP.swift`) against the 2025–2026 global state of the art, here are **6 high-ROI, 100% Apple-native upgrades** we can build to close the BD-Rate gap and give Safarium capabilities even FFmpeg's `*_videotoolbox` wrappers lack:
+> **Status (2026-11-25):** All **6 pillars below are now implemented, unit-tested (12/12 Wave 9 Swift tests + 15-tool `safarium-mcp`), verified Apple-only (`otool -L` `non_apple = []`), and empirically benchmarked on Apple M5** against Wave 8 Legacy VT, FFmpeg `hevc_videotoolbox`, CPU `libx265` 10-bit 2-pass, and CPU `libx264` (full dataset: [`bench/experiments/2026-11-25-wave9-supremacy/results.json`](../../bench/experiments/2026-11-25-wave9-supremacy/results.json)).
 
-### Tier 1 — Immediate BD-Rate & Quality Leap (Closes Major Gap vs. `x264` / `x265`)
+### Empirical Apple M5 Results (1080p30 9s 3-Shot Stress Master, Target 3.5 Mbps)
 
-1. **Modern VideoToolbox Rate-Control Stack (macOS 15 → 26 → 27) in `FrameSink.swift`:**
-   - **macOS 15+:** Enable `kVTCompressionPropertyKey_SpatialAdaptiveQPLevel = kVTQPModulationLevel_Default` (disable only in low-latency mode) and default `kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality = false` for offline renders.
-   - **macOS 26+:** Query `kVTCompressionPropertyKey_SupportedPresetDictionaries` and apply `kVTCompressionPreset_HighQuality` (plus `Balanced`/`HighSpeed` profiles); add true **Constrained VBR** (`kVTCompressionPropertyKey_VariableBitRate` + `VBVMaxBitRate` + `VBVBufferDuration`).
-   - **macOS 27+:** Route quality-mode exports to **`kVTCompressionPropertyKey_ConstantQualityFactor`** (`0.0–1.0`) + **`kVTCompressionPreset_ConsistentQuality`** (replacing legacy `kVTCompressionPropertyKey_Quality` to eliminate medium/high-Q softness).
-   - **Default 10-bit HEVC (`Main10`) even for 8-bit SDR:** Free 5–7% BD-Rate savings and eliminates gradient banding on CSS/WebKit/SVG animations.
+| Encoder / Mode | Wall Time | Speed | Bitrate | MS-SSIM ↑ | ΔE00 Mean ↓ | ΔE00 p95 ↓ | ANE Dist ↓ | PQ Score ↑ |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| **Safarium W9 — 10-bit CQF `0.62` + SpatialAQ** | **2.19 s** | **4.11× RT** | 4.89 Mbps | **0.9987** | 0.88 | 6.34 | **0.043** | **91.4** |
+| **Safarium W9 — True 2-Pass (`VTMultiPassStorage` + Shot-Cut IDR)** | **3.87 s** | **2.32× RT** | **3.55 Mbps** | **0.9939** | 1.01 | 6.71 | **0.098** | **90.2** |
+| **Safarium W9 — 10-bit HQ (`SpatialAQ + LookAhead + VBV`)** | **2.25 s** | **4.01× RT** | 3.72 Mbps | **0.9922** | 0.95 | 6.52 | **0.097** | **90.1** |
+| **Safarium W9 — Mini-CAE (Per-Shot Adaptive, 3 chunks)** | **2.07 s** | **4.35× RT** | 3.90 Mbps | **0.9826** | 0.94 | 6.57 | 0.157 | **89.4** |
+| **Safarium W9 — `VTTemporalNoiseFilter` (AFBC HW) + Mini-CAE** | 5.14 s | 1.75× RT | 3.79 Mbps | 0.9754* | 1.03 | 6.70 | 0.216 | 88.4 |
+| *Safarium W8 Legacy VT (8-bit HEVC 1-Pass Fast)* | 0.96 s | 9.34× RT | 3.52 Mbps | 0.9650 | 1.14 | 9.72 | 0.359 | 84.4 |
+| *Reference FFmpeg `hevc_videotoolbox` (default `3.5M`)* | 1.68 s | 5.35× RT | 3.50 Mbps | 0.9741 | 1.09 | 9.49 | 0.246 | 87.6 |
+| *Reference CPU `libx265` 10-bit (`medium`, `3.5M` 2-pass)* | 26.85 s | 0.34× RT | 3.79 Mbps | 0.9683 | **0.78** | **3.17** | 0.217 | 91.2 |
+| *Reference CPU `libx264` (`medium`, `3.5M` 1-pass)* | 5.08 s | 1.77× RT | 4.79 Mbps | 0.9644 | 1.08 | 8.74 | 0.399 | 84.5 |
 
-2. **True Native Two-Pass VideoToolbox (`VTMultiPassStorage`):**
-   - Unlike FFmpeg's `hevc_videotoolbox` (stuck on 1-pass only), Safarium calls VideoToolbox directly and can unlock **`VTMultiPassStorageCreate` → `VTCompressionSessionBeginPass` / `EndPass` / `GetTimeRangesForNextPass` + `VTFrameSilo`** (or `AVAssetWriterInput.performsMultiPassEncodingIfSupported = true`) backed by an APFS sparse temp file.
-   - *Rule:* Automatically disable `SuggestedLookAheadFrameCount` when `MultiPassStorage` is attached (they are mutually exclusive in VideoToolbox).
+- **Honest Takeaway:** Wave 9 True 2-Pass (`3.55 Mbps`) beats FFmpeg `hevc_videotoolbox` by **+0.0198 MS-SSIM** & **-29.3% ΔE00 p95**, beats `libx264` across every metric, and beats `libx265` 10-bit 2-pass on speed (**`6.94×` faster**), bitrate (-6.3%), and MS-SSIM (**+0.0256**); `libx265` 2-pass still keeps lower worst-case chroma-edge ΔE00 p95 (`3.17` vs `6.71`).
 
-### Tier 2 — Apple Silicon Exclusive Speed & Perceptual Superpowers
+### Tier 1 — Immediate BD-Rate & Quality Leap ✅ SHIPPED
 
-3. **"Safarium Mini-CAE" (Metal Shot-Adaptive Encoding + Multi-Engine Max/Ultra Parallelism):**
-   - Run a tiny zero-copy Metal compute shader during frame capture/composite (luma histogram diff + spatial variance + temporal SAD, or macOS 26 `VTMotionEstimationSession`) to detect exact **shot cuts** and classify shot complexity (Static UI / Text / Smooth Gradient / High-Motion / Grain).
-   - Inject exact keyframes at scene cuts (`kVTEncodeFrameOptionKey_ForceKeyFrame`) and adapt per-shot quality/VBR parameters — bringing **Netflix Dynamic Optimizer / Beamr CABR** principles locally onto Apple Silicon with zero cloud cost!
-   - On **Max (2 engines)** and **Ultra (4 engines)** Macs, split long jobs across parallel `VTCompressionSession` workers using **`kVTCompressionPropertyKey_MoreFramesBeforeStart`** and **`kVTCompressionPropertyKey_MoreFramesAfterEnd`** for seamless VBV-compliant boundary stitching (**2×–4× faster export**, matching Apple Compressor).
+1. **Modern VideoToolbox Rate-Control Stack (macOS 15 → 26 → 27) in `Sources/SafariumCore/FrameSink.swift`:**
+   - **macOS 15+:** `SpatialAdaptiveQPLevel`, `PrioritizeEncodingSpeedOverQuality = false` for offline renders, `PerceptualQualityOptimization`.
+   - **macOS 26+:** `HighQuality` preset dictionaries, `LookAheadFrames`, and true **Constrained VBR** (`VariableBitRate` + `VBVMaxBitRate` + `VBVBufferDuration`).
+   - **macOS 27+:** **`ConstantQualityFactor` (`CQF`)** (`0.0–1.0`) + `ConsistentQuality`.
+   - **10-bit HEVC (`Main10`, `Main42210`, `Main44410`)** with P010/P210/P410 + 4×4 Bayer ordered dithering eliminating gradient banding even in SDR.
 
-4. **Zero-Copy Pre-Encode `VTFrameProcessor` Pipeline (`ForgeMetalFilters.swift`):**
-   - Safarium already uses `VTFrameProcessor` for `LLSR`; expand it directly in the Metal command buffer (`process(commandBuffer:parameters:)`) with:
-     - **`VTTemporalNoiseFilterConfiguration` (macOS 26+):** Pre-encode temporal denoising with `hasDiscontinuity` on scene cuts — huge BD-Rate win on noisy/grainy footage.
-     - **`VTSuperResolutionScalerConfiguration` (macOS 26+):** High-quality offline ANE/GPU upscaling (checking `configurationModelStatus`).
-     - **`VTOpticalFlowConfiguration` + `VTFrameRateConversionConfiguration` + `VTMotionBlurConfiguration` (macOS 15.4+):** Smooth 24→60 fps retiming & shutter motion blur reusing precomputed optical flow.
+2. **True Native Two-Pass VideoToolbox (`VTMultiPassStorage`) in `Sources/SafariumCore/SupremacyEncoder.swift`:**
+   - `VTMultiPassEncoder`: full `VTMultiPassStorageCreate` → `BeginPass` / `EndPass` / `GetTimeRangesForNextPass` + DTS-preserving passthrough mux (impossible in FFmpeg `hevc_videotoolbox`), automatically disabling look-ahead during multi-pass.
 
-### Tier 3 — Pro Mastering Formats & Best-in-Class Native Audio
+### Tier 2 — Apple Silicon Exclusive Speed & Perceptual Superpowers ✅ SHIPPED
 
-5. **Pro Video Formats (4:2:2 / 4:4:4 / HDR10 / Dolby Vision 8.4 / MV-HEVC / Full ProRes):**
-   - **10-bit HEVC 4:2:2** (`kVTProfileLevel_HEVC_Main42210_AutoLevel`, all M1–M5) + opt-in runtime-probed **10-bit 4:4:4** (`"HEVC_Main44410_AutoLevel"` via `VTSessionCopySupportedPropertyDictionary`) for razor-sharp HTML/UI chroma.
-   - **HDR10 / HLG + Dynamic Dolby Vision Profile 8.4:** Wire **`VTHDRPerFrameMetadataGenerationSession([.dolbyVision])`** (macOS 15+) + `kVTHDRMetadataInsertionMode_RequestSDRRangePreservation` (macOS 26+) + `kVTCompressionPropertyKey_LogTransferFunction` (macOS 27+).
-   - **MV-HEVC Spatial Video** (`VTIsStereoMVHEVCEncodeSupported()` + `CMTaggedBufferGroupRef` + `VTCompressionSessionEncodeMultiImageFrame`) and **all 6 ProRes tiers** (`apco`, `apcs`, `apcn`, `apch`, `ap4h`, `ap4x`).
+3. **"Safarium Mini-CAE" + Multi-Engine Max/Ultra Parallelism in `Sources/SafariumCore/SupremacyEncoder.swift`:**
+   - `MetalShotAnalyzer`: luma histogram + MAD shot-cut detector + spatial/temporal complexity & banding-risk analyzer (detected exact `[90, 180]` cuts in `434.6 ms` on M5).
+   - `MultiEngineChunkEncoder`: per-shot adaptive quality steering, forced shot-cut IDR placement, and bounded 1–4 parallel `VTCompressionSession` chunks (`MoreFramesBeforeStart` / `MoreFramesAfterEnd`).
 
-6. **Native `AudioToolbox` Upgrades (`ForgeAudioDSP.swift` & `MediaTools.swift`):**
-   - Explicitly lock AAC exports to `kAudioConverterCodecQuality = kAudioConverterQuality_Max` (world-leading AAC-LC quality).
-   - Expose **ALAC (`'alac'`)**, **HE-AAC v1/v2** (with `AudioSpecificConfig` guard), native **Opus (`'opus'`)**, and **Apple Spatial Audio APAC (`kAudioFormatAPAC`, macOS 26+)** for MV-HEVC Spatial Video deliverables.
+4. **Zero-Copy Pre-Encode `VTFrameProcessor` Pipeline in `Sources/SafariumForgeCore/ForgeVTProcessor.swift`:**
+   - **`TemporalDenoiseSession` (`VTTemporalNoiseFilterConfiguration`):** True Apple Silicon hardware denoising via Lossless AFBC IOSurface (`'&8v0'`/`'&xv0'`) + `VTPixelTransferSession` (`isHardwareActive == true` verified on M5).
+   - **`OpticalFlowRetimer` (`VTFrameRateConversionConfiguration`)** & **`MotionBlurSession` (`VTMotionBlurConfiguration`):** Hardware optical-flow retiming (`24→48/60 fps`) and shutter motion blur.
+
+### Tier 3 — Pro Mastering Formats & Best-in-Class Native Audio ✅ SHIPPED
+
+5. **Pro Video Formats (`FrameSink.swift` & `SupremacyEncoder.swift`):**
+   - All **12 `VideoCodec`s** including 10-bit HEVC `4:2:0`/`4:2:2`/`4:4:4`, all **6 ProRes tiers** (`apco`, `apcs`, `apcn`, `apch`, `ap4h`, `ap4x`), **HDR10 / HLG / Dolby Vision Profile 8.4** (`VTHDRPerFrameMetadataGenerationSession`), **Apple Log / Log 2**, and **MV-HEVC Spatial Video** (`MVHEVCSpatialEncoder`).
+
+6. **Native `AudioToolbox` Pro Mastering (`Sources/SafariumCore/ProAudioEncoder.swift`):**
+   - Locks AAC exports to `AVAudioQuality.max`, plus native **HE-AAC v1/v2** (with silent-fallback guard), **ALAC (`'alac'`)**, **Opus (`'opus'`)**, **Apple Spatial Audio APAC (`0x6170_6163`, macOS 26+)**, and `16/24/32f PCM`.
 
 ### Strategic Watchlist (2027–2028)
 - **Optional Zero-FFmpeg Archival AV1 Tier:** If ultra-small royalty-free web distribution is ever needed *before* Apple ships hardware AV1/AV2 encoding, standalone `libSvtAv1Enc` (`BSD-3-Clause-Clear`, 0% FFmpeg / 0% GPL) is the cleanest C library candidate.
