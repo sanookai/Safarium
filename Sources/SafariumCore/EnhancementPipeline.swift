@@ -1100,6 +1100,9 @@ public enum HardwareUpscaler {
             } else {
                 normalizedPB = try MetalDebandFilter.convertToBGRA8(dstPB)
             }
+            guard isOutputNonDegenerate(source: pixelBuffer, candidateBGRA8: normalizedPB) else {
+                return nil
+            }
             if config.sharpenAmount > 0.01 {
                 return try? applySubtleSharpen(to: normalizedPB, amount: config.sharpenAmount)
             }
@@ -1236,6 +1239,9 @@ public enum HardwareUpscaler {
             return nil
         }
         CVBufferPropagateAttachments(pixelBuffer, outPB)
+        guard isOutputNonDegenerate(source: bgraInput, candidateBGRA8: outPB) else {
+            return nil
+        }
 
         if config.sharpenAmount > 0.01 {
             if let sharpened = try? applySubtleSharpen(to: outPB, amount: config.sharpenAmount) {
@@ -1245,6 +1251,63 @@ public enum HardwareUpscaler {
         return outPB
     }
     #endif
+
+    /// Guards against paravirtualized macOS VM drivers (e.g., `AppleM2ScalerParavirtDriver`) where
+    /// `VTFrameProcessor` SR or `MetalFX` returns without throwing while leaving the destination
+    /// buffer blank/constant. Samples a 16x16 grid (<15 µs) to verify dynamic range tracks source.
+    private static func isOutputNonDegenerate(
+        source: CVPixelBuffer,
+        candidateBGRA8: CVPixelBuffer
+    ) -> Bool {
+        func sampleBGRA8Stats(_ pb: CVPixelBuffer) -> (min: Double, max: Double, mean: Double)? {
+            guard CVPixelBufferGetPixelFormatType(pb) == kCVPixelFormatType_32BGRA else { return nil }
+            let w = CVPixelBufferGetWidth(pb)
+            let h = CVPixelBufferGetHeight(pb)
+            guard w > 0, h > 0 else { return nil }
+            CVPixelBufferLockBaseAddress(pb, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+            guard let raw = CVPixelBufferGetBaseAddress(pb) else { return nil }
+            let base = raw.assumingMemoryBound(to: UInt8.self)
+            let bpr = CVPixelBufferGetBytesPerRow(pb)
+            let gx = max(1, min(16, w))
+            let gy = max(1, min(16, h))
+            var lo = 255.0
+            var hi = 0.0
+            var sum = 0.0
+            var n = 0
+            for iy in 0..<gy {
+                let y = (iy * (h - 1)) / max(1, gy - 1)
+                let row = y * bpr
+                for ix in 0..<gx {
+                    let x = (ix * (w - 1)) / max(1, gx - 1)
+                    let off = row + x * 4
+                    let b = Double(base[off + 0])
+                    let g = Double(base[off + 1])
+                    let r = Double(base[off + 2])
+                    let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+                    if luma < lo { lo = luma }
+                    if luma > hi { hi = luma }
+                    sum += luma
+                    n += 1
+                }
+            }
+            return n > 0 ? (lo, hi, sum / Double(n)) : nil
+        }
+
+        guard let dst = sampleBGRA8Stats(candidateBGRA8) else { return false }
+        let dstSpread = dst.max - dst.min
+
+        if let src = sampleBGRA8Stats(source) {
+            let srcSpread = src.max - src.min
+            if srcSpread >= 8.0 && dstSpread < 2.0 {
+                return false
+            }
+            if src.mean >= 20.0 && abs(dst.mean - src.mean) > 60.0 {
+                return false
+            }
+        }
+        return true
+    }
 
     private static func applySubtleSharpen(to input: CVPixelBuffer, amount: Float) throws -> CVPixelBuffer {
         let width = CVPixelBufferGetWidth(input)
