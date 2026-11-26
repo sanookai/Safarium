@@ -1094,10 +1094,16 @@ public enum HardwareUpscaler {
             )
             try processor.process(parameters: params)
             CVBufferPropagateAttachments(pixelBuffer, dstPB)
-            if config.sharpenAmount > 0.01 {
-                return try? applySubtleSharpen(to: dstPB, amount: config.sharpenAmount)
+            let normalizedPB: CVPixelBuffer
+            if CVPixelBufferGetPixelFormatType(dstPB) == kCVPixelFormatType_32BGRA {
+                normalizedPB = dstPB
+            } else {
+                normalizedPB = try MetalDebandFilter.convertToBGRA8(dstPB)
             }
-            return dstPB
+            if config.sharpenAmount > 0.01 {
+                return try? applySubtleSharpen(to: normalizedPB, amount: config.sharpenAmount)
+            }
+            return normalizedPB
         } catch {
             return nil
         }

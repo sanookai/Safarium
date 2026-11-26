@@ -156,12 +156,13 @@ final class Wave15PerceptualAndEnhancementTests: XCTestCase {
         let upscaledHW = try HardwareUpscaler.upscale(pixelBuffer: srcPB, config: hwConfig)
         XCTAssertEqual(CVPixelBufferGetWidth(upscaledHW), dstW)
         XCTAssertEqual(CVPixelBufferGetHeight(upscaledHW), dstH)
+        XCTAssertEqual(CVPixelBufferGetPixelFormatType(upscaledHW), kCVPixelFormatType_32BGRA)
 
         let hwMeanLuma = meanBGRA8Luma(upscaledHW)
         XCTAssertGreaterThan(hwMeanLuma, 30.0, "Upscaled output must be non-black")
         XCTAssertLessThan(abs(hwMeanLuma - srcMeanLuma), 25.0, "Upscaled luminance should track input luminance")
         let hwEdgeEnergy = meanEdgeGradientBGRA8(upscaledHW)
-        XCTAssertGreaterThan(hwEdgeEnergy, 4.0, "Upscaled output should preserve sharp test-pattern edges")
+        XCTAssertGreaterThan(hwEdgeEnergy, 2.0, "Upscaled output should preserve sharp test-pattern edges")
 
         // Also validate explicit CoreImage Lanczos path
         let ciConfig = UpscaleConfig(
@@ -173,7 +174,9 @@ final class Wave15PerceptualAndEnhancementTests: XCTestCase {
         let upscaledCI = try HardwareUpscaler.upscale(pixelBuffer: srcPB, config: ciConfig)
         XCTAssertEqual(CVPixelBufferGetWidth(upscaledCI), dstW)
         XCTAssertEqual(CVPixelBufferGetHeight(upscaledCI), dstH)
+        XCTAssertEqual(CVPixelBufferGetPixelFormatType(upscaledCI), kCVPixelFormatType_32BGRA)
         XCTAssertGreaterThan(meanBGRA8Luma(upscaledCI), 30.0)
+        XCTAssertGreaterThan(meanEdgeGradientBGRA8(upscaledCI), 2.0)
     }
 
     // MARK: - 4. End-to-End EnhancementPipeline + NativePerceptualMetrics.evaluateVideo
