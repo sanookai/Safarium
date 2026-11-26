@@ -61,10 +61,21 @@ Commands:
   capabilities  Report Apple Silicon VT/AudioToolbox/ImageIO/Metal/ANE/VTFrameProcessor/APFS capabilities and OS walls
   probe-capabilities [--refresh | --no-cache] Live VideoToolbox runtime capability profiler (honest HW/SW, Main10, multipass, AQ, LookAhead)
   conformance   <path> [--type auto|media|hls] [--expected-codec C] [--expected-bit-depth N] [--expected-chroma N] [--expected-primaries N] [--no-decode] [--strict]
-  spec-plan     <input> [--target-vmaf 95] [--target-ms-ssim 0.995] [--max-deltae-p95 2.0] [--max-bytes N] [--protect-text|--no-protect-text] [--protect-faces|--no-protect-faces] [--preserve-grain] [--banding-sensitive|--no-banding-sensitive] [--hdr-policy preserve|recompute|strip-dynamic-metadata|tone-map-to-sdr] [--codec hevc-10bit] [--save-sidecar PATH] [--load-sidecar PATH]
+  spec-plan     <input> [--target-vmaf 95] [--target-ms-ssim 0.995] [--max-deltae-p95 2.0] [--max-cambi 5.0] [--max-bytes N] [--protect-text|--no-protect-text] [--protect-faces|--no-protect-faces] [--preserve-grain] [--banding-sensitive|--no-banding-sensitive] [--hdr-policy preserve|recompute|strip-dynamic-metadata|tone-map-to-sdr] [--codec hevc-10bit] [--save-sidecar PATH] [--load-sidecar PATH]
   spec-encode   <input> -o <output> [...contract flags...] [--max-proxy-iters 3] [--power-budget low|balanced|max] [--strict] [--overwrite]
   spec-ladder   <input> [-o <out-dir>] [--format fmp4|ts] [--max-rungs 4] [--segment-sec 4.0] [--subtitles <vtt> --subtitle-lang en --subtitle-name English] [--save-sidecar PATH] [--load-sidecar PATH] [--plan-only]
   calibrate-hw  [--codec hevc|h264|hevc-10bit|prores422hq] [--width 640] [--height 360] [--frames 15] [--max-sessions 4]
+  cambi         <input> [--ref REF] [--samples 16] [--max-cambi D] [--strict]
+  auto-reframe  <input> -o <output> [--aspect 9:16|1:1|4:5] [--width W --height H] [--no-protect-thai] [--no-protect-faces] [--safe-margin 0.06] [--smoothing 0.18] [--max-pan 360] [--stride 5] [--bitrate BPS] [--overwrite]
+  auto-edit     <input> [--mode silence-cut|highlights] [-o <output>] [--plan-only] [--threshold-db -38] [--min-silence 0.65] [--padding 0.12] [--crossfade 0.02] [--clip-sec 15] [--max-clips 3] [--bitrate BPS] [--overwrite]
+  enhance       [<input> -o <output>] [--probe-av1] [--deband|--no-deband] [--strength 0.65] [--threshold 0.015] [--dither 1.0] [--upscale-width W --upscale-height H] [--codec hevc-10bit] [--bitrate BPS] [--overwrite]
+  ll-hls        <input> -o <out-dir> [--part-sec 0.34] [--segment-sec 2.0] [--width W --height H] [--bitrate 3500000] [--codec hevc-10bit] [--no-preload-hint] [--live] [--strict]
+  dash          <input> -o <out-dir> [--format fmp4] [--codec hevc-10bit] [--segment-sec 4.0] [--rungs 360p,720p,1080p] [--fps 30] [--strict]
+  screen-capture [--preflight] [-o <output>] [--duration 5.0] [--width 1280 --height 720] [--fps 30] [--codec hevc-10bit] [--bitrate 6000000] [--hud TEXT] [--audio] [--no-cursor] [--overwrite]
+  timeline      <fcpxml-to-otio|otio-to-fcpxml|inspect> <input> [-o <output>] [--overwrite]
+  broadcast-check <input> [--standard ebu-r128|atsc-a85|streaming] [--add-timecode 01:00:00:00 -o <output> --fps 29.97] [--vtt <subs.vtt>] [--strict] [--overwrite]
+  qa-defects    <input> [--max-cambi 8.0] [--max-frames 240] [--no-audio] [--no-text-check] [--standard streaming|ebu-r128|atsc-a85] [--strict]
+  repair-shot   <original> -o <output> --patch <shotIdx:startSec:endSec:replacementPath> [--patch ...] [--no-conformance] [--no-verify-defects] [--overwrite]
   version       Print safarium-forge version
 
 Run `safarium-forge <command> --help` for subcommand options.
@@ -126,10 +137,21 @@ private let subcommandHelp: [String: String] = [
     "capabilities": "Usage: safarium-forge capabilities",
     "probe-capabilities": "Usage: safarium-forge probe-capabilities [--refresh | --no-cache]",
     "conformance": "Usage: safarium-forge conformance <path> [--type auto|media|hls] [--expected-codec C] [--expected-bit-depth N] [--expected-chroma N] [--expected-primaries N] [--no-decode] [--strict]",
-    "spec-plan": "Usage: safarium-forge spec-plan <input> [--target-vmaf 95] [--target-ms-ssim 0.995] [--max-deltae-p95 2.0] [--max-bytes N] [--max-latency-sec S] [--protect-text|--no-protect-text] [--protect-faces|--no-protect-faces] [--preserve-grain] [--banding-sensitive|--no-banding-sensitive] [--hdr-policy preserve|recompute|strip-dynamic-metadata|tone-map-to-sdr] [--intent NAME] [--codec hevc-10bit] [--save-sidecar PATH] [--load-sidecar PATH]",
-    "spec-encode": "Usage: safarium-forge spec-encode <input> -o <output> [--target-vmaf 95] [--target-ms-ssim 0.995] [--max-deltae-p95 2.0] [--max-bytes N] [--max-latency-sec S] [--protect-text|--no-protect-text] [--protect-faces|--no-protect-faces] [--preserve-grain] [--banding-sensitive|--no-banding-sensitive] [--hdr-policy preserve|recompute|strip-dynamic-metadata|tone-map-to-sdr] [--intent NAME] [--codec hevc-10bit] [--max-proxy-iters 3] [--power-budget low|balanced|max] [--strict] [--overwrite]",
+    "spec-plan": "Usage: safarium-forge spec-plan <input> [--target-vmaf 95] [--target-ms-ssim 0.995] [--max-deltae-p95 2.0] [--max-cambi 5.0] [--max-bytes N] [--max-latency-sec S] [--protect-text|--no-protect-text] [--protect-faces|--no-protect-faces] [--preserve-grain] [--banding-sensitive|--no-banding-sensitive] [--hdr-policy preserve|recompute|strip-dynamic-metadata|tone-map-to-sdr] [--intent NAME] [--codec hevc-10bit] [--save-sidecar PATH] [--load-sidecar PATH]",
+    "spec-encode": "Usage: safarium-forge spec-encode <input> -o <output> [--target-vmaf 95] [--target-ms-ssim 0.995] [--max-deltae-p95 2.0] [--max-cambi 5.0] [--max-bytes N] [--max-latency-sec S] [--protect-text|--no-protect-text] [--protect-faces|--no-protect-faces] [--preserve-grain] [--banding-sensitive|--no-banding-sensitive] [--hdr-policy preserve|recompute|strip-dynamic-metadata|tone-map-to-sdr] [--intent NAME] [--codec hevc-10bit] [--max-proxy-iters 3] [--power-budget low|balanced|max] [--strict] [--overwrite]",
     "spec-ladder": "Usage: safarium-forge spec-ladder <input> [-o <out-dir>] [--format fmp4|ts] [--max-rungs 4] [--segment-sec 4.0] [--subtitles <vtt> --subtitle-lang en --subtitle-name English] [--save-sidecar PATH] [--load-sidecar PATH] [--plan-only]",
     "calibrate-hw": "Usage: safarium-forge calibrate-hw [--codec hevc|h264|hevc-10bit|prores422hq] [--width 640] [--height 360] [--frames 15] [--max-sessions 4]",
+    "cambi": "Usage: safarium-forge cambi <input> [--ref REF] [--samples 16] [--max-cambi D] [--strict]",
+    "auto-reframe": "Usage: safarium-forge auto-reframe <input> -o <output> [--aspect 9:16|1:1|4:5] [--width W --height H] [--no-protect-thai] [--no-protect-faces] [--safe-margin 0.06] [--smoothing 0.18] [--max-pan 360] [--stride 5] [--bitrate BPS] [--overwrite]",
+    "auto-edit": "Usage: safarium-forge auto-edit <input> [--mode silence-cut|highlights] [-o <output>] [--plan-only] [--threshold-db -38] [--min-silence 0.65] [--padding 0.12] [--crossfade 0.02] [--clip-sec 15] [--max-clips 3] [--bitrate BPS] [--overwrite]",
+    "enhance": "Usage: safarium-forge enhance [<input> -o <output>] [--probe-av1] [--deband|--no-deband] [--strength 0.65] [--threshold 0.015] [--dither 1.0] [--upscale-width W --upscale-height H] [--codec hevc-10bit] [--bitrate BPS] [--overwrite]",
+    "ll-hls": "Usage: safarium-forge ll-hls <input> -o <out-dir> [--part-sec 0.34] [--segment-sec 2.0] [--width W --height H] [--bitrate 3500000] [--codec hevc-10bit] [--no-preload-hint] [--live] [--strict]",
+    "dash": "Usage: safarium-forge dash <input> -o <out-dir> [--codec hevc-10bit] [--segment-sec 4.0] [--rungs 360p,720p,1080p] [--fps 30] [--strict]",
+    "screen-capture": "Usage: safarium-forge screen-capture [--preflight] [-o <output>] [--duration 5.0] [--width 1280 --height 720] [--fps 30] [--codec hevc-10bit] [--bitrate 6000000] [--hud TEXT] [--audio] [--no-cursor] [--overwrite]",
+    "timeline": "Usage: safarium-forge timeline <fcpxml-to-otio|otio-to-fcpxml|inspect> <input> [-o <output>] [--overwrite]",
+    "broadcast-check": "Usage: safarium-forge broadcast-check <input> [--standard ebu-r128|atsc-a85|streaming] [--add-timecode 01:00:00:00 -o <output> --fps 29.97] [--vtt <subs.vtt>] [--strict] [--overwrite]",
+    "qa-defects": "Usage: safarium-forge qa-defects <input> [--max-cambi 8.0] [--max-frames 240] [--no-audio] [--no-text-check] [--standard streaming|ebu-r128|atsc-a85] [--strict]",
+    "repair-shot": "Usage: safarium-forge repair-shot <original> -o <output> --patch <shotIdx:startSec:endSec:replacementPath> [--patch ...] [--no-conformance] [--no-verify-defects] [--overwrite]",
 ]
 
 // MARK: - Shared Argument & Serialization Helpers
@@ -4044,6 +4066,8 @@ private func parseSPECContractArgs(_ args: [String], command: String, allowOutpu
             parsed.contract.targetMSSSIM = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
         case "--max-deltae-p95", "--max-de00-p95":
             parsed.contract.maxDeltaE00P95 = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--max-cambi":
+            parsed.contract.maxCAMBI = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
         case "--max-bytes":
             let raw = try nextValue(args, index: &i, flag: a)
             guard let v = Int64(raw), v > 0 else {
@@ -4199,6 +4223,7 @@ private func runSPECEncodeCommand(_ args: [String]) async throws -> (data: Data,
         elapsedSeconds: report.elapsedSeconds,
         measuredMSSSIM: report.measuredMSSSIM,
         measuredDeltaE00P95: report.measuredDeltaE00P95,
+        measuredCAMBI: report.measuredCAMBI,
         contractMet: report.contractMet,
         explanations: report.explanations
     )
@@ -4355,6 +4380,774 @@ private func runCalibrateHWCommand(_ args: [String]) throws -> Data {
         height: height,
         framesPerSession: frames,
         maxSessions: maxSessions
+    )
+    return try encodeJSON(report)
+}
+
+// MARK: - Wave 15-18 Subcommands
+
+private func parseLoudnessStandard(_ raw: String) throws -> BroadcastLoudnessStandard {
+    let norm = raw.lowercased().replacingOccurrences(of: "_", with: "-")
+    if let s = BroadcastLoudnessStandard(rawValue: norm) {
+        return s
+    }
+    switch norm {
+    case "ebur128", "r128": return .ebuR128
+    case "atsc", "a85", "atsca85": return .atscA85
+    case "web", "stream": return .streaming
+    default:
+        throw CLIUsageError("unsupported --standard '\(raw)' (expected ebu-r128|atsc-a85|streaming)")
+    }
+}
+
+private struct CAMBICLIOutput: Codable {
+    let inputPath: String
+    let referencePath: String?
+    let maxCAMBI: Double?
+    let passed: Bool
+    let report: NativePerceptualReport
+}
+
+private func runCAMBICommand(_ args: [String]) async throws -> (data: Data, exitCode: Int32) {
+    try checkSubcommandHelp(args, command: "cambi")
+    var inputPath: String?
+    var refPath: String?
+    var maxSamples = 16
+    var maxCAMBI: Double?
+    var strict = false
+
+    var i = 0
+    while i < args.count {
+        let a = args[i]
+        switch a {
+        case "--ref", "--reference":
+            refPath = try nextValue(args, index: &i, flag: a)
+        case "--samples", "--max-samples":
+            maxSamples = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--max-cambi":
+            maxCAMBI = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--strict":
+            strict = true
+        default:
+            if a.hasPrefix("-") { throw CLIUsageError("unknown option for cambi: \(a)") }
+            if inputPath == nil { inputPath = a } else { throw CLIUsageError("unexpected arg for cambi: \(a)") }
+        }
+        i += 1
+    }
+    guard let inputPath else {
+        throw CLIUsageError("cambi requires <input>")
+    }
+
+    let inURL = URL(fileURLWithPath: inputPath)
+    let refURL = refPath.map { URL(fileURLWithPath: $0) }
+    let report = try await withPlayableVideoURL(inputURL: inURL) { playableIn in
+        if let refURL {
+            return try await withPlayableVideoURL(inputURL: refURL) { playableRef in
+                try await NativePerceptualMetrics.evaluateVideo(
+                    url: playableIn,
+                    referenceURL: playableRef,
+                    maxSamples: maxSamples
+                )
+            }
+        }
+        return try await NativePerceptualMetrics.evaluateVideo(
+            url: playableIn,
+            referenceURL: nil,
+            maxSamples: maxSamples
+        )
+    }
+    let passed: Bool
+    if let cap = maxCAMBI {
+        passed = report.p95CAMBI <= cap
+    } else {
+        passed = true
+    }
+    let out = CAMBICLIOutput(
+        inputPath: inURL.path,
+        referencePath: refURL?.path,
+        maxCAMBI: maxCAMBI,
+        passed: passed,
+        report: report
+    )
+    return (try encodeJSON(out), (strict && !passed) ? 1 : 0)
+}
+
+private func runAutoReframeCommand(_ args: [String]) async throws -> Data {
+    try checkSubcommandHelp(args, command: "auto-reframe")
+    var inputPath: String?
+    var outputPath: String?
+    var config = SmartReframeConfig()
+    var overwrite = false
+
+    var i = 0
+    while i < args.count {
+        let a = args[i]
+        switch a {
+        case "-o", "--output", "--out":
+            outputPath = try nextValue(args, index: &i, flag: a)
+        case "--aspect":
+            let raw = try nextValue(args, index: &i, flag: a)
+            guard let asp = ReframeTargetAspect(rawValue: raw) else {
+                throw CLIUsageError("unsupported --aspect '\(raw)' (expected 9:16|1:1|4:5)")
+            }
+            config.aspect = asp
+        case "--width":
+            config.outputWidth = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--height":
+            config.outputHeight = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--no-protect-thai":
+            config.protectThaiText = false
+        case "--protect-thai":
+            config.protectThaiText = true
+        case "--no-protect-faces":
+            config.protectFaces = false
+        case "--protect-faces":
+            config.protectFaces = true
+        case "--safe-margin":
+            config.safeMarginRatio = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--smoothing":
+            config.smoothingAlpha = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--max-pan":
+            config.maxPanPixelsPerSecond = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--stride":
+            config.analysisStrideFrames = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--bitrate":
+            config.bitrate = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--overwrite":
+            overwrite = true
+        default:
+            if a.hasPrefix("-") { throw CLIUsageError("unknown option for auto-reframe: \(a)") }
+            if inputPath == nil { inputPath = a } else { throw CLIUsageError("unexpected arg for auto-reframe: \(a)") }
+        }
+        i += 1
+    }
+    guard let inputPath, let outputPath else {
+        throw CLIUsageError("auto-reframe requires <input> and -o <output>")
+    }
+    let outURL = URL(fileURLWithPath: outputPath)
+    if !overwrite && FileManager.default.fileExists(atPath: outURL.path) {
+        throw SafariumError.invalidState("output already exists (pass --overwrite): \(outURL.path)")
+    }
+    if overwrite && FileManager.default.fileExists(atPath: outURL.path) {
+        try FileManager.default.removeItem(at: outURL)
+    }
+    let report = try await withPlayableVideoURL(inputURL: URL(fileURLWithPath: inputPath)) { playable in
+        try await SmartReframeThaiSafe.reframe(inputURL: playable, outputURL: outURL, config: config)
+    }
+    return try encodeJSON(report)
+}
+
+private func runAutoEditCommand(_ args: [String]) async throws -> Data {
+    try checkSubcommandHelp(args, command: "auto-edit")
+    var inputPath: String?
+    var outputPath: String?
+    var mode = "silence-cut"
+    var planOnly = false
+    var silenceConfig = AutoSilenceCutConfig()
+    var highlightConfig = AutoHighlightConfig()
+    var overwrite = false
+
+    var i = 0
+    while i < args.count {
+        let a = args[i]
+        switch a {
+        case "-o", "--output", "--out":
+            outputPath = try nextValue(args, index: &i, flag: a)
+        case "--mode":
+            mode = try nextValue(args, index: &i, flag: a).lowercased()
+        case "--plan-only":
+            planOnly = true
+        case "--threshold-db":
+            silenceConfig.silenceThresholdDB = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--min-silence":
+            silenceConfig.minSilenceSeconds = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--padding":
+            silenceConfig.paddingSeconds = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--crossfade":
+            silenceConfig.crossfadeSeconds = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--clip-sec":
+            highlightConfig.targetClipDurationSeconds = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--max-clips":
+            highlightConfig.maxClips = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--bitrate":
+            let bps = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+            silenceConfig.bitrate = bps
+            highlightConfig.bitrate = bps
+        case "--overwrite":
+            overwrite = true
+        default:
+            if a.hasPrefix("-") { throw CLIUsageError("unknown option for auto-edit: \(a)") }
+            if inputPath == nil { inputPath = a } else { throw CLIUsageError("unexpected arg for auto-edit: \(a)") }
+        }
+        i += 1
+    }
+    guard let inputPath else {
+        throw CLIUsageError("auto-edit requires <input>")
+    }
+    if !planOnly && outputPath == nil {
+        throw CLIUsageError("auto-edit requires -o <output> unless --plan-only is specified")
+    }
+    let outURL = outputPath.map { URL(fileURLWithPath: $0) }
+    if !planOnly, let outURL {
+        if !overwrite && FileManager.default.fileExists(atPath: outURL.path) {
+            throw SafariumError.invalidState("output already exists (pass --overwrite): \(outURL.path)")
+        }
+        if overwrite && FileManager.default.fileExists(atPath: outURL.path) {
+            try FileManager.default.removeItem(at: outURL)
+        }
+    }
+
+    let report = try await withPlayableVideoURL(inputURL: URL(fileURLWithPath: inputPath)) { playable in
+        switch mode {
+        case "silence-cut", "silence":
+            return try await AutoEditEngine.cutSilence(
+                inputURL: playable,
+                outputURL: planOnly ? nil : outURL,
+                config: silenceConfig
+            )
+        case "highlights", "highlight":
+            if planOnly {
+                return try await AutoEditEngine.planHighlights(inputURL: playable, config: highlightConfig)
+            }
+            return try await AutoEditEngine.extractHighlights(
+                inputURL: playable,
+                outputURL: outURL!,
+                config: highlightConfig
+            )
+        default:
+            throw CLIUsageError("unsupported --mode '\(mode)' (expected silence-cut|highlights)")
+        }
+    }
+    return try encodeJSON(report)
+}
+
+private func runEnhanceCommand(_ args: [String]) async throws -> Data {
+    try checkSubcommandHelp(args, command: "enhance")
+    var inputPath: String?
+    var outputPath: String?
+    var probeAV1 = false
+    var opts = EnhanceVideoOptions()
+    var overwrite = false
+
+    var i = 0
+    while i < args.count {
+        let a = args[i]
+        switch a {
+        case "-o", "--output", "--out":
+            outputPath = try nextValue(args, index: &i, flag: a)
+        case "--probe-av1":
+            probeAV1 = true
+        case "--deband":
+            opts.deband = true
+        case "--no-deband":
+            opts.deband = false
+        case "--strength":
+            opts.debandConfig.strength = Float(try parseDouble(try nextValue(args, index: &i, flag: a), flag: a))
+        case "--threshold":
+            opts.debandConfig.threshold = Float(try parseDouble(try nextValue(args, index: &i, flag: a), flag: a))
+        case "--dither":
+            opts.debandConfig.ditherAmplitude = Float(try parseDouble(try nextValue(args, index: &i, flag: a), flag: a))
+        case "--upscale-width":
+            opts.upscaleWidth = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--upscale-height":
+            opts.upscaleHeight = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--codec":
+            opts.codec = try parseCodec(try nextValue(args, index: &i, flag: a))
+        case "--bitrate":
+            opts.bitrate = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--overwrite":
+            overwrite = true
+        default:
+            if a.hasPrefix("-") { throw CLIUsageError("unknown option for enhance: \(a)") }
+            if inputPath == nil { inputPath = a } else { throw CLIUsageError("unexpected arg for enhance: \(a)") }
+        }
+        i += 1
+    }
+
+    if probeAV1 && inputPath == nil {
+        let readiness = FutureCodecReadiness.probeAV1Readiness(useCache: false)
+        return try encodeJSON(readiness)
+    }
+    guard let inputPath, let outputPath else {
+        throw CLIUsageError("enhance requires <input> -o <output> (or --probe-av1)")
+    }
+    let outURL = URL(fileURLWithPath: outputPath)
+    if !overwrite && FileManager.default.fileExists(atPath: outURL.path) {
+        throw SafariumError.invalidState("output already exists (pass --overwrite): \(outURL.path)")
+    }
+    if overwrite && FileManager.default.fileExists(atPath: outURL.path) {
+        try FileManager.default.removeItem(at: outURL)
+    }
+    let report = try await withPlayableVideoURL(inputURL: URL(fileURLWithPath: inputPath)) { playable in
+        try await EnhancementPipeline.enhanceVideo(inputURL: playable, outputURL: outURL, options: opts)
+    }
+    return try encodeJSON(report)
+}
+
+private struct LLHLSCLIOutput: Codable {
+    let packaged: LLHLSPackageResult
+    let validation: LLHLSValidationReport
+}
+
+private func runLLHLSCommand(_ args: [String]) async throws -> (data: Data, exitCode: Int32) {
+    try checkSubcommandHelp(args, command: "ll-hls")
+    var inputPath: String?
+    var outputDirPath: String?
+    var opts = LLHLSPackageOptions()
+    var strict = false
+
+    var i = 0
+    while i < args.count {
+        let a = args[i]
+        switch a {
+        case "-o", "--output", "--out", "--out-dir":
+            outputDirPath = try nextValue(args, index: &i, flag: a)
+        case "--part-sec":
+            opts.partDurationSeconds = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--segment-sec":
+            opts.segmentDurationSeconds = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--width":
+            opts.width = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--height":
+            opts.height = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--bitrate":
+            opts.bitrate = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--codec":
+            opts.codec = try parseCodec(try nextValue(args, index: &i, flag: a))
+        case "--no-preload-hint":
+            opts.includePreloadHint = false
+        case "--live":
+            opts.endList = false
+        case "--strict":
+            strict = true
+        default:
+            if a.hasPrefix("-") { throw CLIUsageError("unknown option for ll-hls: \(a)") }
+            if inputPath == nil { inputPath = a } else { throw CLIUsageError("unexpected arg for ll-hls: \(a)") }
+        }
+        i += 1
+    }
+    guard let inputPath, let outputDirPath else {
+        throw CLIUsageError("ll-hls requires <input> and -o <out-dir>")
+    }
+    let outDir = URL(fileURLWithPath: outputDirPath, isDirectory: true)
+    let pkg = try await withPlayableVideoURL(inputURL: URL(fileURLWithPath: inputPath)) { playable in
+        try await LLHLSPackager.package(inputURL: playable, outputDirectory: outDir, options: opts)
+    }
+    let validation = LLHLSPackager.validate(playlistURL: URL(fileURLWithPath: pkg.mediaPlaylistPath))
+    let envelope = LLHLSCLIOutput(packaged: pkg, validation: validation)
+    return (try encodeJSON(envelope), (strict && !validation.passed) ? 1 : 0)
+}
+
+private struct DualHLSDASHCLIOutput: Codable {
+    let hls: HLSPackageResult
+    let dash: DASHPackageResult
+}
+
+private func runDASHCommand(_ args: [String]) async throws -> (data: Data, exitCode: Int32) {
+    try checkSubcommandHelp(args, command: "dash")
+    var inputPath: String?
+    var outputDirPath: String?
+    var codec: VideoCodec = .hevc10
+    var segmentSec: Double = 4.0
+    var fps: Double = 30.0
+    var rungsSpec: String?
+    var strict = false
+
+    var i = 0
+    while i < args.count {
+        let a = args[i]
+        switch a {
+        case "-o", "--output", "--out", "--out-dir":
+            outputDirPath = try nextValue(args, index: &i, flag: a)
+        case "--codec":
+            codec = try parseCodec(try nextValue(args, index: &i, flag: a))
+        case "--segment-sec":
+            segmentSec = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--fps":
+            fps = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--rungs":
+            rungsSpec = try nextValue(args, index: &i, flag: a)
+        case "--strict":
+            strict = true
+        default:
+            if a.hasPrefix("-") { throw CLIUsageError("unknown option for dash: \(a)") }
+            if inputPath == nil { inputPath = a } else { throw CLIUsageError("unexpected arg for dash: \(a)") }
+        }
+        i += 1
+    }
+    guard let inputPath, let outputDirPath else {
+        throw CLIUsageError("dash requires <input> and -o <out-dir>")
+    }
+    let rungs: [HLSRung]
+    if let spec = rungsSpec {
+        rungs = try parseHLSRungSpec(spec, codec: codec, fps: fps)
+    } else {
+        rungs = HLSRung.defaultLadder(codec: codec, fps: fps)
+    }
+    let opts = HLSPackageOptions(
+        rungs: rungs,
+        segmentDurationSeconds: segmentSec,
+        format: .fmp4CMAF,
+        codec: codec
+    )
+    let outDir = URL(fileURLWithPath: outputDirPath, isDirectory: true)
+    let dual = try await withPlayableVideoURL(inputURL: URL(fileURLWithPath: inputPath)) { playable in
+        try await DASHPackager.packageDualHLSAndDASH(
+            inputURL: playable,
+            outputDirectory: outDir,
+            options: opts
+        )
+    }
+    let envelope = DualHLSDASHCLIOutput(hls: dual.hls, dash: dual.dash)
+    return (try encodeJSON(envelope), (strict && !dual.dash.validation.passed) ? 1 : 0)
+}
+
+private func runScreenCaptureCommand(_ args: [String]) async throws -> Data {
+    try checkSubcommandHelp(args, command: "screen-capture")
+    var preflightOnly = false
+    var outputPath: String?
+    var config = ScreenCaptureConfig()
+    var overwrite = false
+
+    var i = 0
+    while i < args.count {
+        let a = args[i]
+        switch a {
+        case "--preflight":
+            preflightOnly = true
+        case "-o", "--output", "--out":
+            outputPath = try nextValue(args, index: &i, flag: a)
+        case "--duration":
+            config.maxDurationSeconds = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--width":
+            config.width = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--height":
+            config.height = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--fps":
+            config.fps = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--codec":
+            config.codec = try parseCodec(try nextValue(args, index: &i, flag: a))
+        case "--bitrate":
+            config.bitrate = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--hud":
+            config.hudOverlayText = try nextValue(args, index: &i, flag: a)
+        case "--audio":
+            config.captureAudio = true
+        case "--no-cursor":
+            config.showCursor = false
+        case "--overwrite":
+            overwrite = true
+        default:
+            throw CLIUsageError("unknown option for screen-capture: \(a)")
+        }
+        i += 1
+    }
+
+    if preflightOnly {
+        return try encodeJSON(ScreenCapturePipeline.preflightAccess())
+    }
+    guard let outputPath else {
+        throw CLIUsageError("screen-capture requires -o <output> (or --preflight)")
+    }
+    let outURL = URL(fileURLWithPath: outputPath)
+    if !overwrite && FileManager.default.fileExists(atPath: outURL.path) {
+        throw SafariumError.invalidState("output already exists (pass --overwrite): \(outURL.path)")
+    }
+    if overwrite && FileManager.default.fileExists(atPath: outURL.path) {
+        try FileManager.default.removeItem(at: outURL)
+    }
+    let report = try await ScreenCapturePipeline.recordDisplay(outputURL: outURL, config: config)
+    return try encodeJSON(report)
+}
+
+private struct TimelineCLIOutput: Codable {
+    let action: String
+    let inputPath: String
+    let outputPath: String?
+    let timeline: SafariumTimeline
+}
+
+private func runTimelineCommand(_ args: [String]) throws -> Data {
+    try checkSubcommandHelp(args, command: "timeline")
+    guard let action = args.first?.lowercased() else {
+        throw CLIUsageError("timeline requires <fcpxml-to-otio|otio-to-fcpxml|inspect> <input> [-o <output>]")
+    }
+    var inputPath: String?
+    var outputPath: String?
+    var overwrite = false
+
+    var i = 1
+    while i < args.count {
+        let a = args[i]
+        switch a {
+        case "-o", "--output", "--out":
+            outputPath = try nextValue(args, index: &i, flag: a)
+        case "--overwrite":
+            overwrite = true
+        default:
+            if a.hasPrefix("-") { throw CLIUsageError("unknown option for timeline: \(a)") }
+            if inputPath == nil { inputPath = a } else { throw CLIUsageError("unexpected arg for timeline: \(a)") }
+        }
+        i += 1
+    }
+    guard let inputPath else {
+        throw CLIUsageError("timeline \(action) requires <input>")
+    }
+    let inURL = URL(fileURLWithPath: inputPath)
+    let rawData = try Data(contentsOf: inURL)
+
+    let timeline: SafariumTimeline
+    switch action {
+    case "fcpxml-to-otio":
+        guard let xml = String(data: rawData, encoding: .utf8) else {
+            throw SafariumError.invalidState("FCPXML file is not valid UTF-8")
+        }
+        timeline = try TimelineInterop.parseFCPXML(xml)
+        if let outputPath {
+            let outURL = URL(fileURLWithPath: outputPath)
+            if !overwrite && FileManager.default.fileExists(atPath: outURL.path) {
+                throw SafariumError.invalidState("output already exists (pass --overwrite): \(outURL.path)")
+            }
+            let otioData = try TimelineInterop.exportOTIO(timeline)
+            try otioData.write(to: outURL, options: .atomic)
+        }
+    case "otio-to-fcpxml":
+        timeline = try TimelineInterop.parseOTIO(rawData)
+        if let outputPath {
+            let outURL = URL(fileURLWithPath: outputPath)
+            if !overwrite && FileManager.default.fileExists(atPath: outURL.path) {
+                throw SafariumError.invalidState("output already exists (pass --overwrite): \(outURL.path)")
+            }
+            let xml = TimelineInterop.exportFCPXML(timeline)
+            try Data(xml.utf8).write(to: outURL, options: .atomic)
+        }
+    case "inspect":
+        let ext = inURL.pathExtension.lowercased()
+        if ext == "fcpxml" || ext == "xml" {
+            guard let xml = String(data: rawData, encoding: .utf8) else {
+                throw SafariumError.invalidState("FCPXML file is not valid UTF-8")
+            }
+            timeline = try TimelineInterop.parseFCPXML(xml)
+        } else {
+            timeline = try TimelineInterop.parseOTIO(rawData)
+        }
+    default:
+        throw CLIUsageError("unsupported timeline action '\(action)' (expected fcpxml-to-otio|otio-to-fcpxml|inspect)")
+    }
+
+    return try encodeJSON(TimelineCLIOutput(
+        action: action,
+        inputPath: inURL.path,
+        outputPath: outputPath,
+        timeline: timeline
+    ))
+}
+
+private struct BroadcastCaptionSummary: Codable {
+    let vttPath: String
+    let cueCount: Int
+    let cea608PacketCount: Int
+    let cdpSampleVerified: Bool
+}
+
+private struct BroadcastCheckCLIOutput: Codable {
+    let inputPath: String
+    let loudness: BroadcastLoudnessReport
+    let timecodeWrite: TimecodeWriteReport?
+    let captions: BroadcastCaptionSummary?
+    let passed: Bool
+}
+
+private func runBroadcastCheckCommand(_ args: [String]) async throws -> (data: Data, exitCode: Int32) {
+    try checkSubcommandHelp(args, command: "broadcast-check")
+    var inputPath: String?
+    var outputPath: String?
+    var standard: BroadcastLoudnessStandard = .ebuR128
+    var timecodeStr: String?
+    var fps: Double = 29.97
+    var vttPath: String?
+    var strict = false
+    var overwrite = false
+
+    var i = 0
+    while i < args.count {
+        let a = args[i]
+        switch a {
+        case "--standard":
+            standard = try parseLoudnessStandard(try nextValue(args, index: &i, flag: a))
+        case "--add-timecode":
+            timecodeStr = try nextValue(args, index: &i, flag: a)
+        case "-o", "--output", "--out":
+            outputPath = try nextValue(args, index: &i, flag: a)
+        case "--fps":
+            fps = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--vtt":
+            vttPath = try nextValue(args, index: &i, flag: a)
+        case "--strict":
+            strict = true
+        case "--overwrite":
+            overwrite = true
+        default:
+            if a.hasPrefix("-") { throw CLIUsageError("unknown option for broadcast-check: \(a)") }
+            if inputPath == nil { inputPath = a } else { throw CLIUsageError("unexpected arg for broadcast-check: \(a)") }
+        }
+        i += 1
+    }
+    guard let inputPath else {
+        throw CLIUsageError("broadcast-check requires <input>")
+    }
+    let inURL = URL(fileURLWithPath: inputPath)
+    let loudness = try await BroadcastLoudnessAuditor.analyze(url: inURL, standard: standard)
+
+    var tcReport: TimecodeWriteReport?
+    if let tcStr = timecodeStr {
+        guard let outputPath else {
+            throw CLIUsageError("broadcast-check --add-timecode requires -o <output>")
+        }
+        let outURL = URL(fileURLWithPath: outputPath)
+        if !overwrite && FileManager.default.fileExists(atPath: outURL.path) {
+            throw SafariumError.invalidState("output already exists (pass --overwrite): \(outURL.path)")
+        }
+        if overwrite && FileManager.default.fileExists(atPath: outURL.path) {
+            try FileManager.default.removeItem(at: outURL)
+        }
+        let tc = try SMPTETimecode(parsing: tcStr, frameRate: fps)
+        tcReport = try await TimecodeTrackWriter.addTimecodeTrack(
+            to: inURL,
+            outputURL: outURL,
+            startTimecode: tc
+        )
+    }
+
+    var captionSummary: BroadcastCaptionSummary?
+    if let vttPath {
+        let vttText = try String(contentsOf: URL(fileURLWithPath: vttPath), encoding: .utf8)
+        let cues = ClosedCaptionPacketizer.parseWebVTT(vttText)
+        let packets = ClosedCaptionPacketizer.encodeCuesToCEA608(cues)
+        var verified = true
+        if let first = packets.first, !first.pairs.isEmpty {
+            let pairs = first.pairs.map { ($0.b1, $0.b2) }
+            let cdp = ClosedCaptionPacketizer.wrapCEA708CDP(ccData: pairs, sequenceCounter: 1)
+            verified = ClosedCaptionPacketizer.verifyCEA708CDP(cdp)
+        }
+        captionSummary = BroadcastCaptionSummary(
+            vttPath: vttPath,
+            cueCount: cues.count,
+            cea608PacketCount: packets.count,
+            cdpSampleVerified: verified
+        )
+    }
+
+    let passed = loudness.compliant && (captionSummary?.cdpSampleVerified ?? true)
+    let out = BroadcastCheckCLIOutput(
+        inputPath: inURL.path,
+        loudness: loudness,
+        timecodeWrite: tcReport,
+        captions: captionSummary,
+        passed: passed
+    )
+    return (try encodeJSON(out), (strict && !passed) ? 1 : 0)
+}
+
+private func runQADefectsCommand(_ args: [String]) async throws -> (data: Data, exitCode: Int32) {
+    try checkSubcommandHelp(args, command: "qa-defects")
+    var inputPath: String?
+    var config = VideoDefectInspectorConfig()
+    var strict = false
+
+    var i = 0
+    while i < args.count {
+        let a = args[i]
+        switch a {
+        case "--max-cambi":
+            config.maxCAMBI = try parseDouble(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--max-frames":
+            config.maxAnalyzeFrames = try parseInt(try nextValue(args, index: &i, flag: a), flag: a)
+        case "--no-audio":
+            config.checkAudio = false
+        case "--no-text-check":
+            config.checkTextClipping = false
+        case "--standard":
+            config.loudnessStandard = try parseLoudnessStandard(try nextValue(args, index: &i, flag: a))
+        case "--strict":
+            strict = true
+        default:
+            if a.hasPrefix("-") { throw CLIUsageError("unknown option for qa-defects: \(a)") }
+            if inputPath == nil { inputPath = a } else { throw CLIUsageError("unexpected arg for qa-defects: \(a)") }
+        }
+        i += 1
+    }
+    guard let inputPath else {
+        throw CLIUsageError("qa-defects requires <input>")
+    }
+    let report = try await withPlayableVideoURL(inputURL: URL(fileURLWithPath: inputPath)) { playable in
+        try await VideoDefectInspector.inspect(url: playable, config: config)
+    }
+    return (try encodeJSON(report), (strict && !report.passed) ? 1 : 0)
+}
+
+private func runRepairShotCommand(_ args: [String]) async throws -> Data {
+    try checkSubcommandHelp(args, command: "repair-shot")
+    var originalPath: String?
+    var outputPath: String?
+    var patches: [SurgicalRepairPatch] = []
+    var verifyConformance = true
+    var verifyDefects = true
+    var overwrite = false
+
+    var i = 0
+    while i < args.count {
+        let a = args[i]
+        switch a {
+        case "-o", "--output", "--out":
+            outputPath = try nextValue(args, index: &i, flag: a)
+        case "--patch":
+            let spec = try nextValue(args, index: &i, flag: a)
+            let parts = spec.split(separator: ":", maxSplits: 3, omittingEmptySubsequences: false)
+            guard parts.count == 4,
+                  let shotIdx = Int(parts[0]),
+                  let startSec = Double(parts[1]),
+                  let endSec = Double(parts[2]),
+                  !parts[3].isEmpty else {
+                throw CLIUsageError("invalid --patch '\(spec)' (expected shotIdx:startSec:endSec:replacementPath)")
+            }
+            patches.append(SurgicalRepairPatch(
+                shotIndex: shotIdx,
+                startSeconds: startSec,
+                endSeconds: endSec,
+                replacementPath: String(parts[3])
+            ))
+        case "--no-conformance":
+            verifyConformance = false
+        case "--no-verify-defects":
+            verifyDefects = false
+        case "--overwrite":
+            overwrite = true
+        default:
+            if a.hasPrefix("-") { throw CLIUsageError("unknown option for repair-shot: \(a)") }
+            if originalPath == nil { originalPath = a } else { throw CLIUsageError("unexpected arg for repair-shot: \(a)") }
+        }
+        i += 1
+    }
+    guard let originalPath, let outputPath else {
+        throw CLIUsageError("repair-shot requires <original> and -o <output>")
+    }
+    guard !patches.isEmpty else {
+        throw CLIUsageError("repair-shot requires at least one --patch <shotIdx:startSec:endSec:replacementPath>")
+    }
+    let outURL = URL(fileURLWithPath: outputPath)
+    if !overwrite && FileManager.default.fileExists(atPath: outURL.path) {
+        throw SafariumError.invalidState("output already exists (pass --overwrite): \(outURL.path)")
+    }
+    if overwrite && FileManager.default.fileExists(atPath: outURL.path) {
+        try FileManager.default.removeItem(at: outURL)
+    }
+    let report = try await SurgicalRepairEngine.repair(
+        originalURL: URL(fileURLWithPath: originalPath),
+        outputURL: outURL,
+        patches: patches,
+        verifyConformance: verifyConformance,
+        verifyDefects: verifyDefects
     )
     return try encodeJSON(report)
 }
@@ -4529,6 +5322,44 @@ private struct SafariumForgeCLI {
                 FileHandle.standardOutput.write(out)
             case "calibrate-hw":
                 let out = try runCalibrateHWCommand(rest)
+                FileHandle.standardOutput.write(out)
+            case "cambi":
+                let res = try await runCAMBICommand(rest)
+                FileHandle.standardOutput.write(res.data)
+                if res.exitCode != 0 { exit(res.exitCode) }
+            case "auto-reframe":
+                let out = try await runAutoReframeCommand(rest)
+                FileHandle.standardOutput.write(out)
+            case "auto-edit":
+                let out = try await runAutoEditCommand(rest)
+                FileHandle.standardOutput.write(out)
+            case "enhance":
+                let out = try await runEnhanceCommand(rest)
+                FileHandle.standardOutput.write(out)
+            case "ll-hls":
+                let res = try await runLLHLSCommand(rest)
+                FileHandle.standardOutput.write(res.data)
+                if res.exitCode != 0 { exit(res.exitCode) }
+            case "dash":
+                let res = try await runDASHCommand(rest)
+                FileHandle.standardOutput.write(res.data)
+                if res.exitCode != 0 { exit(res.exitCode) }
+            case "screen-capture":
+                let out = try await runScreenCaptureCommand(rest)
+                FileHandle.standardOutput.write(out)
+            case "timeline":
+                let out = try runTimelineCommand(rest)
+                FileHandle.standardOutput.write(out)
+            case "broadcast-check":
+                let res = try await runBroadcastCheckCommand(rest)
+                FileHandle.standardOutput.write(res.data)
+                if res.exitCode != 0 { exit(res.exitCode) }
+            case "qa-defects":
+                let res = try await runQADefectsCommand(rest)
+                FileHandle.standardOutput.write(res.data)
+                if res.exitCode != 0 { exit(res.exitCode) }
+            case "repair-shot":
+                let out = try await runRepairShotCommand(rest)
                 FileHandle.standardOutput.write(out)
             default:
                 throw CLIUsageError("unknown subcommand '\(sub)' (see --help)")

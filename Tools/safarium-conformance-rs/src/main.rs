@@ -1127,10 +1127,45 @@ fn parse_ts_pmt(
 }
 
 // ============================================================================
-// 3. HLS `.m3u8` Playlist Parser
+// 3. HLS `.m3u8` & LL-HLS Playlist Parser
 // ============================================================================
 
+struct LlHlsPartEntry {
+    line: usize,
+    uri: Option<String>,
+    duration: Option<f64>,
+    independent: bool,
+}
+
+fn starts_with_valid_cmaf_part_box(data: &[u8]) -> bool {
+    if data.len() < 8 {
+        return false;
+    }
+    let size32 = match read_u32_be(data, 0) {
+        Some(v) => v,
+        None => return false,
+    };
+    let fourcc = &data[4..8];
+    if fourcc != b"styp" && fourcc != b"moof" {
+        return false;
+    }
+    if size32 == 0 {
+        true
+    } else if size32 == 1 {
+        match read_u64_be(data, 8) {
+            Some(large) => large >= 16 && large <= data.len() as u64,
+            None => false,
+        }
+    } else {
+        size32 >= 8 && (size32 as usize) <= data.len()
+    }
+}
+
 fn parse_hls(data: &[u8]) -> ConformanceReport {
+    parse_hls_with_base_dir(data, None)
+}
+
+fn parse_hls_with_base_dir(data: &[u8], base_dir: Option<&Path>) -> ConformanceReport {
     let mut violations: Vec<String> = Vec::new();
     let text = match std::str::from_utf8(data) {
         Ok(s) => s,
@@ -1167,6 +1202,13 @@ fn parse_hls(data: &[u8]) -> ConformanceReport {
     let mut pending_stream_inf = false;
     let mut pending_extinf = false;
 
+    // LL-HLS state
+    let mut has_part_inf = false;
+    let mut part_target: Option<f64> = None;
+    let mut has_server_control = false;
+    let mut part_hold_back: Option<f64> = None;
+    let mut ll_hls_parts: Vec<LlHlsPartEntry> = Vec::new();
+
     for (line_idx, &line) in lines.iter().enumerate() {
         if line.is_empty() {
             continue;
@@ -1190,6 +1232,61 @@ fn parse_hls(data: &[u8]) -> ConformanceReport {
                     line_idx + 1
                 )),
             }
+        } else if let Some(attrs) = line.strip_prefix("#EXT-X-PART-INF:") {
+            has_part_inf = true;
+            let parsed = parse_hls_attribute_list(attrs);
+            match parsed.get("PART-TARGET").and_then(|v| v.parse::<f64>().ok()) {
+                Some(pt) if pt.is_finite() && pt > 0.0 => part_target = Some(pt),
+                _ => violations.push(format!(
+                    "`#EXT-X-PART-INF` on line {} missing or non-positive PART-TARGET attribute",
+                    line_idx + 1
+                )),
+            }
+        } else if let Some(attrs) = line.strip_prefix("#EXT-X-SERVER-CONTROL:") {
+            has_server_control = true;
+            let parsed = parse_hls_attribute_list(attrs);
+            if let Some(raw_phb) = parsed.get("PART-HOLD-BACK") {
+                match raw_phb.parse::<f64>() {
+                    Ok(phb) if phb.is_finite() && phb > 0.0 => part_hold_back = Some(phb),
+                    _ => violations.push(format!(
+                        "`#EXT-X-SERVER-CONTROL` on line {} has invalid PART-HOLD-BACK `{}`",
+                        line_idx + 1,
+                        raw_phb
+                    )),
+                }
+            }
+        } else if let Some(attrs) = line.strip_prefix("#EXT-X-PART:") {
+            let parsed = parse_hls_attribute_list(attrs);
+            let uri = parsed
+                .get("URI")
+                .map(|u| u.trim().to_string())
+                .filter(|u| !u.is_empty());
+            if uri.is_none() {
+                violations.push(format!(
+                    "`#EXT-X-PART` on line {} missing required URI attribute",
+                    line_idx + 1
+                ));
+            }
+            let duration = match parsed.get("DURATION").and_then(|v| v.parse::<f64>().ok()) {
+                Some(d) if d.is_finite() && d > 0.0 => Some(d),
+                _ => {
+                    violations.push(format!(
+                        "`#EXT-X-PART` on line {} missing or non-positive DURATION attribute",
+                        line_idx + 1
+                    ));
+                    None
+                }
+            };
+            let independent = parsed
+                .get("INDEPENDENT")
+                .map(|v| v.eq_ignore_ascii_case("YES"))
+                .unwrap_or(false);
+            ll_hls_parts.push(LlHlsPartEntry {
+                line: line_idx + 1,
+                uri,
+                duration,
+                independent,
+            });
         } else if line == "#EXT-X-ENDLIST" {
             has_endlist = true;
         } else if let Some(val) = line.strip_prefix("#EXT-X-PLAYLIST-TYPE:") {
@@ -1267,6 +1364,82 @@ fn parse_hls(data: &[u8]) -> ConformanceReport {
         }
     }
 
+    let is_ll_hls = has_part_inf || has_server_control || !ll_hls_parts.is_empty();
+    let part_count = ll_hls_parts.len();
+    let independent_part_count = ll_hls_parts.iter().filter(|p| p.independent).count();
+
+    if is_ll_hls {
+        if !has_part_inf {
+            violations.push(
+                "LL-HLS playlist missing required `#EXT-X-PART-INF:PART-TARGET=...`".to_string(),
+            );
+        }
+        if !has_server_control {
+            violations.push(
+                "LL-HLS playlist missing required `#EXT-X-SERVER-CONTROL` with `PART-HOLD-BACK`"
+                    .to_string(),
+            );
+        } else {
+            match part_hold_back {
+                None => violations.push(
+                    "LL-HLS `#EXT-X-SERVER-CONTROL` missing required `PART-HOLD-BACK` attribute"
+                        .to_string(),
+                ),
+                Some(phb) => {
+                    if let Some(pt) = part_target {
+                        let min_hold_back = 2.0 * pt;
+                        if phb + 1e-6 < min_hold_back {
+                            violations.push(format!(
+                                "LL-HLS `PART-HOLD-BACK` ({:.3}s) must be >= 2.0 * `PART-TARGET` ({:.3}s)",
+                                phb, min_hold_back
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        for part in &ll_hls_parts {
+            if let (Some(dur), Some(pt)) = (part.duration, part_target) {
+                let max_part_dur = pt * 1.15;
+                if dur > max_part_dur + 1e-6 {
+                    violations.push(format!(
+                        "LL-HLS `#EXT-X-PART` on line {} DURATION {:.3}s exceeds `PART-TARGET * 1.15` ({:.3}s)",
+                        part.line, dur, max_part_dur
+                    ));
+                }
+            }
+
+            if let (Some(dir), Some(uri)) = (base_dir, part.uri.as_deref()) {
+                let rel = uri.split('?').next().unwrap_or(uri);
+                let resolved_dir = if dir.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    dir
+                };
+                let part_path = resolved_dir.join(rel);
+                match fs::read(&part_path) {
+                    Err(_) => violations.push(format!(
+                        "LL-HLS `#EXT-X-PART` on line {} references missing part file `{}`",
+                        part.line, uri
+                    )),
+                    Ok(bytes) if bytes.is_empty() => violations.push(format!(
+                        "LL-HLS `#EXT-X-PART` on line {} part file `{}` is empty",
+                        part.line, uri
+                    )),
+                    Ok(bytes) => {
+                        if !starts_with_valid_cmaf_part_box(&bytes) {
+                            violations.push(format!(
+                                "LL-HLS `#EXT-X-PART` on line {} part file `{}` does not start with a valid CMAF ISOBMFF `styp` or `moof` box",
+                                part.line, uri
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let passed = violations.is_empty();
     let details = JsonVal::Obj(vec![
         ("has_extm3u".to_string(), JsonVal::Bool(has_extm3u)),
@@ -1296,6 +1469,26 @@ fn parse_hls(data: &[u8]) -> ConformanceReport {
         (
             "max_extinf_duration".to_string(),
             JsonVal::Float(max_extinf_duration),
+        ),
+        ("is_ll_hls".to_string(), JsonVal::Bool(is_ll_hls)),
+        ("part_count".to_string(), JsonVal::UInt(part_count as u64)),
+        (
+            "independent_part_count".to_string(),
+            JsonVal::UInt(independent_part_count as u64),
+        ),
+        (
+            "part_target".to_string(),
+            match part_target {
+                Some(v) => JsonVal::Float(v),
+                None => JsonVal::Null,
+            },
+        ),
+        (
+            "part_hold_back".to_string(),
+            match part_hold_back {
+                Some(v) => JsonVal::Float(v),
+                None => JsonVal::Null,
+            },
         ),
         (
             "stream_inf_count".to_string(),
@@ -1467,7 +1660,10 @@ fn main() -> ExitCode {
     };
 
     let format = forced_format.unwrap_or_else(|| detect_format(path, &data));
-    let report = verify_bytes(format, &data);
+    let report = match format {
+        InputFormat::Hls => parse_hls_with_base_dir(&data, path.parent()),
+        _ => verify_bytes(format, &data),
+    };
     println!("{}", report.to_json());
 
     if report.passed {
@@ -1755,6 +1951,98 @@ seg000.m4s
             .violations
             .iter()
             .any(|v| v.contains("exceeds `#EXT-X-TARGETDURATION`")));
+    }
+
+    #[test]
+    fn test_ll_hls_validation_passes_and_catches_missing_part() {
+        let unique = format!(
+            "safarium-llhls-test-{}",
+            std::process::id()
+        );
+        let dir = env::temp_dir().join(unique);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create temp ll-hls test dir");
+
+        // Part 0: valid CMAF segment starting with `styp` followed by `moof`.
+        let mut part0 = make_box(b"styp", b"cmfc\0\0\0\0msdhmsix");
+        part0.extend_from_slice(&make_box(b"moof", &[0u8; 16]));
+        fs::write(dir.join("part_0000.m4s"), &part0).expect("write part_0000.m4s");
+
+        // Part 1: valid CMAF chunk starting directly with `moof`.
+        let part1 = make_box(b"moof", &[0u8; 16]);
+        fs::write(dir.join("part_0001.m4s"), &part1).expect("write part_0001.m4s");
+
+        // Invalid non-CMAF part for negative test.
+        fs::write(dir.join("part_bad.m4s"), b"NOT_ISOBMFF_DATA").expect("write part_bad.m4s");
+
+        let valid_ll_hls = "\
+#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:0
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=1.500
+#EXT-X-PART-INF:PART-TARGET=0.500
+#EXT-X-MAP:URI=\"init.mp4\"
+#EXT-X-PART:DURATION=0.500,URI=\"part_0000.m4s\",INDEPENDENT=YES
+#EXT-X-PART:DURATION=0.520,URI=\"part_0001.m4s\"
+#EXTINF:1.020,
+seg_0000.m4s
+#EXT-X-ENDLIST
+";
+        let ok_rep = parse_hls_with_base_dir(valid_ll_hls.as_bytes(), Some(&dir));
+        assert!(ok_rep.passed, "violations: {:?}", ok_rep.violations);
+        let ok_json = ok_rep.to_json();
+        assert!(ok_json.contains("\"is_ll_hls\":true"));
+        assert!(ok_json.contains("\"part_count\":2"));
+        assert!(ok_json.contains("\"independent_part_count\":1"));
+
+        // Missing part file must fail cleanly.
+        let missing_part_playlist = "\
+#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:2
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=1.200
+#EXT-X-PART-INF:PART-TARGET=0.500
+#EXT-X-PART:DURATION=0.500,URI=\"part_0000.m4s\",INDEPENDENT=YES
+#EXT-X-PART:DURATION=0.500,URI=\"part_missing.m4s\"
+#EXTINF:1.000,
+seg_0000.m4s
+#EXT-X-ENDLIST
+";
+        let missing_rep = parse_hls_with_base_dir(missing_part_playlist.as_bytes(), Some(&dir));
+        assert!(!missing_rep.passed);
+        assert!(missing_rep
+            .violations
+            .iter()
+            .any(|v| v.contains("missing part file") && v.contains("part_missing.m4s")));
+
+        // Invalid CMAF box, excessive part duration, and too-small PART-HOLD-BACK must all be caught.
+        let bad_ll_hls = "\
+#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:2
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=0.700
+#EXT-X-PART-INF:PART-TARGET=0.500
+#EXT-X-PART:DURATION=0.800,URI=\"part_bad.m4s\"
+#EXTINF:0.800,
+seg_0000.m4s
+";
+        let bad_rep = parse_hls_with_base_dir(bad_ll_hls.as_bytes(), Some(&dir));
+        assert!(!bad_rep.passed);
+        assert!(bad_rep
+            .violations
+            .iter()
+            .any(|v| v.contains("PART-HOLD-BACK")));
+        assert!(bad_rep
+            .violations
+            .iter()
+            .any(|v| v.contains("PART-TARGET * 1.15")));
+        assert!(bad_rep
+            .violations
+            .iter()
+            .any(|v| v.contains("styp") && v.contains("moof")));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     struct XorShift64(u64);

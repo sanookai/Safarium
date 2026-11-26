@@ -108,6 +108,33 @@ if args[:2] == ["forge", "spec-encode"]:
 if args[:2] == ["forge", "spec-ladder"]:
     print(json.dumps({"plan": {"rungs": [{"name": "720p"}, {"name": "1080p"}], "analysisReused": True}, "argv": args}))
     sys.exit(0)
+if args[:2] == ["forge", "auto-reframe"]:
+    print(json.dumps({"outputWidth": 1080, "outputHeight": 1920, "textClippingAvoidedCount": 2, "argv": args}))
+    sys.exit(0)
+if args[:2] == ["forge", "auto-edit"]:
+    print(json.dumps({"mode": "silence-cut", "segments": [{"startSeconds": 0.0, "endSeconds": 1.5}], "argv": args}))
+    sys.exit(0)
+if args[:2] == ["forge", "enhance"]:
+    if "--probe-av1" in args:
+        print(json.dumps({"av1HardwareEncodeSupported": False, "av1HardwareDecodeSupported": True, "argv": args}))
+        sys.exit(0)
+    print(json.dumps({"beforeCAMBI": 6.2, "afterCAMBI": 1.1, "usedMetalDeband": True, "argv": args}))
+    sys.exit(0)
+if args[:2] == ["forge", "ll-hls"]:
+    print(json.dumps({"packaged": {"parts": [{"uri": "part_0000.m4s"}]}, "validation": {"passed": True}, "argv": args}))
+    sys.exit(0)
+if args[:2] == ["forge", "dash"]:
+    print(json.dumps({"dash": {"manifestPath": "/tmp/manifest.mpd", "sharedWithHLS": True, "validation": {"passed": True}}, "argv": args}))
+    sys.exit(0)
+if args[:2] == ["forge", "timeline"]:
+    print(json.dumps({"action": args[2], "timeline": {"name": "Demo", "tracks": []}, "argv": args}))
+    sys.exit(0)
+if args[:2] == ["forge", "qa-defects"]:
+    print(json.dumps({"passed": True, "defectCount": 0, "defects": [], "argv": args}))
+    sys.exit(0)
+if args[:2] == ["forge", "repair-shot"]:
+    print(json.dumps({"repairedShotCount": 1, "untouchedShotsPreservedBitExact": True, "conformancePassed": True, "argv": args}))
+    sys.exit(0)
 if args[:2] == ["forge", "qa"]:
     if "fail-envelope" in args[2]:
         sys.stderr.write(json.dumps({
@@ -142,6 +169,8 @@ print(json.dumps({"present": True, "appleOnly": True, "abi": {"version": 1, "sym
         self.diff_file.write_bytes(b"fake-diff-mp4")
         self.fail_file = self.tmp / "fail-envelope.mp4"
         self.fail_file.write_bytes(b"fake-fail-mp4")
+        self.fcpxml_file = self.tmp / "demo.fcpxml"
+        self.fcpxml_file.write_text("<fcpxml version='1.11'></fcpxml>", encoding="utf-8")
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -174,6 +203,7 @@ print(json.dumps({"present": True, "appleOnly": True, "abi": {"version": 1, "sym
             self.assertEqual(len(resps), 2)
             self.assertEqual(resps[0]["result"]["protocolVersion"], expected)
             self.assertEqual(resps[0]["result"]["serverInfo"]["name"], "safarium-mcp")
+            self.assertEqual(resps[0]["result"]["serverInfo"]["version"], "3.0.0")
             self.assertEqual(resps[1]["result"], {})
 
     def test_tools_resources_prompts_discovery(self):
@@ -213,9 +243,16 @@ print(json.dumps({"present": True, "appleOnly": True, "abi": {"version": 1, "sym
                 "encoding_plan",
                 "encoding_encode",
                 "encoding_ladder",
+                "ai_reframe_vertical",
+                "ai_auto_edit",
+                "ai_enhance_video",
+                "stream_package_llhls_dash",
+                "timeline_interop",
+                "qa_detect_defects",
+                "qa_surgical_repair",
             },
         )
-        self.assertEqual(len(tools), 23)
+        self.assertEqual(len(tools), 30)
         self.assertGreaterEqual(len(resps[2]["result"]["resources"]), 5)
         self.assertEqual(resps[3]["result"]["resourceTemplates"], [])
         self.assertEqual(len(resps[4]["result"]["prompts"]), 3)
@@ -557,6 +594,126 @@ print(json.dumps({"present": True, "appleOnly": True, "abi": {"version": 1, "sym
         self.assertIn("AppleDouble", resps[6]["result"]["content"][0]["text"])
         self.assertTrue(resps[7]["result"]["isError"])
         self.assertIn("already exists", resps[7]["result"]["content"][0]["text"])
+
+    def test_wave15_18_mcp_v3_tools(self):
+        out_reframe = str(self.tmp / "reframed.mp4")
+        out_enh = str(self.tmp / "enhanced.mp4")
+        out_llhls = str(self.tmp / "llhls-out")
+        out_dash = str(self.tmp / "dash-out")
+        out_otio = str(self.tmp / "out.otio")
+        out_repaired = str(self.tmp / "repaired.mp4")
+        resps = self._rpc_session([
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "encoding_plan", "arguments": {"input_path": str(self.media_file), "max_cambi": 4.5}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "ai_reframe_vertical",
+                    "arguments": {"input_path": str(self.media_file), "output_path": out_reframe, "aspect": "9:16", "protect_thai_text": True},
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "ai_auto_edit",
+                    "arguments": {"input_path": str(self.media_file), "mode": "silence-cut", "plan_only": True},
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {"name": "ai_enhance_video", "arguments": {"probe_av1": True}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 6,
+                "method": "tools/call",
+                "params": {
+                    "name": "ai_enhance_video",
+                    "arguments": {"input_path": str(self.media_file), "output_path": out_enh, "deband": True, "upscale_width": 1920, "upscale_height": 1080},
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {
+                    "name": "stream_package_llhls_dash",
+                    "arguments": {"input_path": str(self.media_file), "output_dir": out_llhls, "mode": "ll-hls", "part_sec": 0.34},
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 8,
+                "method": "tools/call",
+                "params": {
+                    "name": "stream_package_llhls_dash",
+                    "arguments": {"input_path": str(self.media_file), "output_dir": out_dash, "mode": "dual-dash", "rungs": "360p,720p"},
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "tools/call",
+                "params": {
+                    "name": "timeline_interop",
+                    "arguments": {"action": "fcpxml-to-otio", "input_path": str(self.fcpxml_file), "output_path": out_otio},
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 10,
+                "method": "tools/call",
+                "params": {
+                    "name": "qa_detect_defects",
+                    "arguments": {"input_path": str(self.media_file), "max_cambi": 6.0, "standard": "ebu-r128"},
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 11,
+                "method": "tools/call",
+                "params": {
+                    "name": "qa_surgical_repair",
+                    "arguments": {
+                        "original_path": str(self.media_file),
+                        "output_path": out_repaired,
+                        "patches": [{"shot_index": 1, "start_sec": 1.0, "end_sec": 2.0, "replacement_path": str(self.diff_file)}],
+                    },
+                },
+            },
+        ])
+        by_id = {r["id"]: r for r in resps if "id" in r}
+        self.assertFalse(by_id[2]["result"]["isError"])
+        self.assertIn("--max-cambi", by_id[2]["result"]["structuredContent"]["argv"])
+        self.assertFalse(by_id[3]["result"]["isError"])
+        self.assertEqual(by_id[3]["result"]["structuredContent"]["textClippingAvoidedCount"], 2)
+        self.assertFalse(by_id[4]["result"]["isError"])
+        self.assertIn("--plan-only", by_id[4]["result"]["structuredContent"]["argv"])
+        self.assertFalse(by_id[5]["result"]["isError"])
+        self.assertFalse(by_id[5]["result"]["structuredContent"]["av1HardwareEncodeSupported"])
+        self.assertFalse(by_id[6]["result"]["isError"])
+        self.assertTrue(by_id[6]["result"]["structuredContent"]["usedMetalDeband"])
+        self.assertFalse(by_id[7]["result"]["isError"])
+        self.assertTrue(by_id[7]["result"]["structuredContent"]["validation"]["passed"])
+        self.assertFalse(by_id[8]["result"]["isError"])
+        self.assertTrue(by_id[8]["result"]["structuredContent"]["dash"]["sharedWithHLS"])
+        self.assertFalse(by_id[9]["result"]["isError"])
+        self.assertEqual(by_id[9]["result"]["structuredContent"]["action"], "fcpxml-to-otio")
+        self.assertFalse(by_id[10]["result"]["isError"])
+        self.assertTrue(by_id[10]["result"]["structuredContent"]["passed"])
+        self.assertFalse(by_id[11]["result"]["isError"])
+        self.assertTrue(by_id[11]["result"]["structuredContent"]["untouchedShotsPreservedBitExact"])
 
 
 if __name__ == "__main__":

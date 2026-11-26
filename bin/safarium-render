@@ -668,7 +668,15 @@ def is_readonly_forge(args):
     if clean in (["--help"], ["-h"], ["help"], ["--version"], ["-v"], ["version"]):
         return True
     sub = clean[0]
-    if sub in ("schema", "validate", "inspect", "probe", "scenarios", "probe-capabilities", "conformance", "spec-plan"):
+    if sub in ("schema", "validate", "inspect", "probe", "scenarios", "probe-capabilities", "conformance", "spec-plan", "cambi", "qa-defects", "timeline"):
+        return True
+    if sub == "broadcast-check" and "--add-timecode" not in clean[1:]:
+        return True
+    if sub == "screen-capture" and "--preflight" in clean[1:]:
+        return True
+    if sub == "enhance" and "--probe-av1" in clean[1:] and "-o" not in clean[1:] and "--output" not in clean[1:] and "--out" not in clean[1:]:
+        return True
+    if sub == "auto-edit" and "--plan-only" in clean[1:]:
         return True
     if sub == "spec-ladder" and "--plan-only" in clean[1:]:
         return True

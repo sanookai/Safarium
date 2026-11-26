@@ -12,6 +12,7 @@ public struct SPECQualityContract: Codable, Sendable, Equatable {
     public var targetVMAF: Double
     public var targetMSSSIM: Double
     public var maxDeltaE00P95: Double
+    public var maxCAMBI: Double?
     public var maxBytes: Int64?
     public var maxLatencySeconds: Double?
     public var protectText: Bool
@@ -26,6 +27,7 @@ public struct SPECQualityContract: Codable, Sendable, Equatable {
         targetVMAF: Double = 95.0,
         targetMSSSIM: Double = 0.995,
         maxDeltaE00P95: Double = 2.0,
+        maxCAMBI: Double? = nil,
         maxBytes: Int64? = nil,
         maxLatencySeconds: Double? = nil,
         protectText: Bool = true,
@@ -39,6 +41,7 @@ public struct SPECQualityContract: Codable, Sendable, Equatable {
         self.targetVMAF = targetVMAF
         self.targetMSSSIM = targetMSSSIM
         self.maxDeltaE00P95 = maxDeltaE00P95
+        self.maxCAMBI = maxCAMBI
         self.maxBytes = maxBytes
         self.maxLatencySeconds = maxLatencySeconds
         self.protectText = protectText
@@ -48,6 +51,39 @@ public struct SPECQualityContract: Codable, Sendable, Equatable {
         self.hdrPolicy = hdrPolicy
         self.intent = intent
         self.codec = codec
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case targetVMAF
+        case targetMSSSIM
+        case maxDeltaE00P95
+        case maxCAMBI
+        case maxBytes
+        case maxLatencySeconds
+        case protectText
+        case protectFaces
+        case preserveGrain
+        case bandingSensitive
+        case hdrPolicy
+        case intent
+        case codec
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.targetVMAF = try container.decode(Double.self, forKey: .targetVMAF)
+        self.targetMSSSIM = try container.decode(Double.self, forKey: .targetMSSSIM)
+        self.maxDeltaE00P95 = try container.decode(Double.self, forKey: .maxDeltaE00P95)
+        self.maxCAMBI = try container.decodeIfPresent(Double.self, forKey: .maxCAMBI)
+        self.maxBytes = try container.decodeIfPresent(Int64.self, forKey: .maxBytes)
+        self.maxLatencySeconds = try container.decodeIfPresent(Double.self, forKey: .maxLatencySeconds)
+        self.protectText = try container.decode(Bool.self, forKey: .protectText)
+        self.protectFaces = try container.decode(Bool.self, forKey: .protectFaces)
+        self.preserveGrain = try container.decode(Bool.self, forKey: .preserveGrain)
+        self.bandingSensitive = try container.decode(Bool.self, forKey: .bandingSensitive)
+        self.hdrPolicy = try container.decode(HDRMetadataPolicy.self, forKey: .hdrPolicy)
+        self.intent = try container.decode(String.self, forKey: .intent)
+        self.codec = try container.decode(VideoCodec.self, forKey: .codec)
     }
 }
 
@@ -101,13 +137,14 @@ public struct SPECPlan: Codable, Sendable, Equatable {
     }
 }
 
-/// Single closed-loop short-window proxy iteration result measuring real MS-SSIM and CIEDE2000 p95.
+/// Single closed-loop short-window proxy iteration result measuring real MS-SSIM, CIEDE2000 p95, and optional CAMBI.
 public struct SPECProxyIteration: Codable, Sendable, Equatable {
     public let iteration: Int
     public let cqf: Double
     public let bitrateBps: Int
     public let measuredMSSSIM: Double
     public let measuredDeltaE00P95: Double
+    public let measuredCAMBI: Double?
     public let encodedBytes: Int64
     public let passedContract: Bool
 
@@ -117,6 +154,7 @@ public struct SPECProxyIteration: Codable, Sendable, Equatable {
         bitrateBps: Int,
         measuredMSSSIM: Double,
         measuredDeltaE00P95: Double,
+        measuredCAMBI: Double? = nil,
         encodedBytes: Int64,
         passedContract: Bool
     ) {
@@ -125,6 +163,7 @@ public struct SPECProxyIteration: Codable, Sendable, Equatable {
         self.bitrateBps = bitrateBps
         self.measuredMSSSIM = measuredMSSSIM
         self.measuredDeltaE00P95 = measuredDeltaE00P95
+        self.measuredCAMBI = measuredCAMBI
         self.encodedBytes = encodedBytes
         self.passedContract = passedContract
     }
@@ -140,6 +179,7 @@ public struct SPECEncodeReport: Codable, Sendable, Equatable {
     public let elapsedSeconds: Double
     public let measuredMSSSIM: Double
     public let measuredDeltaE00P95: Double
+    public let measuredCAMBI: Double?
     public let contractMet: Bool
     public let explanations: [String]
 
@@ -152,6 +192,7 @@ public struct SPECEncodeReport: Codable, Sendable, Equatable {
         elapsedSeconds: Double,
         measuredMSSSIM: Double,
         measuredDeltaE00P95: Double,
+        measuredCAMBI: Double? = nil,
         contractMet: Bool,
         explanations: [String]
     ) {
@@ -163,6 +204,7 @@ public struct SPECEncodeReport: Codable, Sendable, Equatable {
         self.elapsedSeconds = elapsedSeconds
         self.measuredMSSSIM = measuredMSSSIM
         self.measuredDeltaE00P95 = measuredDeltaE00P95
+        self.measuredCAMBI = measuredCAMBI
         self.contractMet = contractMet
         self.explanations = explanations
     }
@@ -219,12 +261,13 @@ public enum SPECController {
         contract: SPECQualityContract
     ) -> SPECPlan {
         let (latencyMode, useTwoPass, strategy) = resolveStrategy(contract: contract, analysis: analysis)
+        let bandingAware: Bool = contract.bandingSensitive || (contract.maxCAMBI != nil)
         let policies = AdaptiveDenoiseController.decide(
             shots: analysis.shots,
             protectText: contract.protectText,
             protectFaces: contract.protectFaces,
             preserveGrain: contract.preserveGrain,
-            bandingSensitive: contract.bandingSensitive,
+            bandingSensitive: bandingAware,
             latencyMode: latencyMode,
             useTwoPass: useTwoPass
         )
@@ -669,6 +712,15 @@ public enum SPECController {
                 startSeconds: 0.0,
                 durationSeconds: windowRange.duration + 0.5
             )
+            var proxyCAMBI: Double? = nil
+            if contract.maxCAMBI != nil {
+                let cambiReport = try await NativePerceptualMetrics.evaluateVideo(
+                    url: proxyURL,
+                    referenceURL: nil,
+                    maxSamples: 8
+                )
+                proxyCAMBI = cambiReport.meanCAMBI
+            }
             try? FileManager.default.removeItem(at: proxyURL)
 
             let (msSSIM, deltaE00P95) = try measureWindowQuality(
@@ -677,10 +729,19 @@ public enum SPECController {
                 sampleIndices: refIndices
             )
 
-            let extrapolatedBytes = Int64((Double(encodedBytes) * (sidecar.durationSeconds / max(0.1, windowRange.duration))).rounded())
-            let bytesOK = contract.maxBytes.map { extrapolatedBytes <= $0 } ?? true
-            let qualityOK = (msSSIM >= contract.targetMSSSIM) && (deltaE00P95 <= contract.maxDeltaE00P95)
-            let passed = qualityOK && bytesOK
+            let windowScale: Double = sidecar.durationSeconds / max(0.1, windowRange.duration)
+            let extrapolatedBytes = Int64((Double(encodedBytes) * windowScale).rounded())
+            let bytesOK: Bool = contract.maxBytes.map { extrapolatedBytes <= $0 } ?? true
+            let cambiOK: Bool
+            if let maxCAMBI = contract.maxCAMBI, let measuredProxyCAMBI = proxyCAMBI {
+                cambiOK = measuredProxyCAMBI <= maxCAMBI
+            } else {
+                cambiOK = true
+            }
+            let qualityOK: Bool = (msSSIM >= contract.targetMSSSIM)
+                && (deltaE00P95 <= contract.maxDeltaE00P95)
+                && cambiOK
+            let passed: Bool = qualityOK && bytesOK
 
             proxyIterations.append(SPECProxyIteration(
                 iteration: iter,
@@ -688,11 +749,20 @@ public enum SPECController {
                 bitrateBps: currentBitrate,
                 measuredMSSSIM: msSSIM,
                 measuredDeltaE00P95: deltaE00P95,
+                measuredCAMBI: proxyCAMBI,
                 encodedBytes: encodedBytes,
                 passedContract: passed
             ))
 
-            let qualityScore = msSSIM - 0.01 * max(0.0, deltaE00P95 - contract.maxDeltaE00P95)
+            let deltaEPenalty: Double = 0.01 * max(0.0, deltaE00P95 - contract.maxDeltaE00P95)
+            let cambiExcess: Double
+            if let maxCAMBI = contract.maxCAMBI, let measuredProxyCAMBI = proxyCAMBI {
+                cambiExcess = max(0.0, measuredProxyCAMBI - maxCAMBI)
+            } else {
+                cambiExcess = 0.0
+            }
+            let cambiPenalty: Double = 0.005 * cambiExcess
+            let qualityScore: Double = msSSIM - deltaEPenalty - cambiPenalty
             if bytesOK && qualityScore > bestFallback.score {
                 bestFallback = (currentCQF, currentBitrate, qualityScore)
             }
@@ -708,8 +778,8 @@ public enum SPECController {
                 // Try stepping down slightly to optimize bitrate efficiency
                 cqfHigh = currentCQF
                 brHigh = currentBitrate
-                let nextCQF = 0.5 * (cqfLow + cqfHigh)
-                let nextBR = (brLow + brHigh) / 2
+                let nextCQF: Double = 0.5 * (cqfLow + cqfHigh)
+                let nextBR: Int = (brLow + brHigh) / 2
                 if abs(nextCQF - currentCQF) < 0.02 && abs(nextBR - currentBitrate) < 80_000 {
                     break
                 }
@@ -722,11 +792,20 @@ public enum SPECController {
                 currentCQF = 0.5 * (cqfLow + cqfHigh)
                 currentBitrate = max(200_000, (brLow + brHigh) / 2)
             } else {
-                // Quality below contract -> raise bitrate/CQF
+                // Quality below contract (or CAMBI exceeded maxCAMBI) -> raise bitrate/CQF
                 cqfLow = currentCQF
                 brLow = currentBitrate
-                currentCQF = 0.5 * (cqfLow + cqfHigh)
-                currentBitrate = max(200_000, (brLow + brHigh) / 2)
+                var nextCQF: Double = 0.5 * (cqfLow + cqfHigh)
+                var nextBR: Int = max(200_000, (brLow + brHigh) / 2)
+                if !cambiOK {
+                    let nudgedCQF: Double = min(cqfHigh, max(nextCQF, currentCQF + 0.06))
+                    let scaledBR: Double = Double(currentBitrate) * 1.25
+                    let nudgedBR: Int = min(brHigh, max(nextBR, Int(scaledBR.rounded())))
+                    nextCQF = nudgedCQF
+                    nextBR = max(200_000, nudgedBR)
+                }
+                currentCQF = nextCQF
+                currentBitrate = nextBR
             }
         }
 
@@ -778,7 +857,7 @@ public enum SPECController {
             config: transcodeConfig
         )
 
-        // 6. Final verification: decode representative frames from final output & measure real MS-SSIM + ΔE00 p95
+        // 6. Final verification: decode representative frames from final output & measure real MS-SSIM + ΔE00 p95 + CAMBI
         let finalCandFrames = try await decodeBGRAWindow(
             url: outputURL,
             startSeconds: windowRange.start,
@@ -790,12 +869,28 @@ public enum SPECController {
             sampleIndices: refIndices
         )
 
+        let finalCAMBIReport = try await NativePerceptualMetrics.evaluateVideo(
+            url: outputURL,
+            referenceURL: nil,
+            maxSamples: 8
+        )
+        let finalCAMBI: Double = finalCAMBIReport.meanCAMBI
+
         let finalBytes = transcodeReport.outputBytes
-        let finalMbps = (Double(finalBytes) * 8.0) / max(0.001, sidecar.durationSeconds) / 1_000_000.0
-        let finalBytesOK = contract.maxBytes.map { finalBytes <= $0 } ?? true
-        let contractMet = (finalMSSSIM >= contract.targetMSSSIM)
+        let finalBits: Double = Double(finalBytes) * 8.0
+        let finalDur: Double = max(0.001, sidecar.durationSeconds)
+        let finalMbps: Double = (finalBits / finalDur) / 1_000_000.0
+        let finalBytesOK: Bool = contract.maxBytes.map { finalBytes <= $0 } ?? true
+        let finalCAMBIOK: Bool
+        if let maxCAMBI = contract.maxCAMBI {
+            finalCAMBIOK = finalCAMBI <= maxCAMBI
+        } else {
+            finalCAMBIOK = true
+        }
+        let contractMet: Bool = (finalMSSSIM >= contract.targetMSSSIM)
             && (finalDeltaE00P95 <= contract.maxDeltaE00P95)
             && finalBytesOK
+            && finalCAMBIOK
 
         let elapsedSeconds = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000_000.0
 
@@ -808,13 +903,20 @@ public enum SPECController {
                 Double(chosenBitrate) / 1_000_000.0
             )
         )
+        let cambiNote: String
+        if let maxCAMBI = contract.maxCAMBI {
+            cambiNote = String(format: "CAMBI=%.3f (max<=%.3f)", finalCAMBI, maxCAMBI)
+        } else {
+            cambiNote = String(format: "CAMBI=%.3f", finalCAMBI)
+        }
         finalExplanations.append(
             String(
-                format: "Final verification: output=%lld bytes (%.2f Mbps), MS-SSIM=%.5f, ΔE00 p95=%.3f, contractMet=%@",
+                format: "Final verification: output=%lld bytes (%.2f Mbps), MS-SSIM=%.5f, ΔE00 p95=%.3f, %@, contractMet=%@",
                 finalBytes,
                 finalMbps,
                 finalMSSSIM,
                 finalDeltaE00P95,
+                cambiNote,
                 contractMet ? "true" : "false"
             )
         )
@@ -828,6 +930,7 @@ public enum SPECController {
             elapsedSeconds: elapsedSeconds,
             measuredMSSSIM: finalMSSSIM,
             measuredDeltaE00P95: finalDeltaE00P95,
+            measuredCAMBI: finalCAMBI,
             contractMet: contractMet,
             explanations: finalExplanations
         )

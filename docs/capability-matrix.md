@@ -38,22 +38,26 @@
 | **HEVC with Alpha (`muxa` / `.mov`)** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — Dual-layer alpha video in `.mov` for macOS/iOS/Safari transparent VFX |
 | **Apple ProRes (6 Tiers)** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — `422 Proxy`, `422 LT`, `422`, `422 HQ`, `4444` (with alpha), `4444 XQ` |
 | **MV-HEVC (Stereoscopic Spatial Video)** | Experimental | Experimental | Experimental | **Experimental (Plumbed, Expanded Conformance Ongoing)** — Plumbed via `spatial-encode` (`heroEye`, FOV, baseline mm, disparity) for visionOS `.mov` |
-| **Hardware AV1 Encode** | Unsupported | Unsupported | Unsupported | **Unsupported / Out of Scope** — Apple Silicon M3/M4 provides hardware AV1 *decode* only; no Apple HW AV1 encoder exists |
+| **Hardware AV1 Encode** | Unsupported | Unsupported | Unsupported | **Unsupported / Out of Scope** — Apple Silicon M1–M5 provides hardware AV1 *decode* only; no Apple HW AV1 encoder exists (`enhance --probe-av1` auto-detects future Apple Silicon hardware) |
 | **VVC (H.266) / AV2 / VP9 Encode** | Unsupported | Unsupported | Unsupported | **Unsupported / Out of Scope** — No Apple Silicon hardware encode support; never emulated with slow software codecs |
 
 ---
 
-## 3. Delivery, Containers & Streaming
+## 3. Delivery, Containers, Streaming & Broadcast
 
 | Capability | macOS 14 | macOS 15 | macOS 26+ | Status & Technical Notes |
 |---|---|---|---|---|
 | **MP4 / MOV (`+faststart` `moov`)** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — Native `AVAssetWriter` + `SafariumContainers` lossless mux/splice & metadata |
 | **VOD HLS ABR — CMAF `.fmp4`** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — 0%-FFmpeg multi-rung ABR ladder (`360p`–`2160p`), Closed-GOP aligned segments, RFC 8216 `master.m3u8` |
 | **VOD HLS ABR — MPEG-TS (`.ts`)** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — Pure-Swift 188-byte PAT/PMT/PES MPEG-TS muxer (`HLSPackager`), zero external muxers |
+| **Low-Latency HLS (LL-HLS, RFC 8216bis)** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — Wave 16 `LLHLSPackager` (`#EXT-X-PART`, `#EXT-X-PART-INF`, `#EXT-X-SERVER-CONTROL`, `#EXT-X-PRELOAD-HINT`) validated by Swift & Rust conformance |
+| **MPEG-DASH (`.mpd`, ISO/IEC 23009-1)** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — Wave 17 `DASHPackager` dual CMAF output sharing identical fMP4 segments with HLS `master.m3u8` |
+| **RTMP 1.0 / Enhanced RTMP (H.264/HEVC/AAC)** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — Wave 16 pure-Swift `RTMPPublisher` (AMF0, chunk framing, FLV tags, Enhanced RTMP `'hvc1'`) verified via loopback test server |
+| **ScreenCaptureKit Zero-Copy Capture** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — Wave 16 `ScreenCapturePipeline` (`cpuReadbacks == 0`, live GPU HUD overlay, Screen Recording permission preflight) |
+| **Pro NLE Timelines (`FCPXML 1.11` ↔ `.otio`)** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — Wave 17 bidirectional `TimelineInterop` (Final Cut Pro, DaVinci Resolve, Premiere) preserving exact rational timing, gaps, and chapter markers |
+| **Broadcast Timecode (`tmcd`) & CEA-608/708** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — Wave 17 SMPTE Drop-Frame/Non-Drop-Frame `TimecodeTrackWriter`, odd-parity CEA-608 + CEA-708 CDP (`0x9669`) packetizer |
 | **WebVTT (`.vtt`) / SRT / TX3G Subtitles** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — Native `SubtitleWriter` + HLS `EXT-X-MEDIA:TYPE=SUBTITLES` + Thai UTF-8 support |
 | **Animated Clips (`WebP`, `GIF`, `APNG`)** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — Native `AVAssetReader` + `ImageIO` (`RIFF....WEBPVP8X`, GIF, APNG) |
-| **Live / Low-Latency HLS (LL-HLS) Ingest** | Unsupported | Unsupported | Unsupported | **Unsupported / Out of Scope** — Safarium targets deterministic offline/VOD file & pipeline production |
-| **MPEG-DASH (`.mpd`)** | Unsupported | Unsupported | Unsupported | **Unsupported / Out of Scope** — VOD HLS CMAF/TS only |
 | **FairPlay / Widevine / PlayReady Multi-DRM** | Unsupported | Unsupported | Unsupported | **Unsupported / Out of Scope** — DRM license servers and encrypted CENC/CBCS packaging are out of scope |
 
 ---
@@ -85,33 +89,37 @@
 | **Opus (`opus`)** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — Native AudioToolbox `kAudioFormatOpus` |
 | **APAC (Apple Positional Audio Codec)** | Experimental | Experimental | Supported | **Experimental (Plumbed, Expanded Conformance Ongoing)** — Spatial audio mastering for visionOS / MV-HEVC workflows |
 | **LPCM (16-bit / 24-bit / 32-bit Float)** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — Broadcast & cinema uncompressed mastering |
-| **EBU R128 Loudness & True-Peak Limiter** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — Native `Accelerate` DSP (`AudioLimiter`) targeting `-14` / `-16` LUFS & `-1.0 dBTP` |
+| **ITU-R BS.1770-4 EBU R128 / ATSC A/85 Loudness** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — Native `Accelerate` DSP (`AudioLimiter` + Wave 17 `BroadcastLoudnessAuditor` integrated/short-term/momentary/LRA/true-peak audit) |
 
 ---
 
-## 6. 2D Raster & Computer Vision (`SafariumRaster`)
+## 6. 2D Raster, On-Device AI Editing & Self-Healing QA
 
 | Capability | macOS 14 | macOS 15 | macOS 26+ | Status & Technical Notes |
 |---|---|---|---|---|
 | **`libSafariumRaster.dylib` Flat C ABI** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — **418 exported C-ABI symbols** (`ctypes`-compatible drop-in `cv2` replacement for Python) |
 | **Core Image Ops, Geometry, Morphology, Filtering (Phases 1–16)** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — `Accelerate` (`vImage`/`vDSP`/`LAPACK`) + Metal GPU + `ImageIO` |
-| **Contrib & Vision Modules (Contours, Optical Flow, QR/Features, LUTs)** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — 0% OpenCV / 0% FFmpeg linkage verified via `otool -L` |
+| **Thai-Safe Smart Auto-Reframe (`16:9 → 9:16/1:1/4:5`)** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — Wave 15 `SmartReframeThaiSafe`: ANE Vision face/saliency + `["th-TH","en-US"]` OCR text protection + spring-damped panning |
+| **Auto-Highlight & Silence-Cut Engine** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — Wave 15 `AutoEditEngine`: `Accelerate` vDSP RMS dead-air cut + multi-signal highlight extraction |
+| **Metal Edge-Masked De-banding & Hardware Super-Res** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — Wave 15 `EnhancementPipeline`: MSL deband + IGN dither + `VTFrameProcessor` SR (macOS 26+) / `MetalFX` / CoreImage Lanczos |
+| **Self-Healing AI QA (`VideoDefectInspector` + `SurgicalRepairEngine`)** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — Wave 18 exact frame/shot/bbox defect detection + bit-exact Closed-GOP zero-reencode shot splice with SHA-256 verification |
 
 ---
 
-## 7. Multi-AI Orchestration & MCP (`safarium-mcp`)
+## 7. Multi-AI Orchestration & MCP (`safarium-mcp` v3)
 
 | Capability | macOS 14 | macOS 15 | macOS 26+ | Status & Technical Notes |
 |---|---|---|---|---|
-| **MCP `stdio` JSON-RPC 2.0 Server (`safarium-mcp`)** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — Zero-dependency Python 3 stdlib server; negotiates `2025-06-18`, `2025-03-26`, `2024-11-05` |
-| **18 Exposed Tools (10 Read-Only + 8 Render/Encode/QA)** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — Fast tools bypass queue; heavy jobs serialize via `SF-VIDEO-1` single-slot FIFO (`~/.safarium-render-queue`) |
+| **MCP `stdio` JSON-RPC 2.0 Server (`safarium-mcp` v3.0.0)** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — Zero-dependency Python 3 stdlib server; negotiates `2025-06-18`, `2025-03-26`, `2024-11-05` |
+| **30 Exposed Tools (15 Read-Only + 15 Render/Encode/AI/Streaming/Repair)** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — Fast tools bypass queue; heavy jobs serialize via `SF-VIDEO-1` single-slot FIFO (`~/.safarium-render-queue`) |
 | **Resources (5), Prompts (3) & Structured `E_*` Errors** | Supported | Supported | Supported | **Supported (Bitstream + Decode Verified)** — Machine-readable recovery hints and `--progress jsonl` → MCP `notifications/progress` streaming |
 
 ---
 
-## 8. Quality Verification & Offline Benchmark Oracle
+## 8. Quality Verification, Energy Telemetry & Offline Benchmark Oracle
 
 | Component | Production Linkage | Status & Scope |
 |---|---|---|
-| **Safarium Native QA (`SafariumPQ`, `verify`, `qa`)** | 100% Apple Native (`Metal`, `Accelerate`, `Vision`, `AVFoundation`) | **Supported (Bitstream + Decode Verified)** — Perceptual MS-SSIM, exact CIEDE2000 (mean/p95/saturated-edge/text-mask), ANE feature distance, Vision Thai OCR |
+| **Safarium Native QA (`SafariumPQ`, `NativeCAMBI`, `qa-defects`, `conformance`)** | 100% Apple Native (`Metal`, `Accelerate`, `Vision`, `AVFoundation`) | **Supported (Bitstream + Decode Verified)** — Perceptual MS-SSIM, exact CIEDE2000 (mean/p95/saturated-edge/text-mask), **Native CAMBI** (0% FFmpeg Netflix-style banding metric + XYB edge/ringing), ANE feature distance, Vision Thai OCR |
+| **Energy & Endurance Telemetry (`EnergyTelemetrySampler`, `thermal_soak.py`)** | 100% Apple Native (`IOKit` + `ProcessInfo` thermal state) | **Supported (Bitstream + Decode Verified)** — Measures Watts, `Joules/frame`, `FPS/Watt`, RSS stability, and supports 30–60 min sustained endurance runs |
 | **Offline Benchmark Oracle (`bench/harness/spec_bench.py`)** | Offline research script ONLY (never imported/linked by Safarium) | **Supported (Offline Research Oracle)** — Reproducible `schema_version: 2` harness pinning git/binary/input SHA-256 + macOS/chip/power/thermal state; randomized multi-trial median/p5/p95/min/max/failure_rate; `libvmaf` / `VMAF-NEG` / `PSNR` / `SSIM` / `XPSNR` + Safarium `pq` + 3D/RD Pareto frontier |

@@ -133,6 +133,94 @@ def read_pmset_therm() -> dict[str, Any]:
     }
 
 
+def classify_thermal_state(therm: dict[str, Any]) -> str:
+    """Maps `pmset -g therm` metrics to Apple thermal state labels."""
+    speed_limit = therm.get("cpu_speed_limit")
+    has_warning = bool(therm.get("thermal_warnings"))
+    if isinstance(speed_limit, int):
+        if speed_limit >= 100 and not has_warning:
+            return "nominal"
+        if speed_limit >= 80:
+            return "fair"
+        if speed_limit >= 60:
+            return "serious"
+        return "critical"
+    return "fair" if has_warning else "nominal"
+
+
+def read_battery_discharge_watts() -> float | None:
+    """Reads instantaneous battery discharge power in watts via `ioreg -rw0 -c AppleSmartBattery`.
+
+    Returns watts only when running on battery (`ExternalConnected = No`); returns None when on AC
+    power or on desktop Macs without a battery so the caller can use the CPU-time power model.
+    """
+    try:
+        proc = subprocess.run(
+            ["ioreg", "-rw0", "-c", "AppleSmartBattery"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if proc.returncode != 0 or not proc.stdout:
+            return None
+        raw = proc.stdout
+    except Exception:
+        return None
+
+    ext_m = re.search(r'"ExternalConnected"\s*=\s*(Yes|No)', raw)
+    if not ext_m or ext_m.group(1) != "No":
+        return None
+
+    volt_m = re.search(r'"Voltage"\s*=\s*(\d+)', raw)
+    amp_m = re.search(r'"InstantAmperage"\s*=\s*(-?\d+)', raw)
+    if not amp_m:
+        amp_m = re.search(r'"Amperage"\s*=\s*(-?\d+)', raw)
+    if not volt_m or not amp_m:
+        return None
+
+    voltage_mv = int(volt_m.group(1))
+    raw_amp = int(amp_m.group(1))
+    # ioreg prints negative 64-bit signed InstantAmperage as an unsigned uint64 on macOS.
+    if raw_amp >= (1 << 63):
+        raw_amp -= 1 << 64
+
+    amps_ma = abs(raw_amp)
+    if voltage_mv <= 0 or amps_ma == 0:
+        return None
+
+    watts = (voltage_mv * amps_ma) / 1_000_000.0
+    if 0.5 <= watts <= 250.0:
+        return watts
+    return None
+
+
+def parse_macos_time_l_cpu_time_s(stderr_text: str) -> float | None:
+    """Extracts user + sys CPU seconds from macOS `/usr/bin/time -l` stderr output."""
+    m = re.search(
+        r"(\d+(?:\.\d+)?)\s+real\s+(\d+(?:\.\d+)?)\s+user\s+(\d+(?:\.\d+)?)\s+sys",
+        stderr_text,
+    )
+    if m:
+        return float(m.group(2)) + float(m.group(3))
+    return None
+
+
+def estimate_power_watts(cpu_time_s: float, wall_s: float) -> tuple[float, str]:
+    """Estimates active power draw in watts via AppleSmartBattery (on battery) or CPU-time model."""
+    battery_watts = read_battery_discharge_watts()
+    if battery_watts is not None:
+        return battery_watts, "ioreg_battery"
+
+    # Apple Silicon media-engine + SoC fallback power model:
+    # ~3.5 W active VideoToolbox/SoC baseline + ~2.2 W per effective active CPU core.
+    effective_cores = max(0.0, cpu_time_s / max(1e-6, wall_s))
+    core_cap = float(os.cpu_count() or 8)
+    watts_model = 3.5 + 2.2 * min(effective_cores, core_cap)
+    watts_clamped = max(2.0, min(65.0, watts_model))
+    return watts_clamped, "cpu_time_model"
+
+
 def parse_macos_time_l_max_rss_mb(stderr_text: str) -> float | None:
     """Extracts peak RSS in MiB from macOS `/usr/bin/time -l` stderr output."""
     m = re.search(r"(\d+)\s+maximum resident set size", stderr_text)
@@ -249,6 +337,7 @@ def run_transcode_iteration(
     use_usr_time = Path("/usr/bin/time").exists()
     cmd = ["/usr/bin/time", "-l", *transcode_cmd] if use_usr_time else transcode_cmd
 
+    rusage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
     t0 = time.perf_counter()
     proc = subprocess.run(
         cmd,
@@ -257,14 +346,28 @@ def run_transcode_iteration(
         check=False,
     )
     wall_s = max(1e-6, time.perf_counter() - t0)
+    rusage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
 
     peak_rss_mb = parse_macos_time_l_max_rss_mb(proc.stderr) if use_usr_time else None
     if peak_rss_mb is None:
         # Fallback to RUSAGE_CHILDREN (bytes on macOS).
-        peak_rss_mb = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / (1024.0 * 1024.0)
+        peak_rss_mb = rusage_after.ru_maxrss / (1024.0 * 1024.0)
+
+    cpu_time_s = parse_macos_time_l_cpu_time_s(proc.stderr) if use_usr_time else None
+    if cpu_time_s is None:
+        delta_user = max(0.0, rusage_after.ru_utime - rusage_before.ru_utime)
+        delta_sys = max(0.0, rusage_after.ru_stime - rusage_before.ru_stime)
+        cpu_time_s = delta_user + delta_sys
+
+    watts_est, watts_source = estimate_power_watts(cpu_time_s, wall_s)
+    joules_est = watts_est * wall_s
 
     therm = read_pmset_therm()
+    thermal_state = classify_thermal_state(therm)
     ok = proc.returncode == 0 and output_clip.exists() and output_clip.stat().st_size > 0
+    fps_val = (frames / wall_s) if ok else 0.0
+    joules_per_frame = (joules_est / max(1, frames)) if ok else None
+    fps_per_watt = (fps_val / watts_est) if (ok and watts_est > 0.0) else 0.0
 
     output_bytes = output_clip.stat().st_size if ok else 0
     output_sha = sha256_file(output_clip) if ok else None
@@ -275,8 +378,15 @@ def run_transcode_iteration(
         "ok": ok,
         "returncode": proc.returncode,
         "wall_s": round(wall_s, 4),
-        "fps": round(frames / wall_s, 2) if ok else 0.0,
+        "cpu_time_s": round(cpu_time_s, 4),
+        "fps": round(fps_val, 2),
         "peak_rss_mb": round(peak_rss_mb, 2),
+        "watts_est": round(watts_est, 3),
+        "watts_source": watts_source,
+        "joules_est": round(joules_est, 3),
+        "joules_per_frame": round(joules_per_frame, 5) if joules_per_frame is not None else None,
+        "fps_per_watt": round(fps_per_watt, 3),
+        "thermal_state": thermal_state,
         "pmset_therm": therm,
         "output_bytes": output_bytes,
         "output_sha256": output_sha,
@@ -297,11 +407,17 @@ def percentile(sorted_values: list[float], pct: float) -> float:
     return sorted_values[lo] * (1.0 - frac) + sorted_values[hi] * frac
 
 
-def summarize_iterations(iterations: list[dict[str, Any]]) -> dict[str, Any]:
+def summarize_iterations(iterations: list[dict[str, Any]], frames_per_iter: int = 60) -> dict[str, Any]:
     ok_iters = [it for it in iterations if it.get("ok")]
     wall_vals = sorted(float(it["wall_s"]) for it in ok_iters)
     fps_vals = [float(it["fps"]) for it in ok_iters]
     rss_vals = [float(it["peak_rss_mb"]) for it in ok_iters]
+    watts_vals = [float(it["watts_est"]) for it in ok_iters if it.get("watts_est") is not None]
+    joules_vals = [float(it["joules_est"]) for it in ok_iters if it.get("joules_est") is not None]
+    thermal_states = [
+        str(it.get("thermal_state") or classify_thermal_state(it.get("pmset_therm", {})))
+        for it in iterations
+    ]
     speed_limits = [
         int(it["pmset_therm"]["cpu_speed_limit"])
         for it in ok_iters
@@ -319,6 +435,12 @@ def summarize_iterations(iterations: list[dict[str, Any]]) -> dict[str, Any]:
             fps_degradation_pct = ((first_q - last_q) / first_q) * 100.0
 
     rss_growth_mb = (rss_vals[-1] - rss_vals[0]) if len(rss_vals) >= 2 else 0.0
+    mean_fps = statistics.mean(fps_vals) if fps_vals else 0.0
+    average_watts = statistics.mean(watts_vals) if watts_vals else 0.0
+    joules_total = sum(joules_vals) if joules_vals else 0.0
+    total_frames = len(ok_iters) * max(1, frames_per_iter)
+    joules_per_frame = (joules_total / total_frames) if total_frames > 0 else 0.0
+    fps_per_watt = (mean_fps / average_watts) if average_watts > 0.0 else 0.0
 
     return {
         "iterations_total": len(iterations),
@@ -327,12 +449,17 @@ def summarize_iterations(iterations: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_wall_s": round(statistics.mean(wall_vals), 4) if wall_vals else 0.0,
         "p50_wall_s": round(percentile(wall_vals, 50.0), 4) if wall_vals else 0.0,
         "p95_wall_s": round(percentile(wall_vals, 95.0), 4) if wall_vals else 0.0,
-        "mean_fps": round(statistics.mean(fps_vals), 2) if fps_vals else 0.0,
+        "mean_fps": round(mean_fps, 2),
         "min_fps": round(min(fps_vals), 2) if fps_vals else 0.0,
         "max_fps": round(max(fps_vals), 2) if fps_vals else 0.0,
         "fps_degradation_pct": round(fps_degradation_pct, 2),
         "max_peak_rss_mb": round(max(rss_vals), 2) if rss_vals else 0.0,
         "rss_growth_mb": round(rss_growth_mb, 2),
+        "average_watts": round(average_watts, 3),
+        "joules_total": round(joules_total, 3),
+        "joules_per_frame": round(joules_per_frame, 5),
+        "fps_per_watt": round(fps_per_watt, 3),
+        "thermal_states": thermal_states,
         "min_cpu_speed_limit": min(speed_limits) if speed_limits else None,
         "unique_output_sha256_count": len(set(out_hashes)),
         "output_sha256_consistent": len(set(out_hashes)) <= 1 and len(out_hashes) == len(ok_iters),
@@ -343,7 +470,7 @@ def summarize_iterations(iterations: list[dict[str, Any]]) -> dict[str, Any]:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Safarium Wave 14A sustained thermal & energy soak harness."
+        description="Safarium Wave 14A/18C sustained thermal & energy soak harness."
     )
     parser.add_argument(
         "--duration-sec",
@@ -352,9 +479,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Total soak duration in seconds (default: 1800 for 30-min lab soak).",
     )
     parser.add_argument(
+        "--duration-min",
+        type=float,
+        default=None,
+        help="Convenience soak duration in minutes (overrides --duration-sec as duration_min * 60; e.g. 30 or 60).",
+    )
+    parser.add_argument(
         "--quick",
         action="store_true",
-        help="Quick 20-second verification soak mode (overrides --duration-sec to 20).",
+        help="Quick 20-second verification soak mode (overrides --duration-sec / --duration-min to 20s).",
     )
     parser.add_argument(
         "--safarium-bin",
@@ -404,7 +537,12 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, _handle_signal)
 
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    duration_sec = 20.0 if args.quick else max(1.0, float(args.duration_sec))
+    if args.quick:
+        duration_sec = 20.0
+    elif args.duration_min is not None:
+        duration_sec = max(1.0, float(args.duration_min) * 60.0)
+    else:
+        duration_sec = max(1.0, float(args.duration_sec))
     safarium_bin = args.safarium_bin.expanduser()
 
     if not safarium_bin.exists():
@@ -466,7 +604,8 @@ def main(argv: list[str] | None = None) -> int:
             mdat_short = (rec["mdat_sha256"] or "none")[:12]
             print(
                 f"[iter {iteration_num:04d}] ok={rec['ok']} wall={rec['wall_s']:.3f}s "
-                f"fps={rec['fps']:.1f} rss={rec['peak_rss_mb']:.1f}MB "
+                f"fps={rec['fps']:.1f} watts={rec['watts_est']:.2f}W ({rec['watts_source']}) "
+                f"rss={rec['peak_rss_mb']:.1f}MB therm={rec['thermal_state']} "
                 f"cpu_speed={speed} sha={sha_short} mdat={mdat_short}",
                 flush=True,
             )
@@ -476,7 +615,7 @@ def main(argv: list[str] | None = None) -> int:
 
         elapsed_total = time.monotonic() - soak_t0
         report = {
-            "schema_version": 1,
+            "schema_version": 2,
             "mode": "quick" if args.quick else "sustained",
             "started_at_utc": started_at,
             "finished_at_utc": utc_now_iso(),
@@ -489,6 +628,7 @@ def main(argv: list[str] | None = None) -> int:
             },
             "config": {
                 "duration_sec": duration_sec,
+                "duration_min": round(duration_sec / 60.0, 3),
                 "safarium_bin": str(safarium_bin),
                 "input_clip": str(input_clip),
                 "input_sha256": input_sha,
@@ -499,7 +639,7 @@ def main(argv: list[str] | None = None) -> int:
                 "codec": args.codec,
                 "bitrate": args.bitrate,
             },
-            "summary": summarize_iterations(iterations),
+            "summary": summarize_iterations(iterations, frames_per_iter=args.frames),
             "iterations": iterations,
         }
 

@@ -20,7 +20,7 @@ import time
 
 
 SERVER_NAME = "safarium-mcp"
-SERVER_VERSION = "2.0.0"
+SERVER_VERSION = "3.0.0"
 SUPPORTED_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 DEFAULT_NEGOTIATED_VERSION = "2025-03-26"
 
@@ -32,15 +32,15 @@ MAX_DIM = 8192
 MAX_PIXELS = 33_554_432
 
 SERVER_INSTRUCTIONS = (
-    "Safarium is a native macOS Apple Silicon HTML, 3D, 2D Raster, and Media Encoding/Rendering Engine "
-    "(0% external video/browser/CV binaries). Read-only inspection & planning tools (doctor, status, "
-    "capabilities, encoding_capabilities, encoding_conformance, encoding_plan, list_scenarios, raster_info, "
-    "forge_schema, forge_validate, probe_media, cache_stats, and encoding_ladder with plan_only=true) bypass "
-    "the queue and return immediately. Heavy encode/render/verify/QA tools (encoding_encode, encoding_ladder, "
-    "transcode_supremacy, package_hls, forge_run, html_render, verify_media, qa_inspect) automatically serialize "
+    "Safarium is a native macOS Apple Silicon HTML, 3D, 2D Raster, AI Video Editing, Broadcast Streaming, and "
+    "Self-Healing QA Engine (0% external video/browser/CV binaries). Read-only inspection & planning tools "
+    "(doctor, status, capabilities, encoding_capabilities, encoding_conformance, encoding_plan, list_scenarios, "
+    "raster_info, forge_schema, forge_validate, probe_media, cache_stats, timeline_interop, qa_detect_defects, "
+    "encoding_ladder with plan_only=true, ai_auto_edit with plan_only=true, and ai_enhance_video with probe_av1=true) "
+    "bypass the queue and return immediately. Heavy encode/render/verify/QA/repair tools automatically serialize "
     "through the per-user SF-VIDEO-1 FIFO queue. Prefer intent-level SPEC tools (encoding_capabilities -> "
-    "encoding_plan -> encoding_encode / encoding_ladder -> encoding_conformance) so agents declare perceptual "
-    "contracts instead of guessing fragile low-level codec flags."
+    "encoding_plan -> encoding_encode / encoding_ladder -> encoding_conformance) and the Self-Healing QA loop "
+    "(qa_detect_defects -> re-render only defective shot -> qa_surgical_repair) for bit-exact repairs."
 )
 
 # Active child subprocess reference for clean signal shutdown.
@@ -1133,6 +1133,7 @@ TOOLS = [
                 "target_vmaf": {"type": "number", "minimum": 50.0, "maximum": 100.0, "description": "Target perceptual VMAF score (default 95.0)."},
                 "target_ms_ssim": {"type": "number", "minimum": 0.80, "maximum": 1.0, "description": "Target MS-SSIM floor (default 0.995)."},
                 "max_deltae_p95": {"type": "number", "exclusiveMinimum": 0.0, "maximum": 20.0, "description": "Maximum allowed CIEDE2000 p95 color error (default 2.0)."},
+                "max_cambi": {"type": "number", "minimum": 0.0, "maximum": 24.0, "description": "Optional maximum allowed native CAMBI banding score (0-24, lower is cleaner)."},
                 "max_bytes": {"type": "integer", "minimum": 1024, "description": "Optional output file size cap in bytes."},
                 "max_latency_sec": {"type": "number", "exclusiveMinimum": 0.0, "maximum": 3600.0, "description": "Optional encode latency budget in seconds."},
                 "protect_text": {"type": "boolean", "description": "Protect crisp text/UI/Thai subtitles from denoise blur (default true)."},
@@ -1168,8 +1169,8 @@ TOOLS = [
         "name": "encoding_encode",
         "description": (
             "Wave 13/14 intent-level SPEC closed-loop quality-target hardware encode via the SF-VIDEO-1 FIFO queue. "
-            "Declare perceptual goals (target_vmaf, target_ms_ssim, max_deltae_p95, protect_text, preserve_grain, "
-            "power_budget); Safarium runs short-window proxy convergence measuring real MS-SSIM & CIEDE2000 p95, "
+            "Declare perceptual goals (target_vmaf, target_ms_ssim, max_deltae_p95, max_cambi, protect_text, preserve_grain, "
+            "power_budget); Safarium runs short-window proxy convergence measuring real MS-SSIM, CIEDE2000 p95, and native CAMBI, "
             "encodes with VideoToolbox + atomic staging publish, and returns verified metrics + explanations."
         ),
         "inputSchema": {
@@ -1180,6 +1181,7 @@ TOOLS = [
                 "target_vmaf": {"type": "number", "minimum": 50.0, "maximum": 100.0, "description": "Target perceptual VMAF score (default 95.0)."},
                 "target_ms_ssim": {"type": "number", "minimum": 0.80, "maximum": 1.0, "description": "Target MS-SSIM floor (default 0.995)."},
                 "max_deltae_p95": {"type": "number", "exclusiveMinimum": 0.0, "maximum": 20.0, "description": "Maximum allowed CIEDE2000 p95 color error (default 2.0)."},
+                "max_cambi": {"type": "number", "minimum": 0.0, "maximum": 24.0, "description": "Optional maximum allowed native CAMBI banding score (0-24, lower is cleaner)."},
                 "max_bytes": {"type": "integer", "minimum": 1024, "description": "Optional output file size cap in bytes."},
                 "max_latency_sec": {"type": "number", "exclusiveMinimum": 0.0, "maximum": 3600.0, "description": "Optional encode latency budget in seconds."},
                 "protect_text": {"type": "boolean", "description": "Protect crisp text/UI/Thai subtitles from denoise blur (default true)."},
@@ -1260,6 +1262,212 @@ TOOLS = [
             "idempotentHint": False,
             "openWorldHint": False,
         },
+    },
+    {
+        "name": "ai_reframe_vertical",
+        "description": (
+            "Wave 15 on-device ANE/Vision Thai-safe smart auto-reframe (16:9 -> 9:16, 1:1, or 4:5). Tracks faces, "
+            "attention saliency, and Thai+English subtitle/title bounding boxes simultaneously, applying spring-damped "
+            "velocity-capped panning so text and speakers are never clipped at the crop edges."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "input_path": {"type": "string", "description": "Path to source landscape video file."},
+                "output_path": {"type": "string", "description": "Destination reframed video path (.mp4 or .mov)."},
+                "aspect": {"type": "string", "enum": ["9:16", "1:1", "4:5"], "description": "Target output aspect ratio (default '9:16')."},
+                "width": {"type": "integer", "minimum": 128, "maximum": MAX_DIM, "description": "Optional explicit output width in pixels."},
+                "height": {"type": "integer", "minimum": 128, "maximum": MAX_DIM, "description": "Optional explicit output height in pixels."},
+                "protect_thai_text": {"type": "boolean", "description": "Guard detected Thai/English text boxes from crop-edge clipping (default true)."},
+                "protect_faces": {"type": "boolean", "description": "Prioritize detected human faces inside the crop frame (default true)."},
+                "safe_margin": {"type": "number", "minimum": 0.0, "maximum": 0.30, "description": "Normalized edge safe margin ratio (default 0.06)."},
+                "smoothing": {"type": "number", "minimum": 0.02, "maximum": 1.0, "description": "Spring/EMA smoothing factor (default 0.18)."},
+                "max_pan": {"type": "number", "minimum": 10.0, "maximum": 4000.0, "description": "Maximum camera pan velocity in pixels/sec (default 360)."},
+                "bitrate": {"type": "integer", "minimum": 100000, "maximum": 200000000, "description": "Optional output bitrate in bps."},
+                "overwrite": {"type": "boolean", "description": "Allow overwriting existing output_path. Default false."},
+                "timeout_sec": {"type": "integer", "minimum": MIN_TIMEOUT_SEC, "maximum": MAX_TIMEOUT_SEC, "description": "Maximum timeout in seconds (default 600)."},
+            },
+            "required": ["input_path", "output_path"],
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+    },
+    {
+        "name": "ai_auto_edit",
+        "description": (
+            "Wave 15 on-device Auto-Highlight & Silence-Cut engine (0% FFmpeg). In 'silence-cut' mode, detects dead-air "
+            "gaps via Accelerate vDSP RMS energy and removes them with smooth audio crossfades. In 'highlights' mode, "
+            "ranks peak audio/motion/visual windows into short-form clips. Set plan_only=true to return cut segments "
+            "immediately without blocking the FIFO queue."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "input_path": {"type": "string", "description": "Path to source video file."},
+                "output_path": {"type": "string", "description": "Destination edited video path (required unless plan_only=true)."},
+                "mode": {"type": "string", "enum": ["silence-cut", "highlights"], "description": "Auto-edit mode (default 'silence-cut')."},
+                "plan_only": {"type": "boolean", "description": "Return keep/highlight segment plan without rendering (FIFO bypass). Default false."},
+                "threshold_db": {"type": "number", "minimum": -90.0, "maximum": -5.0, "description": "Silence threshold in dBFS for silence-cut (default -38)."},
+                "min_silence": {"type": "number", "minimum": 0.1, "maximum": 30.0, "description": "Minimum silence gap duration in seconds (default 0.65)."},
+                "padding": {"type": "number", "minimum": 0.0, "maximum": 2.0, "description": "Keep-segment speech padding in seconds (default 0.12)."},
+                "clip_sec": {"type": "number", "minimum": 1.0, "maximum": 180.0, "description": "Target highlight clip length in seconds (default 15)."},
+                "max_clips": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Maximum number of highlight segments (default 3)."},
+                "bitrate": {"type": "integer", "minimum": 100000, "maximum": 200000000, "description": "Optional output bitrate in bps."},
+                "overwrite": {"type": "boolean", "description": "Allow overwriting existing output_path. Default false."},
+                "timeout_sec": {"type": "integer", "minimum": MIN_TIMEOUT_SEC, "maximum": MAX_TIMEOUT_SEC, "description": "Maximum timeout in seconds (default 600)."},
+            },
+            "required": ["input_path"],
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+    },
+    {
+        "name": "ai_enhance_video",
+        "description": (
+            "Wave 15 Metal GPU edge-masked de-banding + hardware super-resolution upscaling pipeline before VideoToolbox "
+            "encode, returning before/after Native CAMBI banding reduction metrics. Pass probe_av1=true without input_path "
+            "for a read-only honest hardware AV1 encoder readiness check on the current Apple Silicon chip."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "input_path": {"type": "string", "description": "Path to source video file (omit if probe_av1=true)."},
+                "output_path": {"type": "string", "description": "Destination enhanced video path (.mp4 or .mov)."},
+                "probe_av1": {"type": "boolean", "description": "Probe live hardware AV1 encode readiness (read-only FIFO bypass). Default false."},
+                "deband": {"type": "boolean", "description": "Enable Metal edge-masked multi-tap de-banding + dither (default true)."},
+                "strength": {"type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Deband blend strength 0..1 (default 0.65)."},
+                "threshold": {"type": "number", "minimum": 0.001, "maximum": 0.1, "description": "Band-step threshold (default 0.015)."},
+                "dither": {"type": "number", "minimum": 0.0, "maximum": 4.0, "description": "Triangular dither amplitude in LSB (default 1.0)."},
+                "upscale_width": {"type": "integer", "minimum": 128, "maximum": MAX_DIM, "description": "Optional target upscale width."},
+                "upscale_height": {"type": "integer", "minimum": 128, "maximum": MAX_DIM, "description": "Optional target upscale height."},
+                "codec": {
+                    "type": "string",
+                    "enum": ["h264", "hevc", "hevc-10bit", "hevc-422-10", "hevc-444-10", "prores422", "prores422hq", "prores4444"],
+                    "description": "Output codec (default 'hevc-10bit').",
+                },
+                "bitrate": {"type": "integer", "minimum": 100000, "maximum": 200000000, "description": "Optional output bitrate in bps."},
+                "overwrite": {"type": "boolean", "description": "Allow overwriting existing output_path. Default false."},
+                "timeout_sec": {"type": "integer", "minimum": MIN_TIMEOUT_SEC, "maximum": MAX_TIMEOUT_SEC, "description": "Maximum timeout in seconds (default 600)."},
+            },
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+    },
+    {
+        "name": "stream_package_llhls_dash",
+        "description": (
+            "Wave 16/17 native streaming packager (0% FFmpeg). In 'll-hls' mode, generates RFC 8216bis Low-Latency HLS "
+            "with #EXT-X-PART partial CMAF segments, #EXT-X-SERVER-CONTROL, and #EXT-X-PRELOAD-HINT + validation. "
+            "In 'dual-dash' mode, packages unified CMAF fMP4 segments shared by both HLS master.m3u8 and ISO/IEC 23009-1 "
+            "MPEG-DASH manifest.mpd with automatic manifest/file validation."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "input_path": {"type": "string", "description": "Path to source video file."},
+                "output_dir": {"type": "string", "description": "Destination directory for streaming playlists/manifests and CMAF segments."},
+                "mode": {"type": "string", "enum": ["ll-hls", "dual-dash"], "description": "Packaging mode ('ll-hls' or 'dual-dash', default 'll-hls')."},
+                "codec": {"type": "string", "enum": ["h264", "hevc", "hevc-10bit"], "description": "Video codec (default 'hevc-10bit')."},
+                "part_sec": {"type": "number", "minimum": 0.1, "maximum": 2.0, "description": "LL-HLS partial segment duration in seconds (default 0.34)."},
+                "segment_sec": {"type": "number", "minimum": 0.5, "maximum": 30.0, "description": "Full CMAF segment duration in seconds (default 2.0 for ll-hls, 4.0 for dual-dash)."},
+                "rungs": {"type": "string", "description": "Comma-separated rung labels for dual-dash (e.g. '360p,720p,1080p')."},
+                "bitrate": {"type": "integer", "minimum": 100000, "maximum": 100000000, "description": "Target bitrate in bps for ll-hls (default 3500000)."},
+                "strict": {"type": "boolean", "description": "Return error if RFC 8216bis / DASH validation fails. Default false."},
+                "timeout_sec": {"type": "integer", "minimum": MIN_TIMEOUT_SEC, "maximum": MAX_TIMEOUT_SEC, "description": "Maximum timeout in seconds (default 600)."},
+            },
+            "required": ["input_path", "output_dir"],
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+    },
+    {
+        "name": "timeline_interop",
+        "description": (
+            "Wave 17 bidirectional pro-NLE timeline exchange (non-blocking FIFO bypass). Converts losslessly between "
+            "Apple Final Cut Pro FCPXML 1.11 (.fcpxml) and OpenTimelineIO (.otio) for DaVinci Resolve / Premiere / "
+            "Final Cut Pro, or inspects tracks, rational clip timings, gaps, and chapter markers."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["fcpxml-to-otio", "otio-to-fcpxml", "inspect"],
+                    "description": "Timeline conversion or inspection action.",
+                },
+                "input_path": {"type": "string", "description": "Path to input .fcpxml or .otio file."},
+                "output_path": {"type": "string", "description": "Optional output path for converted .otio or .fcpxml file."},
+                "overwrite": {"type": "boolean", "description": "Allow overwriting existing output_path. Default false."},
+                "timeout_sec": {"type": "integer", "minimum": MIN_TIMEOUT_SEC, "maximum": MAX_TIMEOUT_SEC, "description": "Maximum timeout in seconds (default 60)."},
+            },
+            "required": ["action", "input_path"],
+            "additionalProperties": False,
+        },
+        "annotations": READONLY_ANNOTATIONS,
+    },
+    {
+        "name": "qa_detect_defects",
+        "description": (
+            "Wave 18 Self-Healing QA defect detector (non-blocking FIFO bypass). Scans a rendered video natively for "
+            "black frames, frozen-frame runs, Native CAMBI banding spikes, Thai/English text edge-clipping, chroma shifts, "
+            "and EBU R128 / ATSC A/85 loudness/clipping/dead-air issues, returning exact frame ranges, bounding boxes, "
+            "and actionable suggestedFix instructions for surgical repair."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "input_path": {"type": "string", "description": "Path to rendered video to inspect."},
+                "max_cambi": {"type": "number", "minimum": 0.0, "maximum": 24.0, "description": "Maximum allowed CAMBI banding score before flagging (default 8.0)."},
+                "max_frames": {"type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum frames to scan (default 240)."},
+                "check_audio": {"type": "boolean", "description": "Run EBU R128 / ATSC A/85 broadcast loudness & clipping audit (default true)."},
+                "check_text_clipping": {"type": "boolean", "description": "Run Vision Thai/English text edge-clipping detection (default true)."},
+                "standard": {"type": "string", "enum": ["streaming", "ebu-r128", "atsc-a85"], "description": "Broadcast loudness standard (default 'streaming')."},
+                "strict": {"type": "boolean", "description": "Return error status if any defect is detected. Default false."},
+                "timeout_sec": {"type": "integer", "minimum": MIN_TIMEOUT_SEC, "maximum": MAX_TIMEOUT_SEC, "description": "Maximum timeout in seconds (default 180)."},
+            },
+            "required": ["input_path"],
+            "additionalProperties": False,
+        },
+        "annotations": READONLY_ANNOTATIONS,
+    },
+    {
+        "name": "qa_surgical_repair",
+        "description": (
+            "Wave 18 Self-Healing bit-exact Closed-GOP surgical shot repair via the SF-VIDEO-1 FIFO queue. Splices "
+            "re-rendered replacement shot(s) into the original video WITHOUT re-encoding untouched shots, verifies "
+            "SHA-256 bit-exact preservation of untouched packets, publishes atomically, and optionally runs "
+            "BitstreamConformance + VideoDefectInspector re-verification."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "original_path": {"type": "string", "description": "Path to original rendered video."},
+                "output_path": {"type": "string", "description": "Destination path for surgically repaired video (published atomically)."},
+                "patches": {
+                    "type": "array",
+                    "minItems": 1,
+                    "description": "List of defective shot intervals to replace with bit-exact Closed-GOP splice.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "shot_index": {"type": "integer", "minimum": 0, "description": "Zero-based shot index being repaired."},
+                            "start_sec": {"type": "number", "minimum": 0.0, "description": "Start timestamp in seconds of the defective interval."},
+                            "end_sec": {"type": "number", "exclusiveMinimum": 0.0, "description": "End timestamp in seconds of the defective interval."},
+                            "replacement_path": {"type": "string", "description": "Path to newly rendered replacement shot video."},
+                        },
+                        "required": ["shot_index", "start_sec", "end_sec", "replacement_path"],
+                        "additionalProperties": False,
+                    },
+                },
+                "verify_conformance": {"type": "boolean", "description": "Run BitstreamConformance validator on repaired output (default true)."},
+                "verify_defects": {"type": "boolean", "description": "Re-run VideoDefectInspector on repaired output (default true)."},
+                "overwrite": {"type": "boolean", "description": "Allow overwriting existing output_path. Default false."},
+                "timeout_sec": {"type": "integer", "minimum": MIN_TIMEOUT_SEC, "maximum": MAX_TIMEOUT_SEC, "description": "Maximum timeout in seconds (default 300)."},
+            },
+            "required": ["original_path", "output_path", "patches"],
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
     },
 ]
 
@@ -1844,6 +2052,8 @@ def _handle_tool_call(name, arguments, *, progress_token=None, negotiated_versio
                 argv.extend(["--target-ms-ssim", str(_validate_number(arguments["target_ms_ssim"], "target_ms_ssim", lo=0.80, hi=1.0))])
             if arguments.get("max_deltae_p95") is not None:
                 argv.extend(["--max-deltae-p95", str(_validate_number(arguments["max_deltae_p95"], "max_deltae_p95", exclusive_lo=0.0, hi=20.0))])
+            if arguments.get("max_cambi") is not None:
+                argv.extend(["--max-cambi", str(_validate_number(arguments["max_cambi"], "max_cambi", lo=0.0, hi=24.0))])
             if arguments.get("max_bytes") is not None:
                 argv.extend(["--max-bytes", str(_validate_int(arguments["max_bytes"], "max_bytes", lo=1024))])
             if arguments.get("max_latency_sec") is not None:
@@ -1928,6 +2138,207 @@ def _handle_tool_call(name, arguments, *, progress_token=None, negotiated_versio
             if arguments.get("load_sidecar_path") is not None:
                 lp = _validate_path(arguments["load_sidecar_path"], "load_sidecar_path", must_exist=True)
                 argv.extend(["--load-sidecar", lp])
+            exe = _require_render_bin()
+            res = _run_subprocess(exe, argv, timeout_sec=timeout_sec)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "ai_reframe_vertical":
+            in_path = _validate_path(arguments.get("input_path"), "input_path", must_exist=True)
+            overwrite = _validate_bool(arguments.get("overwrite", False), "overwrite")
+            out_path = _validate_path(
+                arguments.get("output_path"), "output_path", must_not_exist=not overwrite, parent_must_exist=True
+            )
+            timeout_sec = _validate_timeout(arguments, 600)
+            argv = ["forge", "auto-reframe", in_path, "-o", out_path, "--json-errors"]
+            if overwrite:
+                argv.append("--overwrite")
+            if arguments.get("aspect") is not None:
+                argv.extend(["--aspect", _validate_enum(arguments["aspect"], "aspect", {"9:16", "1:1", "4:5"})])
+            if arguments.get("width") is not None:
+                argv.extend(["--width", str(_validate_int(arguments["width"], "width", lo=128, hi=MAX_DIM))])
+            if arguments.get("height") is not None:
+                argv.extend(["--height", str(_validate_int(arguments["height"], "height", lo=128, hi=MAX_DIM))])
+            if arguments.get("protect_thai_text") is not None:
+                argv.append("--protect-thai" if _validate_bool(arguments["protect_thai_text"], "protect_thai_text") else "--no-protect-thai")
+            if arguments.get("protect_faces") is not None:
+                argv.append("--protect-faces" if _validate_bool(arguments["protect_faces"], "protect_faces") else "--no-protect-faces")
+            if arguments.get("safe_margin") is not None:
+                argv.extend(["--safe-margin", str(_validate_number(arguments["safe_margin"], "safe_margin", lo=0.0, hi=0.30))])
+            if arguments.get("smoothing") is not None:
+                argv.extend(["--smoothing", str(_validate_number(arguments["smoothing"], "smoothing", lo=0.02, hi=1.0))])
+            if arguments.get("max_pan") is not None:
+                argv.extend(["--max-pan", str(_validate_number(arguments["max_pan"], "max_pan", lo=10.0, hi=4000.0))])
+            if arguments.get("bitrate") is not None:
+                argv.extend(["--bitrate", str(_validate_int(arguments["bitrate"], "bitrate", lo=100000, hi=200000000))])
+            exe = _require_render_bin()
+            res = _run_subprocess(exe, argv, timeout_sec=timeout_sec, progress_token=progress_token)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "ai_auto_edit":
+            in_path = _validate_path(arguments.get("input_path"), "input_path", must_exist=True)
+            plan_only = _validate_bool(arguments.get("plan_only", False), "plan_only")
+            mode = _validate_enum(arguments.get("mode", "silence-cut"), "mode", {"silence-cut", "highlights"})
+            timeout_sec = _validate_timeout(arguments, 180 if plan_only else 600)
+            argv = ["forge", "auto-edit", in_path, "--mode", mode, "--json-errors"]
+            if plan_only:
+                argv.append("--plan-only")
+            else:
+                overwrite = _validate_bool(arguments.get("overwrite", False), "overwrite")
+                out_path = _validate_path(
+                    arguments.get("output_path"), "output_path", must_not_exist=not overwrite, parent_must_exist=True
+                )
+                argv.extend(["-o", out_path])
+                if overwrite:
+                    argv.append("--overwrite")
+            if arguments.get("threshold_db") is not None:
+                argv.extend(["--threshold-db", str(_validate_number(arguments["threshold_db"], "threshold_db", lo=-90.0, hi=-5.0))])
+            if arguments.get("min_silence") is not None:
+                argv.extend(["--min-silence", str(_validate_number(arguments["min_silence"], "min_silence", lo=0.1, hi=30.0))])
+            if arguments.get("padding") is not None:
+                argv.extend(["--padding", str(_validate_number(arguments["padding"], "padding", lo=0.0, hi=2.0))])
+            if arguments.get("clip_sec") is not None:
+                argv.extend(["--clip-sec", str(_validate_number(arguments["clip_sec"], "clip_sec", lo=1.0, hi=180.0))])
+            if arguments.get("max_clips") is not None:
+                argv.extend(["--max-clips", str(_validate_int(arguments["max_clips"], "max_clips", lo=1, hi=20))])
+            if arguments.get("bitrate") is not None:
+                argv.extend(["--bitrate", str(_validate_int(arguments["bitrate"], "bitrate", lo=100000, hi=200000000))])
+            exe = _require_render_bin()
+            res = _run_subprocess(exe, argv, timeout_sec=timeout_sec)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "ai_enhance_video":
+            probe_av1 = _validate_bool(arguments.get("probe_av1", False), "probe_av1")
+            timeout_sec = _validate_timeout(arguments, 60 if probe_av1 and not arguments.get("input_path") else 600)
+            if probe_av1 and not arguments.get("input_path"):
+                argv = ["forge", "enhance", "--probe-av1", "--json-errors"]
+                exe = _require_render_bin()
+                res = _run_subprocess(exe, argv, timeout_sec=timeout_sec)
+                return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+            in_path = _validate_path(arguments.get("input_path"), "input_path", must_exist=True)
+            overwrite = _validate_bool(arguments.get("overwrite", False), "overwrite")
+            out_path = _validate_path(
+                arguments.get("output_path"), "output_path", must_not_exist=not overwrite, parent_must_exist=True
+            )
+            argv = ["forge", "enhance", in_path, "-o", out_path, "--json-errors"]
+            if overwrite:
+                argv.append("--overwrite")
+            if arguments.get("deband") is not None:
+                argv.append("--deband" if _validate_bool(arguments["deband"], "deband") else "--no-deband")
+            if arguments.get("strength") is not None:
+                argv.extend(["--strength", str(_validate_number(arguments["strength"], "strength", lo=0.0, hi=1.0))])
+            if arguments.get("threshold") is not None:
+                argv.extend(["--threshold", str(_validate_number(arguments["threshold"], "threshold", lo=0.001, hi=0.1))])
+            if arguments.get("dither") is not None:
+                argv.extend(["--dither", str(_validate_number(arguments["dither"], "dither", lo=0.0, hi=4.0))])
+            if arguments.get("upscale_width") is not None:
+                argv.extend(["--upscale-width", str(_validate_int(arguments["upscale_width"], "upscale_width", lo=128, hi=MAX_DIM))])
+            if arguments.get("upscale_height") is not None:
+                argv.extend(["--upscale-height", str(_validate_int(arguments["upscale_height"], "upscale_height", lo=128, hi=MAX_DIM))])
+            if arguments.get("codec") is not None:
+                codec = _validate_enum(
+                    arguments["codec"],
+                    "codec",
+                    {"h264", "hevc", "hevc-10bit", "hevc-422-10", "hevc-444-10", "prores422", "prores422hq", "prores4444"},
+                )
+                argv.extend(["--codec", codec])
+            if arguments.get("bitrate") is not None:
+                argv.extend(["--bitrate", str(_validate_int(arguments["bitrate"], "bitrate", lo=100000, hi=200000000))])
+            exe = _require_render_bin()
+            res = _run_subprocess(exe, argv, timeout_sec=timeout_sec, progress_token=progress_token)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "stream_package_llhls_dash":
+            in_path = _validate_path(arguments.get("input_path"), "input_path", must_exist=True)
+            out_dir = _validate_path(arguments.get("output_dir"), "output_dir", parent_must_exist=True)
+            mode = _validate_enum(arguments.get("mode", "ll-hls"), "mode", {"ll-hls", "dual-dash"})
+            timeout_sec = _validate_timeout(arguments, 600)
+            subcmd = "ll-hls" if mode == "ll-hls" else "dash"
+            argv = ["forge", subcmd, in_path, "-o", out_dir, "--json-errors"]
+            if arguments.get("codec") is not None:
+                argv.extend(["--codec", _validate_enum(arguments["codec"], "codec", {"h264", "hevc", "hevc-10bit"})])
+            if mode == "ll-hls":
+                if arguments.get("part_sec") is not None:
+                    argv.extend(["--part-sec", str(_validate_number(arguments["part_sec"], "part_sec", lo=0.1, hi=2.0))])
+                if arguments.get("segment_sec") is not None:
+                    argv.extend(["--segment-sec", str(_validate_number(arguments["segment_sec"], "segment_sec", lo=0.5, hi=30.0))])
+                if arguments.get("bitrate") is not None:
+                    argv.extend(["--bitrate", str(_validate_int(arguments["bitrate"], "bitrate", lo=100000, hi=100000000))])
+            else:
+                if arguments.get("segment_sec") is not None:
+                    argv.extend(["--segment-sec", str(_validate_number(arguments["segment_sec"], "segment_sec", lo=0.5, hi=30.0))])
+                if arguments.get("rungs") is not None:
+                    rungs_s = arguments["rungs"]
+                    if not isinstance(rungs_s, str) or not rungs_s.strip():
+                        raise ValueError("'rungs' must be a non-empty comma-separated string")
+                    argv.extend(["--rungs", rungs_s.strip()])
+            if _validate_bool(arguments.get("strict", False), "strict"):
+                argv.append("--strict")
+            exe = _require_render_bin()
+            res = _run_subprocess(exe, argv, timeout_sec=timeout_sec)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "timeline_interop":
+            action = _validate_enum(arguments.get("action"), "action", {"fcpxml-to-otio", "otio-to-fcpxml", "inspect"})
+            in_path = _validate_path(arguments.get("input_path"), "input_path", must_exist=True)
+            timeout_sec = _validate_timeout(arguments, 60)
+            argv = ["forge", "timeline", action, in_path, "--json-errors"]
+            if arguments.get("output_path") is not None:
+                overwrite = _validate_bool(arguments.get("overwrite", False), "overwrite")
+                out_path = _validate_path(
+                    arguments["output_path"], "output_path", must_not_exist=not overwrite, parent_must_exist=True
+                )
+                argv.extend(["-o", out_path])
+                if overwrite:
+                    argv.append("--overwrite")
+            exe = _require_render_bin()
+            res = _run_subprocess(exe, argv, timeout_sec=timeout_sec)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "qa_detect_defects":
+            in_path = _validate_path(arguments.get("input_path"), "input_path", must_exist=True)
+            timeout_sec = _validate_timeout(arguments, 180)
+            argv = ["forge", "qa-defects", in_path, "--json-errors"]
+            if arguments.get("max_cambi") is not None:
+                argv.extend(["--max-cambi", str(_validate_number(arguments["max_cambi"], "max_cambi", lo=0.0, hi=24.0))])
+            if arguments.get("max_frames") is not None:
+                argv.extend(["--max-frames", str(_validate_int(arguments["max_frames"], "max_frames", lo=1, hi=5000))])
+            if arguments.get("check_audio") is not None and not _validate_bool(arguments["check_audio"], "check_audio"):
+                argv.append("--no-audio")
+            if arguments.get("check_text_clipping") is not None and not _validate_bool(arguments["check_text_clipping"], "check_text_clipping"):
+                argv.append("--no-text-check")
+            if arguments.get("standard") is not None:
+                argv.extend(["--standard", _validate_enum(arguments["standard"], "standard", {"streaming", "ebu-r128", "atsc-a85"})])
+            if _validate_bool(arguments.get("strict", False), "strict"):
+                argv.append("--strict")
+            exe = _require_render_bin()
+            res = _run_subprocess(exe, argv, timeout_sec=timeout_sec)
+            return _format_subprocess_result(name, res, negotiated_version=negotiated_version)
+
+        if name == "qa_surgical_repair":
+            orig_path = _validate_path(arguments.get("original_path"), "original_path", must_exist=True)
+            overwrite = _validate_bool(arguments.get("overwrite", False), "overwrite")
+            out_path = _validate_path(
+                arguments.get("output_path"), "output_path", must_not_exist=not overwrite, parent_must_exist=True
+            )
+            patches = arguments.get("patches")
+            if not isinstance(patches, list) or not patches:
+                raise ValueError("'patches' must be a non-empty array of shot patch objects")
+            timeout_sec = _validate_timeout(arguments, 300)
+            argv = ["forge", "repair-shot", orig_path, "-o", out_path, "--json-errors"]
+            if overwrite:
+                argv.append("--overwrite")
+            for idx, p in enumerate(patches):
+                if not isinstance(p, dict):
+                    raise ValueError(f"'patches[{idx}]' must be an object")
+                shot_idx = _validate_int(p.get("shot_index"), f"patches[{idx}].shot_index", lo=0)
+                start_sec = _validate_number(p.get("start_sec"), f"patches[{idx}].start_sec", lo=0.0)
+                end_sec = _validate_number(p.get("end_sec"), f"patches[{idx}].end_sec", exclusive_lo=start_sec)
+                repl_path = _validate_path(p.get("replacement_path"), f"patches[{idx}].replacement_path", must_exist=True)
+                argv.extend(["--patch", f"{shot_idx}:{start_sec}:{end_sec}:{repl_path}"])
+            if arguments.get("verify_conformance") is not None and not _validate_bool(arguments["verify_conformance"], "verify_conformance"):
+                argv.append("--no-conformance")
+            if arguments.get("verify_defects") is not None and not _validate_bool(arguments["verify_defects"], "verify_defects"):
+                argv.append("--no-verify-defects")
             exe = _require_render_bin()
             res = _run_subprocess(exe, argv, timeout_sec=timeout_sec)
             return _format_subprocess_result(name, res, negotiated_version=negotiated_version)

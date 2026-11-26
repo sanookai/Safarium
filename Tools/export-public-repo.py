@@ -378,6 +378,10 @@ def _collect_export_pairs(source: Path) -> tuple[list[tuple[Path, str]], list[st
         source / "bench/experiments/2026-11-26-wave11-14-spec/soak_quick.json",
         "bench/experiments/2026-11-26-wave11-14-spec/soak_quick.json",
     )
+    add_file(
+        source / "bench/experiments/2026-11-26-wave15-18-nextgen/soak_energy.json",
+        "bench/experiments/2026-11-26-wave15-18-nextgen/soak_energy.json",
+    )
 
     return pairs, sorted(set(excluded))
 
